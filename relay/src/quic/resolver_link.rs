@@ -9,9 +9,12 @@ use common::info;
 use common::proto::pack::Unpacker;
 use common::proto::relay_res::LifetimeP;
 use common::proto::relay_res::ResolverPacket;
+use common::proto::relay_res::relay_hello_signing_input;
 use common::quic::CloseReason;
 use common::quic::id::NodeId;
+use common::types::bytes::Bytes;
 use common::warn;
+use ed25519_dalek::Signer;
 use quinn::ClientConfig;
 use quinn::Connection;
 use quinn::TransportConfig;
@@ -138,10 +141,21 @@ impl ResolverLink {
     async fn hello(&self, conn: &Connection) -> Result<()> {
         let mut send = conn.open_uni().await?;
 
+        let relay_id = self.id();
+        let pubkey = self.relay.keys.public.to_bytes();
+        let timestamp = systime().as_millis();
+
+        // Sign the canonical transcript so the resolver can authenticate this
+        // relay before admitting it to the registry.
+        let msg = relay_hello_signing_input(&relay_id, &pubkey, timestamp);
+        let sig = self.relay.keys.signing.sign(&msg).to_bytes();
+
         debug!("sending to resolver({})", conn.remote_address());
         ResolverPacket::Lifetime(LifetimeP::RelayHello {
-            relay_id: self.id(),
-            timestamp: systime().as_millis(),
+            relay_id,
+            pubkey: Bytes(pubkey),
+            timestamp,
+            sig: Bytes(sig),
         })
         .send(&mut send)
         .await?;

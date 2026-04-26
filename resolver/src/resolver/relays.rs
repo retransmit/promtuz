@@ -4,7 +4,7 @@ use common::proto::RelayId;
 use common::proto::client_res::RelayDescriptor;
 use quinn::Connection;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RelayEntry {
     pub id: RelayId,
     pub conn: Arc<Connection>,

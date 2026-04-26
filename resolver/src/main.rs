@@ -8,10 +8,10 @@ mod resolver;
 mod util;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use common::quic::CloseReason;
-use tokio::sync::Mutex;
 
 use crate::quic::acceptor::Acceptor;
 use crate::resolver::Resolver;
@@ -21,8 +21,8 @@ use crate::util::config::AppConfig;
 async fn main() -> Result<()> {
     let cfg = AppConfig::load(true);
 
-    let resolver = Arc::new(Mutex::new(Resolver::new(cfg)));
-    let acceptor = Acceptor::new(resolver.lock().await.endpoint.clone());
+    let resolver = Arc::new(Resolver::new(cfg));
+    let acceptor = Acceptor::new(resolver.endpoint.clone());
 
     let acceptor_handle = tokio::spawn({
         let resolver = resolver.clone();
@@ -34,8 +34,21 @@ async fn main() -> Result<()> {
         _ = tokio::signal::ctrl_c() => {
             println!();
 
-            let r = resolver.lock().await;
-            r.endpoint.close(CloseReason::ShuttingDown.code(), b"ShuttingDown");
+            // Kick registered relays *before* tearing down the endpoint so
+            // they observe a clean close reason rather than a transport
+            // timeout.
+            resolver.close();
+            resolver
+                .endpoint
+                .close(CloseReason::ShuttingDown.code(), b"ShuttingDown");
+
+            // Give in-flight closes a brief window to flush before exit.
+            // Bounded so a misbehaving peer can't stall shutdown forever.
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                resolver.endpoint.wait_idle(),
+            )
+            .await;
 
             common::info!("CLOSING RESOLVER");
         }

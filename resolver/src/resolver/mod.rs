@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::process;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -7,16 +6,21 @@ use common::graceful;
 use common::info;
 use common::proto::RelayId;
 use common::proto::relay_res::LifetimeP;
+use common::proto::relay_res::relay_hello_signing_input;
 use common::quic::CloseReason;
 use common::quic::config::build_server_cfg;
 use common::quic::config::setup_crypto_provider;
+use common::quic::id::NodeId;
 use common::quic::id::NodeKey;
 use common::quic::p256::secret_from_key;
 use common::quic::protorole::ProtoRole;
+use common::warn;
+use ed25519_dalek::Signature;
+use ed25519_dalek::VerifyingKey;
+use parking_lot::RwLock;
 use quinn::Connection;
 use quinn::Endpoint;
 use quinn::ServerConfig;
-use tokio::sync::Mutex;
 
 use crate::resolver::relays::RelayEntry;
 use crate::util::config::AppConfig;
@@ -25,7 +29,21 @@ use crate::util::systime;
 pub mod relays;
 pub mod rpc;
 
-pub type ResolverRef = Arc<Mutex<Resolver>>;
+/// Resolver is purely shared, immutable scaffolding plus the interior-mutable
+/// `relays` registry. Cloning the [`Arc`] is cheap and lock-free; only the
+/// registry itself takes a (parking_lot) lock when read or written.
+pub type ResolverRef = Arc<Resolver>;
+
+/// Maximum simultaneous registrations. Past this we reject incoming
+/// `RelayHello`s with [`CloseReason::RegistryFull`] — keeps an attacker who
+/// holds valid identity keys from blowing up unbounded memory by churning
+/// registrations from many spoofed-but-real relays.
+const MAX_RELAYS: usize = 1024;
+
+/// Maximum permitted clock skew between the relay's signed `timestamp` and
+/// our local clock, in milliseconds. Anything outside this window is treated
+/// as a replay (or a misconfigured clock) and rejected.
+const HELLO_MAX_SKEW_MS: u128 = 60_000;
 
 /// Represents a single resolver node in the network but locally
 ///
@@ -35,7 +53,10 @@ pub struct Resolver {
     pub key: NodeKey,
     pub cfg: AppConfig,
     pub endpoint: Arc<Endpoint>,
-    relays: HashMap<RelayId, RelayEntry>,
+    /// Live relay registry. Read-mostly: every client `GetRelays` RPC reads
+    /// it, only registration/eviction writes. Hence `RwLock` rather than
+    /// `Mutex`.
+    relays: RwLock<HashMap<RelayId, RelayEntry>>,
 }
 
 impl Resolver {
@@ -50,10 +71,13 @@ impl Resolver {
     }
 
     fn key(cfg: &AppConfig) -> NodeKey {
-        let secret = match secret_from_key(&cfg.network.key_path) {
-            Ok(sec) => sec,
-            Err(_) => process::exit(0),
-        };
+        // `secret_from_key` returns `Result<_, ()>` and logs its own
+        // detailed reason on the error path, so we just convert `()` into
+        // a placeholder string for `graceful!`'s log line.
+        let secret = graceful!(
+            secret_from_key(&cfg.network.key_path).map_err(|_| "see prior error"),
+            "failed to load resolver secret key:"
+        );
 
         graceful!(NodeKey::new(secret.verifying_key()), "unexpected key length mismatch")
     }
@@ -77,37 +101,153 @@ impl Resolver {
 
         info!("initializing resolver with IPK({})", key.key());
 
-        Self { key, endpoint: Arc::new(Self::endpoint(&cfg)), relays: HashMap::new(), cfg }
+        Self {
+            key,
+            endpoint: Arc::new(Self::endpoint(&cfg)),
+            relays: RwLock::new(HashMap::new()),
+            cfg,
+        }
     }
 
-    /// Will return [HelloAck] if registered succesfully
+    /// Authenticate and admit a relay registration.
     ///
-    /// Returns [ConnectionError] instead of relay already exists
+    /// **Auth model:** the wire `RelayHello` carries the relay's full
+    /// Ed25519 pubkey alongside the truncated `relay_id`. We:
+    ///
+    /// 1. Verify `relay_id == BLAKE3(pubkey)[..10]` (binds id to pubkey).
+    /// 2. Verify the Ed25519 signature over the canonical transcript
+    ///    (binds the wire packet to the holder of the secret key).
+    /// 3. Verify `timestamp` is within ±`HELLO_MAX_SKEW_MS` of local time
+    ///    (replay protection — captured packets stop being usable
+    ///    quickly).
+    /// 4. Enforce the `MAX_RELAYS` capacity cap before any mutation.
+    /// 5. Reject if a live connection already exists for this id
+    ///    (`AlreadyConnected`); only sweep stale entries whose
+    ///    [`Connection::close_reason`] is `Some`. This avoids
+    ///    same-identity takeover-by-replay: an attacker with a captured
+    ///    valid signature still can't kick the legitimate relay off.
+    /// 6. Insert the new entry under the write lock.
+    ///
+    /// Why not derive the pubkey from `relay_id` alone? Because `relay_id`
+    /// is a 10-byte BLAKE3 truncation (see `common::quic::id::NodeKey`)
+    /// and is therefore not invertible. Carrying the full pubkey on the
+    /// wire is the minimal coherent option — the alternative would be a
+    /// challenge/response round-trip, which adds latency for no extra
+    /// security against this threat model.
     pub fn register_relay(
-        &mut self, conn: Arc<Connection>, hello: &LifetimeP,
+        &self, conn: Arc<Connection>, hello: &LifetimeP,
     ) -> Result<LifetimeP, CloseReason> {
-        let LifetimeP::RelayHello { relay_id, .. } = *hello else {
+        let LifetimeP::RelayHello { relay_id, pubkey, timestamp, sig } = hello else {
             return Err(CloseReason::PacketMismatch);
         };
+        let (relay_id, timestamp) = (*relay_id, *timestamp);
 
-        if let Some(existing) = self.relays.remove(&relay_id) {
-            let close = CloseReason::DuplicateConnect;
-            existing.conn.close(close.code(), &close.reason());
-            // can toggle behavior by uncommenting this err return and commenting out previous 2
-            // lines return Err(CloseReason::AlreadyConnected);
+        // 1. id <-> pubkey binding
+        let expected_id = NodeId::new(pubkey.as_ref());
+        if expected_id != relay_id {
+            warn!(
+                "relay({}) rejected: relay_id does not match pubkey",
+                conn.remote_address()
+            );
+            return Err(CloseReason::BadSignature);
         }
 
-        self.relays.insert(relay_id, RelayEntry { id: relay_id, conn });
+        // 2. signature verification
+        let vk = VerifyingKey::from_bytes(&pubkey.0).map_err(|_| {
+            warn!("relay({}) rejected: malformed Ed25519 pubkey", conn.remote_address());
+            CloseReason::BadSignature
+        })?;
+        let signature = Signature::from_bytes(&sig.0);
+        let msg = relay_hello_signing_input(&relay_id, &pubkey.0, timestamp);
+        if vk.verify_strict(&msg, &signature).is_err() {
+            warn!("relay({}) rejected: invalid hello signature", conn.remote_address());
+            return Err(CloseReason::BadSignature);
+        }
 
-        let hello_ack = LifetimeP::HelloAck { resolver_time: systime().as_millis() };
+        // 3. timestamp freshness (replay protection)
+        let now = systime().as_millis();
+        let skew = now.abs_diff(timestamp);
+        if skew > HELLO_MAX_SKEW_MS {
+            warn!(
+                "relay({}) rejected: stale hello timestamp ({}ms skew)",
+                conn.remote_address(),
+                skew
+            );
+            return Err(CloseReason::StaleTimestamp);
+        }
+
+        // 4-6. registry mutation under write lock
+        let mut relays = self.relays.write();
+
+        // 5. honour an already-live connection — even from the same identity.
+        // Only sweep entries whose connection is already gone.
+        if let Some(existing) = relays.get(&relay_id) {
+            if existing.conn.close_reason().is_none() {
+                warn!(
+                    "relay({}) rejected: id {} already has a live connection",
+                    conn.remote_address(),
+                    relay_id
+                );
+                return Err(CloseReason::AlreadyConnected);
+            }
+            // Stale entry — drop it, watcher task will idempotently no-op.
+            relays.remove(&relay_id);
+        }
+
+        // 4. capacity cap (after pruning a known-stale slot above)
+        if relays.len() >= MAX_RELAYS {
+            warn!(
+                "relay({}) rejected: registry full ({}/{})",
+                conn.remote_address(),
+                relays.len(),
+                MAX_RELAYS
+            );
+            return Err(CloseReason::RegistryFull);
+        }
+
+        relays.insert(relay_id, RelayEntry { id: relay_id, conn });
+
+        let hello_ack = LifetimeP::HelloAck { resolver_time: now };
 
         Ok(hello_ack)
     }
 
-    /// Closes resolver
-    pub fn close(&self) {
-        self.relays.iter().for_each(|(_, r)| {
-            r.conn.close(CloseReason::ShuttingDown.code(), b"ResolverShuttingDown");
+    /// Spawn a per-registration watcher that removes the relay entry once
+    /// its connection closes — but only if the live entry is still the
+    /// same `Arc<Connection>` we registered. This avoids the obvious race
+    /// where a fresh re-registration arrives between the old `closed()`
+    /// firing and us taking the write lock.
+    pub fn watch_relay(self: &Arc<Self>, relay_id: RelayId, conn: Arc<Connection>) {
+        let resolver = self.clone();
+        tokio::spawn(async move {
+            let _ = conn.closed().await;
+            resolver.remove_relay_if_same(relay_id, &conn);
         });
+    }
+
+    fn remove_relay_if_same(&self, relay_id: RelayId, conn: &Arc<Connection>) {
+        let mut relays = self.relays.write();
+        let same = relays
+            .get(&relay_id)
+            .map(|e| Arc::ptr_eq(&e.conn, conn))
+            .unwrap_or(false);
+        if same {
+            relays.remove(&relay_id);
+        }
+    }
+
+    /// Snapshot of the current registry, intended for serving client
+    /// `GetRelays` queries. Holds the read lock only for the duration of
+    /// the clone — never across an `await`.
+    pub fn snapshot_relays(&self) -> Vec<RelayEntry> {
+        self.relays.read().values().cloned().collect()
+    }
+
+    /// Closes resolver — best-effort kicks every registered relay so they
+    /// stop trying to send into a soon-to-be-dead endpoint.
+    pub fn close(&self) {
+        for r in self.relays.read().values() {
+            r.conn.close(CloseReason::ShuttingDown.code(), b"ResolverShuttingDown");
+        }
     }
 }

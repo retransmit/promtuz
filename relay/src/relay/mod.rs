@@ -11,6 +11,7 @@ use common::quic::config::setup_crypto_provider;
 use common::quic::id::NodeKey;
 use common::quic::p256::secret_from_key;
 use common::quic::protorole::ProtoRole;
+use ed25519_dalek::SigningKey;
 use ed25519_dalek::VerifyingKey;
 use parking_lot::RwLock;
 use quinn::ClientConfig;
@@ -22,16 +23,18 @@ use crate::util::config::AppConfig;
 use crate::util::rocksdb::rocksdb;
 
 /// contains p256 private & public key
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct RelayKeys {
-    pub public: VerifyingKey,
+    pub signing: SigningKey,
+    pub public:  VerifyingKey,
 }
 
 impl RelayKeys {
     fn from_cfg(cfg: &AppConfig) -> Result<Self, ()> {
         let secret = secret_from_key(&cfg.network.key_path)?;
+        let public = secret.verifying_key();
 
-        Ok(Self { public: secret.verifying_key() })
+        Ok(Self { signing: secret, public })
     }
 }
 
@@ -47,7 +50,10 @@ pub type RelayRef = Arc<Relay>;
 pub struct Relay {
     pub key: NodeKey,
 
-    // pub keys: RelayKeys,
+    /// Long-lived Ed25519 identity keypair. Held here so things that need to
+    /// sign on this relay's behalf (e.g. `RelayHello` to the resolver) don't
+    /// have to re-read the on-disk PKCS#8 file every time.
+    pub keys: RelayKeys,
     /// SystemTime in ms since EPOCH when relay is started first
     // pub start_ms: u128,
     pub endpoint: Endpoint,
@@ -108,6 +114,6 @@ impl Relay {
         let rocks = graceful!(rocksdb(), "failed to setup rocksdb");
         let clients = RwLock::new(HashMap::new());
 
-        Self { key, cfg, client_cfg, peer_client_cfg, rocks, endpoint, clients }
+        Self { key, keys, cfg, client_cfg, peer_client_cfg, rocks, endpoint, clients }
     }
 }

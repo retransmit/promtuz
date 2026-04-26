@@ -3,9 +3,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use anyhow::anyhow;
 use common::debug;
+use common::error;
 use common::proto::pack::Unpacker;
 use common::proto::relay_res::LifetimeP;
 use common::proto::relay_res::ResolverPacket;
+use common::warn;
 use quinn::Connection;
 
 use crate::quic::handler::Handler;
@@ -17,11 +19,12 @@ pub(super) trait HandleRelay {
 
 impl HandleRelay for Handler {
     async fn handle_relay(self, resolver: ResolverRef) {
+        let addr = self.conn.remote_address();
         loop {
             let mut recv = match self.conn.accept_uni().await {
                 Ok(recv) => recv,
                 Err(err) => {
-                    common::error!("relay stream accept failed: {err}");
+                    debug!("relay({addr}) stream accept ended: {err}");
                     break;
                 },
             };
@@ -31,8 +34,14 @@ impl HandleRelay for Handler {
 
             tokio::spawn(async move {
                 while let Ok(packet) = ResolverPacket::unpack(&mut recv).await {
-                    if let Err(e) = handle_packet(conn.clone(), resolver.clone(), packet).await {
-                        eprintln!("Packet handling error: {e}");
+                    match handle_packet(conn.clone(), resolver.clone(), packet).await {
+                        Ok(()) => {},
+                        // Policy-driven close: we already closed the connection
+                        // with a `CloseReason`. Don't re-log it as an error.
+                        Err(PacketError::PolicyClose) => return,
+                        Err(PacketError::Other(e)) => {
+                            error!("relay({addr}) packet handling error: {e}");
+                        },
                     }
                 }
             });
@@ -40,41 +49,65 @@ impl HandleRelay for Handler {
     }
 }
 
+/// Internal classification so policy-driven closes (where the resolver
+/// already explained itself with a `CloseReason`) don't masquerade as
+/// loud, scary errors in the log.
+#[derive(Debug)]
+enum PacketError {
+    PolicyClose,
+    Other(anyhow::Error),
+}
+
+impl From<anyhow::Error> for PacketError {
+    fn from(e: anyhow::Error) -> Self {
+        Self::Other(e)
+    }
+}
+
 async fn handle_packet(
     conn: Arc<Connection>, resolver: ResolverRef, packet: ResolverPacket,
-) -> Result<()> {
+) -> Result<(), PacketError> {
     use ResolverPacket::*;
     match packet {
         Lifetime(liftime) => handle_lifetime(conn.clone(), resolver.clone(), liftime).await,
-        // _ => Err(anyhow!("No!")),
     }
 }
 
 async fn handle_lifetime(
     conn: Arc<Connection>, resolver: ResolverRef, packet: LifetimeP,
-) -> Result<()> {
+) -> Result<(), PacketError> {
     use LifetimeP::*;
     match packet {
-        hello @ RelayHello { .. } => {
-            let hello_ack = match resolver.lock().await.register_relay(conn.clone(), &hello) {
+        RelayHello { relay_id, pubkey, timestamp, sig } => {
+            // Re-pack into a borrowed view for `register_relay` so we keep
+            // a single source of truth for the field layout.
+            let hello = RelayHello { relay_id, pubkey, timestamp, sig };
+
+            let hello_ack = match resolver.register_relay(conn.clone(), &hello) {
                 Ok(ack) => ResolverPacket::Lifetime(ack),
                 Err(close) => {
-                    return {
-                        close.close(&conn);
-                        Err(anyhow!("closed"))
-                    };
+                    close.close(&conn);
+                    // Already closed with an explicit reason — caller should
+                    // not log this as a packet handling error.
+                    return Err(PacketError::PolicyClose);
                 },
             };
 
+            // Now that registration is committed, attach the eviction watcher.
+            resolver.watch_relay(relay_id, conn.clone());
+
             debug!("sending to relay({})", conn.remote_address());
 
-            let mut send = conn.open_uni().await?;
-            hello_ack.send(&mut send).await?;
-            send.finish()?;
+            let mut send = conn.open_uni().await.map_err(anyhow::Error::from)?;
+            hello_ack.send(&mut send).await.map_err(anyhow::Error::from)?;
+            send.finish().map_err(anyhow::Error::from)?;
 
             Ok(())
         },
         RelayHeartbeat { .. } => Ok(()),
-        _ => Err(anyhow!("No!")),
+        _ => {
+            warn!("unexpected lifetime packet from relay({})", conn.remote_address());
+            Err(PacketError::Other(anyhow!("unexpected lifetime packet")))
+        },
     }
 }

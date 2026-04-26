@@ -14,7 +14,7 @@ crypto = [
   "dep:ed25519-dalek",
   "dep:sha2",
 ]
-proto = ["quic", "sysutils"]
+proto = ["quic", "sysutils", "types"]
 quic = [
   "dep:rustls",
   "dep:rustls-pemfile",

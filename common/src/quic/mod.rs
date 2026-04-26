@@ -27,6 +27,14 @@ pub enum CloseReason {
     ShuttingDown,
     Reconnecting,
     PacketMismatch,
+    /// Resolver: incoming `RelayHello` failed signature/identity validation
+    /// (id-to-key mismatch, malformed pubkey, or bad Ed25519 sig).
+    BadSignature,
+    /// Resolver: `RelayHello.timestamp` is outside the accepted clock window.
+    StaleTimestamp,
+    /// Resolver: registry is at capacity, no more relays can be admitted
+    /// until existing ones disconnect.
+    RegistryFull,
 }
 
 impl CloseReason {

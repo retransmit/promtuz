@@ -6,7 +6,7 @@ pub trait HandleResolver {
 }
 
 impl HandleResolver for Handler {
-    async fn handle_resolver(self, resolver: ResolverRef) {
+    async fn handle_resolver(self, _resolver: ResolverRef) {
         unimplemented!()
     }
 }
