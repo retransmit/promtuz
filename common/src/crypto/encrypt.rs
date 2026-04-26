@@ -47,9 +47,13 @@ impl Encrypted {
     }
 
     pub fn decrypt(self, key: &[u8; 32], ad: &[u8]) -> Result<Vec<u8>> {
+        if self.nonce.len() != 12 {
+            return Err(chacha20poly1305::Error);
+        }
         let mut chacha20 = ChaCha20Poly1305::new(Key::from_slice(key));
+        let nonce = Nonce::from_slice(self.nonce.as_slice());
         let mut buffer = self.cipher;
-        chacha20.decrypt_in_place(self.nonce.as_slice().into(), ad, &mut buffer).map(|_| buffer)
+        chacha20.decrypt_in_place(nonce, ad, &mut buffer).map(|_| buffer)
     }
 
     /// Encode an Encrypted (nonce + cipher) into a flat byte vec.

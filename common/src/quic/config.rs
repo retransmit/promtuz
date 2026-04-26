@@ -6,15 +6,50 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use std::time::Duration;
+
 use crate::quic::protorole::ProtoRole;
 use anyhow::Result;
 use anyhow::anyhow;
+use quinn::IdleTimeout;
 use quinn::ServerConfig as QuinnServerConfig;
 use quinn::TransportConfig;
+use quinn::VarInt;
 use quinn::crypto::rustls::QuicServerConfig;
 use rustls::RootCertStore;
 use rustls::ServerConfig as RustlsServerConfig;
 use rustls::crypto::CryptoProvider;
+
+/// Defaults applied to every server-side QUIC connection. Caps connection
+/// lifetime and per-connection stream budget so one misbehaving peer cannot
+/// consume unbounded resources.
+///
+/// Keepalive lives on the client (see `default_client_transport`); a server
+/// pinging every idle Android client would multiply idle traffic and battery
+/// cost without buying anything — the idle timeout already evicts dead peers.
+fn default_server_transport() -> TransportConfig {
+    let mut tc = TransportConfig::default();
+    tc.max_idle_timeout(Some(
+        IdleTimeout::try_from(Duration::from_secs(30)).expect("30s is a valid IdleTimeout"),
+    ));
+    tc.max_concurrent_bidi_streams(VarInt::from_u32(64));
+    tc.max_concurrent_uni_streams(VarInt::from_u32(64));
+    tc
+}
+
+/// Outbound-connection defaults. Keepalive every 10 s refreshes the server's
+/// 30 s idle timer so a legitimately quiet client (e.g. nothing to send) does
+/// not get evicted.
+fn default_client_transport() -> TransportConfig {
+    let mut tc = TransportConfig::default();
+    tc.max_idle_timeout(Some(
+        IdleTimeout::try_from(Duration::from_secs(30)).expect("30s is a valid IdleTimeout"),
+    ));
+    tc.keep_alive_interval(Some(Duration::from_secs(10)));
+    tc.max_concurrent_bidi_streams(VarInt::from_u32(64));
+    tc.max_concurrent_uni_streams(VarInt::from_u32(64));
+    tc
+}
 
 pub fn setup_crypto_provider() -> Result<()> {
     CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider())
@@ -117,7 +152,8 @@ pub fn build_server_cfg(
         .collect::<Vec<Vec<u8>>>();
 
     let quic_crypto = QuicServerConfig::try_from(tls)?;
-    let server_cfg = QuinnServerConfig::with_crypto(Arc::new(quic_crypto));
+    let mut server_cfg = QuinnServerConfig::with_crypto(Arc::new(quic_crypto));
+    server_cfg.transport_config(Arc::new(default_server_transport()));
 
     Ok(server_cfg)
 }
@@ -180,8 +216,7 @@ pub fn build_client_cfg(role: ProtoRole, roots: &RootCertStore) -> Result<quinn:
     // Wrap TLS config for Quinn
     let mut client = quinn::ClientConfig::new(Arc::new(quic_config));
 
-    // Optional: tune transport if you want
-    client.transport_config(Arc::new(TransportConfig::default()));
+    client.transport_config(Arc::new(default_client_transport()));
 
     Ok(client)
 }

@@ -10,6 +10,8 @@ use tokio::io::AsyncReadExt;
 pub enum PackError {
     #[error("failed to serialize: {0}")]
     SerFailed(postcard::Error),
+    #[error("packet too large for u16 frame: {0} bytes")]
+    FrameTooLarge(usize),
 }
 
 #[derive(Debug, Error)]
@@ -41,8 +43,9 @@ where
     #[inline]
     fn pack(&self) -> Result<Vec<u8>, PackError> {
         let packet = self.ser()?;
+        let len = u16::try_from(packet.len()).map_err(|_| PackError::FrameTooLarge(packet.len()))?;
         let mut out = Vec::with_capacity(2 + packet.len());
-        out.extend_from_slice(&(packet.len() as u16).to_be_bytes());
+        out.extend_from_slice(&len.to_be_bytes());
         out.extend_from_slice(&packet);
         Ok(out)
     }
