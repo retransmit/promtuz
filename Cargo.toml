@@ -1,5 +1,5 @@
 [workspace]
-members = ["resolver", "relay", "common", "libcore", "jni_macro", "pcli"]
+members = ["resolver", "relay", "common", "libcore", "jni_macro"]
 resolver = "2"
 
 [workspace.package]
