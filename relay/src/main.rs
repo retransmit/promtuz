@@ -4,13 +4,16 @@ use std::time::Duration;
 use anyhow::Result;
 use common::info;
 use common::quic::CloseReason;
+use common::warn;
 use tokio_util::sync::CancellationToken;
 
+use crate::dht::bootstrap;
 use crate::quic::acceptor::Acceptor;
 use crate::quic::resolver_link::ResolverLink;
 use crate::relay::Relay;
 use crate::util::config::AppConfig;
 
+mod dht;
 mod quic;
 mod relay;
 mod storage;
@@ -38,11 +41,41 @@ async fn main() -> Result<()> {
         async move { acceptor.run(relay, cancel).await }
     });
 
-    let resolver_handle = ResolverLink::new(relay.clone(), shutdown_rx).attach();
+    // Construct the resolver link, but capture its `client_handle` for
+    // ad-hoc RPCs (DHT bootstrap) *before* `attach()` consumes the
+    // `ResolverLink`. The handle is internally `Arc`-shared with the
+    // attached task, so it stays in sync as the session reconnects.
+    let resolver_link = ResolverLink::new(relay.clone(), shutdown_rx);
+    let resolver_handle = resolver_link.client_handle();
+    let resolver_attach_handle = resolver_link.attach();
+
+    // DHT bootstrap (design-doc §3.5) — feature-gated on
+    // `cfg.dht.enabled` (§11.8 default false). Spawned as a detached
+    // task so a slow/unavailable resolver does not delay QUIC accept.
+    // Failures are logged and swallowed; the relay keeps serving
+    // client traffic with an empty routing table until a future
+    // bootstrap attempt succeeds (phase 1g adds the periodic retry).
+    if let Some(dht) = relay.dht.clone() {
+        if dht.cfg.enabled {
+            let resolver_handle_for_bootstrap = resolver_handle.clone();
+            tokio::spawn(async move {
+                match bootstrap::bootstrap(dht, resolver_handle_for_bootstrap).await {
+                    Ok(state) => info!("DHT bootstrap reached state {state:?}"),
+                    // EmptyRegistry is the legitimate brand-new-network
+                    // case — log at info, not warn, so an operator
+                    // standing up the first relay isn't alarmed.
+                    Err(bootstrap::BootstrapError::EmptyRegistry) => {
+                        info!("DHT bootstrap: resolver returned no peers (new network?)")
+                    },
+                    Err(e) => warn!("DHT bootstrap failed: {e}"),
+                }
+            });
+        }
+    }
 
     tokio::select! {
         _ = acceptor_handle => {}
-        _ = resolver_handle => {}
+        _ = resolver_attach_handle => {}
         _ = tokio::signal::ctrl_c() => {
             println!();
 

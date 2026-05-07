@@ -26,18 +26,18 @@ pub enum LifetimeP {
     /// Initial registration message sent by a relay node to a resolver.
     ///
     /// Carries the relay's full Ed25519 identity public key alongside the
-    /// truncated [`RelayId`] so the resolver can both verify the id-to-key
-    /// binding (BLAKE3 truncation) and check the attached signature.
+    /// derived [`RelayId`] so the resolver can both verify the id-to-key
+    /// binding (`BLAKE3(pubkey)`) and check the attached signature.
     ///
     /// `sig` is an Ed25519 signature over:
     /// `RELAY_HELLO_SIG_DOMAIN || PROTOCOL_VERSION (BE u16)
-    ///   || relay_id (10 bytes) || pubkey (32 bytes) || timestamp (BE u128)`
+    ///   || relay_id (32 bytes) || pubkey (32 bytes) || timestamp (BE u128)`
     RelayHello {
         /// Stable cryptographic ID derived from the node's public key.
         relay_id:  RelayId,
         /// Full Ed25519 identity public key of the relay. Required so the
-        /// resolver can recover the verification key from the wire — the
-        /// `relay_id` alone is a BLAKE3 truncation and is not invertible.
+        /// resolver can recover the verification key from the wire — a hash
+        /// is not invertible, so the id alone is insufficient.
         pubkey:    Bytes<32>,
         timestamp: u128,
         /// Ed25519 signature over the transcript described on this enum.
@@ -58,22 +58,22 @@ pub enum LifetimeP {
     /// and to provide useful runtime metrics to the resolver.
     ///
     /// Authenticated identically to [`LifetimeP::RelayHello`]: carries the
-    /// relay's full Ed25519 pubkey alongside the truncated [`RelayId`] so
+    /// relay's full Ed25519 pubkey alongside the derived [`RelayId`] so
     /// the resolver can re-verify both id binding and signature on every
     /// heartbeat. Without this any peer that knew a registered relay's
     /// `relay_id` could spoof liveness signals once liveness logic lands.
     ///
     /// `sig` is an Ed25519 signature over:
     /// `RELAY_HEARTBEAT_SIG_DOMAIN || PROTOCOL_VERSION (BE u16)
-    ///   || relay_id (10 bytes) || pubkey (32 bytes) || timestamp (BE u128)`
+    ///   || relay_id (32 bytes) || pubkey (32 bytes) || timestamp (BE u128)`
     RelayHeartbeat {
         /// The node's stable cryptographic ID.
         relay_id: RelayId,
 
         /// Full Ed25519 identity public key of the relay. Carried for the
         /// same reason as [`LifetimeP::RelayHello::pubkey`] — `relay_id` is
-        /// a BLAKE3 truncation and isn't invertible, so the resolver needs
-        /// the full key to verify the attached signature.
+        /// a BLAKE3 hash and isn't invertible, so the resolver needs the
+        /// full key to verify the attached signature.
         pubkey: Bytes<32>,
 
         /// Sender-local unix time in milliseconds. Bound into the signed

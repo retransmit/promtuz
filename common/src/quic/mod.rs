@@ -42,6 +42,22 @@ pub enum CloseReason {
     /// Source address has exceeded its accept-side rate-limit quota.
     /// Returned at the acceptor before any per-connection state is created.
     RateLimited,
+    /// DHT (`peer/1`): a record's `user_sig` or `relay_sig` failed to
+    /// verify. Per `misc/specs/DHT.md` §2.5.
+    DhtBadSignature,
+    /// DHT (`peer/1`): a record's `not_before` is more than
+    /// `PRESENCE_MAX_FUTURE_SKEW_MS` in the future, or `not_after` has
+    /// already elapsed at the time of receipt. Per §2.5.
+    DhtClockSkew,
+    /// DHT (`peer/1`): peer asked us to STORE a record outside our
+    /// k-closest ownership window and we declined. Per §2.5 / §5.4.
+    DhtNotOwner,
+    /// DHT (`peer/1`): per-peer rate limit on `Store`/`FetchRecord`
+    /// tripped. Per §2.5 / §8.4.
+    DhtFlood,
+    /// DHT (`peer/1`): a wire field violated its declared length bound
+    /// (see `dht_p2p`'s `MAX_*` consts). Per §2.5 / §2.6.
+    DhtMalformedKey,
 }
 
 impl CloseReason {

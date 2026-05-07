@@ -1,11 +1,38 @@
 //! Maintains connection with resolver
+//!
+//! ## Sharing the live session for ad-hoc RPCs
+//!
+//! `ResolverLink` is a fire-and-forget background task: `attach()`
+//! consumes `self`, leaving callers with only a `JoinHandle`. That works
+//! for the original lifecycle traffic (`RelayHello` / heartbeats) which
+//! the link drives autonomously, but not for code that needs to *send a
+//! one-shot request* over the same connection — most notably the DHT
+//! bootstrap path (design-doc §3.5 / §9.4).
+//!
+//! [`ResolverLinkHandle`] solves this with a small shared state shim:
+//! the link writes the current `Connection` into a `RwLock<Option<...>>`
+//! at session start, clears it at session end, and any task holding a
+//! cloned handle can take a snapshot of that connection (cheap `Arc`
+//! clone behind quinn's `Connection`) without going through the link
+//! task. The handle is given out at `ResolverLink::new` time and
+//! survives the move into `attach()` because it's just an `Arc`.
+//!
+//! Locks are `parking_lot` and held only across the snapshot — never
+//! across an `await` — matching the project-wide convention also used
+//! by `Dht::peer_conns` (`relay/src/dht/mod.rs`).
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use anyhow::Result;
+use anyhow::anyhow;
 use common::debug;
 use common::info;
+use common::proto::client_res::ClientRequest;
+use common::proto::client_res::ClientResponse;
+use common::proto::client_res::RelayDescriptor;
+use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::proto::relay_res::LifetimeP;
 use common::proto::relay_res::ResolverPacket;
@@ -18,6 +45,7 @@ use common::sysutils::system_load;
 use common::types::bytes::Bytes;
 use common::warn;
 use ed25519_dalek::Signer;
+use parking_lot::RwLock;
 use quinn::ClientConfig;
 use quinn::Connection;
 use quinn::TransportConfig;
@@ -48,11 +76,86 @@ impl BackoffConfig {
     }
 }
 
+/// Cloneable handle to the live resolver session, used by code outside
+/// the link task that wants to send one-shot requests over the same
+/// connection (currently: DHT bootstrap, design-doc §3.5 / §9.4).
+///
+/// The link writes the active `Connection` in at session start and
+/// clears it at session end. Holders observe `None` while the link is
+/// reconnecting; callers handle that by erroring out (bootstrap retries
+/// are scheduled separately, design-doc §3.5 phase A re-ask after 5s
+/// jitter — implemented in phase 1g).
+///
+/// Cheap to clone: just the `Arc<RwLock<Option<Connection>>>` inside.
+#[derive(Clone)]
+pub struct ResolverLinkHandle {
+    /// Current resolver connection, if a session is live. Written by
+    /// `ResolverLink::run_session` on connect/disconnect. The
+    /// `Connection` itself is internally `Arc`-shared by quinn so a
+    /// clone here doesn't duplicate any underlying state.
+    inner: Arc<RwLock<Option<Connection>>>,
+}
+
+impl ResolverLinkHandle {
+    fn empty() -> Self {
+        Self { inner: Arc::new(RwLock::new(None)) }
+    }
+
+    /// Snapshot the current resolver `Connection` if a session is live.
+    /// The lock is dropped before the caller does any I/O, satisfying
+    /// the project-wide "no parking_lot guards across await" rule.
+    fn current_connection(&self) -> Option<Connection> {
+        self.inner.read().clone()
+    }
+
+    /// Send a [`ClientRequest::GetBootstrapPeers`] over the live
+    /// resolver session and decode the matching
+    /// [`ClientResponse::GetBootstrapPeers`].
+    ///
+    /// Errors:
+    /// - [`anyhow::Error`] wrapping "no live resolver session" if the
+    ///   link is currently reconnecting.
+    /// - QUIC stream errors propagate up (open_bi / write / read).
+    /// - A response with a non-matching variant returns a decode-style
+    ///   error so the caller doesn't silently misinterpret a
+    ///   `GetRelays`-shaped reply that was queued behind some races.
+    pub async fn get_bootstrap_peers(
+        &self, near: [u8; 32], count_xor_near: u8, count_rtt_near: u8,
+    ) -> Result<(Vec<RelayDescriptor>, Vec<RelayDescriptor>)> {
+        let conn = self
+            .current_connection()
+            .context("no live resolver session for GetBootstrapPeers")?;
+
+        let req = ClientRequest::GetBootstrapPeers { near, count_xor_near, count_rtt_near };
+        let bytes = req.pack()?;
+
+        // One bi-stream per RPC, mirroring the resolver-side
+        // `handle_client` contract documented at
+        // `resolver/src/quic/handler/client.rs:14-20`.
+        let (mut send, mut recv) = conn.open_bi().await?;
+        send.write_all(&bytes).await?;
+        send.finish()?;
+
+        let resp = ClientResponse::unpack(&mut recv).await?;
+        match resp {
+            ClientResponse::GetBootstrapPeers { xor_near, rtt_near } => Ok((xor_near, rtt_near)),
+            other => Err(anyhow!(
+                "GetBootstrapPeers: resolver returned unexpected variant {:?}",
+                other
+            )),
+        }
+    }
+}
+
 pub struct ResolverLink {
     relay: Arc<Relay>,
     shutdown: Receiver<()>,
     cfg: ClientConfig,
     backoff: BackoffConfig,
+    /// Shared handle: stays in sync with the current session for any
+    /// outside caller (e.g. DHT bootstrap) that needs to send a one-shot
+    /// RPC.
+    handle: ResolverLinkHandle,
 }
 
 impl ResolverLink {
@@ -72,7 +175,24 @@ impl ResolverLink {
         let mut cfg = (*relay.client_cfg).clone();
         cfg.transport_config(Self::transport_cfg());
 
-        Self { relay, shutdown: rx, cfg, backoff: BackoffConfig::default() }
+        Self {
+            relay,
+            shutdown: rx,
+            cfg,
+            backoff: BackoffConfig::default(),
+            handle: ResolverLinkHandle::empty(),
+        }
+    }
+
+    /// Cheap-to-clone view of the live resolver session for ad-hoc RPCs.
+    /// Hand the returned handle to anything that wants to send requests
+    /// alongside the lifecycle traffic (currently: DHT bootstrap).
+    ///
+    /// Named `client_handle` (not `handle`) to keep the inbound-stream
+    /// dispatcher `Self::handle` collision-free — the dispatcher is
+    /// already the canonical "handle the session" method on this type.
+    pub fn client_handle(&self) -> ResolverLinkHandle {
+        self.handle.clone()
     }
 
     /// Spawns the resolver link loop. Best-effort: never blocks the caller,
@@ -136,6 +256,12 @@ impl ResolverLink {
             .await
             .inspect_err(|e| warn!("hello to resolver({}) failed: {e}", conn.remote_address()))?;
 
+        // Publish the live connection so handle holders (DHT bootstrap)
+        // can issue ad-hoc RPCs over the same session. Cleared in the
+        // `defer`-style guard below — even on early exit from
+        // `handle()` — so a stale handle never points at a dead conn.
+        *self.handle.inner.write() = Some(conn.clone());
+
         // Spawn the periodic heartbeat alongside the inbound handler. Both
         // share the same `Connection`; whichever ends first cancels the
         // other via the abort handle.
@@ -147,6 +273,12 @@ impl ResolverLink {
 
         let res = self.handle(&conn).await;
         heartbeat.abort();
+
+        // Session over: clear the shared handle so any subsequent
+        // `get_bootstrap_peers` call surfaces "no live session" instead
+        // of trying to open a stream on a closed connection.
+        *self.handle.inner.write() = None;
+
         res
     }
 

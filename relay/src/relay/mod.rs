@@ -11,6 +11,7 @@ use common::quic::config::setup_crypto_provider;
 use common::quic::id::NodeKey;
 use common::quic::p256::secret_from_key_or_create;
 use common::quic::protorole::ProtoRole;
+use common::warn;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::VerifyingKey;
 use parking_lot::RwLock;
@@ -19,6 +20,7 @@ use quinn::Connection;
 use quinn::Endpoint;
 use rust_rocksdb::DB as RocksDB;
 
+use crate::dht::Dht;
 use crate::util::config::AppConfig;
 use crate::util::rocksdb::rocksdb;
 
@@ -74,10 +76,13 @@ pub struct Relay {
     pub client_cfg: Arc<ClientConfig>,
     pub peer_client_cfg: Arc<ClientConfig>,
 
-    pub rocks: RocksDB,
+    pub rocks: Arc<RocksDB>,
 
-    /// Shared in-memory DHT state
-    // pub dht: Arc<RwLock<Dht>>,
+    /// Shared DHT runtime state. `None` when `cfg.dht.enabled = false`
+    /// (the Phase 1 default per §11.8); every code path that would
+    /// touch the DHT checks the option first and falls through to the
+    /// pre-DHT behaviour.
+    pub dht: Option<Arc<Dht>>,
 
     /// Connected + authenticated clients, keyed by IPK
     pub clients: RwLock<HashMap<[u8; 32], Connection>>,
@@ -122,9 +127,44 @@ impl Relay {
 
         endpoint.set_default_client_config((*client_cfg).clone());
 
-        let rocks = graceful!(rocksdb(), "failed to setup rocksdb");
+        // Single shared `Arc<DB>` so the DHT replica and the message
+        // queue point at the same on-disk store but live in separate
+        // column families (§1.2).
+        let rocks = Arc::new(graceful!(rocksdb(), "failed to setup rocksdb"));
         let clients = RwLock::new(HashMap::new());
 
-        Self { key, keys, cfg, client_cfg, peer_client_cfg, rocks, endpoint, clients }
+        // DHT construction is gated on `cfg.dht.enabled`. When disabled,
+        // the field stays `None` and every consumer falls through to
+        // the legacy code path (§10 Phase 1, §11.8 default).
+        let dht = if cfg.dht.enabled {
+            let node_id = key.id();
+            match Dht::new(node_id, keys.signing.clone(), cfg.dht.clone(), rocks.clone()) {
+                Ok(d) => {
+                    info!("DHT enabled (node_id = {node_id})");
+                    Some(Arc::new(d))
+                },
+                Err(err) => {
+                    // Don't kill the process on DHT-init failure — the
+                    // relay can still serve clients without it. Log
+                    // loudly so an operator knows the DHT is dark.
+                    warn!("DHT init failed, continuing without DHT: {err}");
+                    None
+                },
+            }
+        } else {
+            None
+        };
+
+        Self {
+            key,
+            keys,
+            cfg,
+            client_cfg,
+            peer_client_cfg,
+            rocks,
+            dht,
+            endpoint,
+            clients,
+        }
     }
 }

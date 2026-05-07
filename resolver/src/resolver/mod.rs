@@ -122,9 +122,9 @@ impl Resolver {
     /// Authenticate and admit a relay registration.
     ///
     /// **Auth model:** the wire `RelayHello` carries the relay's full
-    /// Ed25519 pubkey alongside the truncated `relay_id`. We:
+    /// Ed25519 pubkey alongside the derived `relay_id`. We:
     ///
-    /// 1. Verify `relay_id == BLAKE3(pubkey)[..10]` (binds id to pubkey).
+    /// 1. Verify `relay_id == BLAKE3(pubkey)` (binds id to pubkey).
     /// 2. Verify the Ed25519 signature over the canonical transcript
     ///    (binds the wire packet to the holder of the secret key).
     /// 3. Verify `timestamp` is within ±`HELLO_MAX_SKEW_MS` of local time
@@ -139,11 +139,11 @@ impl Resolver {
     /// 6. Insert the new entry under the write lock.
     ///
     /// Why not derive the pubkey from `relay_id` alone? Because `relay_id`
-    /// is a 10-byte BLAKE3 truncation (see `common::quic::id::NodeKey`)
-    /// and is therefore not invertible. Carrying the full pubkey on the
-    /// wire is the minimal coherent option — the alternative would be a
-    /// challenge/response round-trip, which adds latency for no extra
-    /// security against this threat model.
+    /// is a BLAKE3 hash (see `common::quic::id::NodeKey`) and is therefore
+    /// not invertible. Carrying the full pubkey on the wire is the minimal
+    /// coherent option — the alternative would be a challenge/response
+    /// round-trip, which adds latency for no extra security against this
+    /// threat model.
     pub fn register_relay(
         &self, conn: Arc<Connection>, hello: &LifetimeP,
     ) -> Result<LifetimeP, CloseReason> {
@@ -195,7 +195,12 @@ impl Resolver {
             return Err(CloseReason::RegistryFull);
         }
 
-        relays.insert(relay_id, RelayEntry { id: relay_id, conn });
+        // `RelayEntry::new` stamps `last_heartbeat_at = Instant::now()`
+        // so a `Hello` immediately followed by `GetBootstrapPeers` ranks
+        // this just-joined relay as fresh under the `rtt_near` proxy.
+        // `pubkey` is captured here so subsequent `GetBootstrapPeers`
+        // responses can include it without re-deriving from cert state.
+        relays.insert(relay_id, RelayEntry::new(relay_id, conn, *pubkey));
 
         let hello_ack = LifetimeP::HelloAck { resolver_time: now };
 
@@ -264,13 +269,21 @@ impl Resolver {
         // The signature is valid for *some* relay; require that it's the
         // one currently using this connection. Holding the read lock only
         // for the lookup keeps this lock-cheap.
-        if !self.relays.read().contains_key(&relay_id) {
-            warn!(
-                "relay({}) heartbeat rejected: relay_id {} not registered",
-                conn.remote_address(),
-                relay_id
-            );
-            return Err(CloseReason::PacketMismatch);
+        //
+        // Bumps the entry's `last_heartbeat_at` while the lookup is still
+        // in scope: the per-entry `Mutex` lets us update one entry's
+        // recency without escalating the outer registry `RwLock` to a
+        // write lock (which would serialise every other reader).
+        match self.relays.read().get(&relay_id) {
+            None => {
+                warn!(
+                    "relay({}) heartbeat rejected: relay_id {} not registered",
+                    conn.remote_address(),
+                    relay_id
+                );
+                return Err(CloseReason::PacketMismatch);
+            },
+            Some(entry) => entry.touch_heartbeat(std::time::Instant::now()),
         }
 
         Ok(())
