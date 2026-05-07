@@ -139,7 +139,11 @@ impl Relay {
         let dht = if cfg.dht.enabled {
             let node_id = key.id();
             match Dht::new(node_id, keys.signing.clone(), cfg.dht.clone(), rocks.clone()) {
-                Ok(d) => {
+                Ok(mut d) => {
+                    // Wire the outbound-dial machinery so the lookup
+                    // module can open `peer/1` connections to other
+                    // relays.
+                    d.attach_dialer(endpoint.clone(), peer_client_cfg.clone());
                     info!("DHT enabled (node_id = {node_id})");
                     Some(Arc::new(d))
                 },

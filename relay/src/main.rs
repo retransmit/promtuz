@@ -85,6 +85,14 @@ async fn main() -> Result<()> {
             cancel.cancel();
             shutdown.send(()).ok();
 
+            // Tear down DHT peer connections before closing the endpoint,
+            // so in-flight `peer/1` RPCs see a clean close-reason rather
+            // than a transport error. (Best-effort: the close frames go
+            // out as part of the endpoint flush below.)
+            if let Some(dht) = relay.dht.clone() {
+                dht.shutdown().await;
+            }
+
             relay.endpoint.close(CloseReason::ShuttingDown.code(), b"ShuttingDown");
 
             // Give in-flight QUIC frames (close frames, last DispatchAcks,

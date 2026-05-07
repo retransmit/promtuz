@@ -40,7 +40,9 @@ use common::quic::id::NodeId;
 use ed25519_dalek::SigningKey;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
+use quinn::ClientConfig;
 use quinn::Connection;
+use quinn::Endpoint;
 use rust_rocksdb::ColumnFamilyDescriptor;
 use rust_rocksdb::DB as RocksDB;
 use rust_rocksdb::Options;
@@ -118,6 +120,17 @@ pub struct Dht {
 
     /// Aggregate operation counters (§9.1).
     pub metrics: Metrics,
+
+    /// QUIC endpoint we use to dial outbound peer connections. Cloned
+    /// from `Relay::endpoint` at construction. `Option` because the unit
+    /// tests in `store.rs` / `lookup.rs` build `Dht`s without a live
+    /// endpoint (they only exercise local-only code paths).
+    pub(crate) endpoint: Option<Endpoint>,
+
+    /// `peer/1` ALPN client config — used by `lookup.rs::connect_to_peer`
+    /// to dial outbound DHT peer connections. Same `Option` rationale
+    /// as [`endpoint`].
+    pub(crate) peer_client_cfg: Option<Arc<ClientConfig>>,
 }
 
 impl Dht {
@@ -160,7 +173,38 @@ impl Dht {
             signing_key,
             cfg,
             metrics: Metrics::new(),
+            endpoint: None,
+            peer_client_cfg: None,
         })
+    }
+
+    /// Wire the outbound-dial machinery in. Called by `Relay::new` after
+    /// the QUIC endpoint and per-role client configs have been built.
+    /// Split from `Dht::new` so unit tests that only need DB-level state
+    /// don't have to construct a full QUIC stack.
+    pub fn attach_dialer(&mut self, endpoint: Endpoint, peer_client_cfg: Arc<ClientConfig>) {
+        self.endpoint = Some(endpoint);
+        self.peer_client_cfg = Some(peer_client_cfg);
+    }
+
+    /// Close every cached peer connection and clear the map. Called by
+    /// the `Relay`-level shutdown handler so in-flight DHT RPCs cleanly
+    /// finish before the QUIC endpoint is torn down.
+    ///
+    /// design-doc: §7.1 (conn-close watcher). Symmetric to the resolver's
+    /// `Resolver::close` (`resolver/src/resolver/mod.rs`).
+    pub async fn shutdown(&self) {
+        use common::quic::CloseReason;
+        // Drain the map first so we don't hold the write lock across the
+        // (synchronous, but still capability-effecting) close calls.
+        let conns: Vec<Connection> = {
+            let mut guard = self.peer_conns.write();
+            guard.drain().map(|(_, c)| c).collect()
+        };
+        for conn in conns {
+            CloseReason::ShuttingDown.close(&conn);
+            self.metrics.inc_peer_conns_closed();
+        }
     }
 }
 
