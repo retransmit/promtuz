@@ -39,7 +39,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
+use common::proto::dht_p2p::DhtHello;
 use common::proto::dht_p2p::DhtPacket;
 use common::proto::dht_p2p::DhtRequest;
 use common::proto::dht_p2p::DhtResponse;
@@ -48,9 +51,12 @@ use common::proto::dht_p2p::FindValue;
 use common::proto::dht_p2p::FindValueOutcome as WireFindValueOutcome;
 use common::proto::dht_p2p::NodeDescriptor;
 use common::proto::dht_p2p::PresenceRecord;
+use common::proto::dht_p2p::dht_hello_signing_input;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
+use common::types::bytes::Bytes;
+use ed25519_dalek::Signer;
 use quinn::Connection;
 use thiserror::Error;
 use tokio::time::timeout;
@@ -156,6 +162,33 @@ fn distance(target: &[u8; 32], peer: &NodeId) -> [u8; 32] {
 /// `CloseReason::DhtMalformedKey` and bump
 /// `metrics.cert_pubkey_extraction_failures`.
 ///
+/// **Phase 1i — application-layer signed handshake:** before returning
+/// the connection to the caller, we send a [`DhtHello`] (Ed25519-signed
+/// transcript binding our `node_id` to our `pubkey` and a fresh
+/// timestamp) on a fresh uni-stream. The receiver verifies and uses the
+/// bound NodeId for routing-table inserts and rate-limit keying for
+/// the rest of the connection's lifetime — this closes the
+/// inbound-no-mTLS gap without enabling mTLS on `peer/1` (which would
+/// break the `client/1` co-tenant on the same `Endpoint`).
+///
+/// **Fire-and-forget hello, no synchronous ack.** We send the hello on
+/// a uni-stream and return the connection immediately; if the peer
+/// rejects, the next RPC's bi-stream will fail because the connection
+/// is closed. This matches the relay-to-resolver `RelayHello` flow
+/// (`relay/src/quic/resolver_link.rs::hello`) — adding a synchronous
+/// ack would cost a round-trip per dial without any extra security
+/// (the dialer can't *act* on the ack: a successful subsequent RPC
+/// proves the peer accepted the hello, and a failed RPC could equally
+/// be caused by the receiver rejecting the hello mid-flight).
+///
+/// **TODO (phase 2 integration suite).** The full QUIC-stream-level
+/// test of "outbound dial → DhtHello uni-stream → inbound accept_uni →
+/// verify → bi-stream RPC" needs real connections; today we test the
+/// signing/verification helper round-trip in isolation
+/// (`common::proto::dht_p2p::tests::dht_hello_two_relays_authenticate
+/// _each_other_synchronously`) and rely on the unit tests of each
+/// half. Phase 2 lights up a real two-relay harness.
+///
 /// Visible to the rest of `dht/` (notably `publish.rs`) so the cache +
 /// dial path is shared rather than duplicated.
 pub(crate) async fn connect_to_peer(
@@ -199,6 +232,23 @@ pub(crate) async fn connect_to_peer(
         }
     };
 
+    // Phase 1i: send our signed `DhtHello` as the first frame on the
+    // connection. Failure here is non-fatal-to-the-handshake (the peer
+    // will simply close on its end), but we surface it so the dialer
+    // sees the failure and the caller can decide whether to retry.
+    if let Err(e) = send_dht_hello(dht, &conn).await {
+        dht.metrics.inc_dht_hello_rejected();
+        common::warn!(
+            "DHT connect_to_peer: failed to send DhtHello to {}: {e}; closing",
+            peer.id
+        );
+        common::quic::CloseReason::DhtMalformedKey.close(&conn);
+        return Err(anyhow::anyhow!(
+            "failed to send DhtHello to {}: {e}",
+            peer.id
+        ));
+    }
+
     // Cache. Race: another task may have raced ahead with a connection
     // to the same peer; if so, drop the loser. Both `Connection`s are
     // independently usable — the eventual consistency is only about
@@ -214,6 +264,48 @@ pub(crate) async fn connect_to_peer(
     }
     dht.metrics.inc_peer_conns_opened();
     Ok(conn)
+}
+
+/// Send our signed [`DhtHello`] on a freshly-opened uni-stream. The
+/// transcript is built via [`dht_hello_signing_input`], so dialer
+/// (this) and receiver (`relay/src/dht/handler.rs::recv_and_verify_hello`)
+/// always agree byte-for-byte.
+///
+/// Lives next to [`connect_to_peer`] (rather than a free fn in
+/// `dht/mod.rs`) because it's the only call-site and stays close to
+/// the dial-path it serves.
+async fn send_dht_hello(dht: &Arc<Dht>, conn: &Connection) -> anyhow::Result<()> {
+    let node_id = dht.node_id;
+    // The dialer's own pubkey: derivable from the signing key.
+    let pubkey: [u8; 32] = dht.signing_key.verifying_key().to_bytes();
+    let timestamp = now_ms();
+    let msg = dht_hello_signing_input(&node_id, &pubkey, timestamp);
+    let sig = dht.signing_key.sign(&msg).to_bytes();
+
+    let hello = DhtHello {
+        node_id,
+        pubkey: Bytes(pubkey),
+        timestamp,
+        sig: Bytes(sig),
+    };
+    let bytes = hello.pack()?;
+
+    let mut send = conn.open_uni().await?;
+    send.write_all(&bytes).await?;
+    send.finish()?;
+    Ok(())
+}
+
+/// Wall-clock now in ms-since-Unix-epoch. Inlined here (rather than
+/// pulled from `crate::util::systime`) for the same reason as
+/// `handler.rs::now_ms` — keeps `dht::lookup` free of cross-module
+/// dependencies for a one-line helper. Tests get to override at the
+/// caller via `DhtHello`'s `timestamp` field, never via this helper.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Send one DHT request over a fresh bi-stream and read the response.

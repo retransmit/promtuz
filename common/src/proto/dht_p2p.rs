@@ -81,6 +81,28 @@ pub const DHT_USER_ROAM_SIG_DOMAIN: &[u8] = b"promtuz-dht-v1-roam-v1";
 /// || PROTOCOL_VERSION (BE u16)`.
 pub const DHT_PRESENCE_SIG_DOMAIN: &[u8] = b"promtuz-dht-v1-presence-v1";
 
+/// Domain-separation tag for the connection-level [`DhtHello`] handshake
+/// sent as the very first frame on a fresh `peer/1` connection.
+///
+/// Distinct from every other DHT signing-input tag (`-roam-v1`,
+/// `-presence-v1`, `-tombstone-v1`) so a captured signature for a
+/// presence record cannot be replayed as a connection hello and vice
+/// versa. Mirrors the resolver-side
+/// [`crate::proto::relay_res::RELAY_HELLO_SIG_DOMAIN`] discipline (one
+/// domain string per packet kind).
+pub const DHT_HELLO_SIG_DOMAIN: &[u8] = b"promtuz-dht-hello-v1";
+
+/// Maximum permitted clock skew between the dialing relay's signed
+/// `timestamp` and the receiver's local clock, in milliseconds. Anything
+/// outside this window is treated as a replay or a misconfigured clock
+/// and rejected with [`crate::quic::CloseReason::DhtClockSkew`].
+///
+/// Mirrors `HELLO_MAX_SKEW_MS` at `resolver/src/resolver/mod.rs:47` —
+/// the resolver applies the same window to `RelayHello`/`RelayHeartbeat`,
+/// and consistency across packet kinds keeps a relay's local clock-drift
+/// behaviour identical against either receiver.
+pub const MAX_DHT_HELLO_SKEW_MS: u64 = 60_000;
+
 /// Replication factor `k` (§0). Bounds [`FindNodeResp::closer`] and the
 /// `Closer` arm of [`FindValueOutcome`].
 pub const DHT_K: usize = 3;
@@ -120,6 +142,108 @@ pub const MAX_FIND_NODE_RESULTS: usize = DHT_K;
 /// Bytes of the slice bitset in [`MerkleSummary::slices`] (§2.4.6 / §2.6
 /// "256 bits = fixed bitset"). 256 slices over the keyspace = 32 bytes.
 pub const MERKLE_SUMMARY_SLICE_BITS: usize = 256;
+
+//===:===:===:===:===:===:===:===:===:===:===:===:===||
+//===:===:===:===:==:  DHT HELLO  :==:===:===:===:===||
+//===:===:===:===:===:===:===:===:===:===:===:===:===||
+
+/// Connection-level signed handshake sent as the **very first frame** on
+/// a freshly-opened `peer/1` (relay-to-relay) connection. The dialing
+/// relay opens a uni-stream, frames a [`DhtHello`] and shuts the stream;
+/// the receiving relay verifies the signature and binds the resulting
+/// [`crate::quic::id::NodeId`] to the connection for the rest of its
+/// lifetime.
+///
+/// **Why an application-layer hello rather than mTLS?** The relay's
+/// `peer/1` ALPN is currently configured `with_no_client_auth()` because
+/// the same QUIC `Endpoint` also accepts `client/1` connections, and
+/// clients have no certs. mTLS on `peer/1` would require either two
+/// endpoints or a per-ALPN client-auth toggle (neither exists yet in
+/// `quinn`'s public API). An application-layer signed hello mirrors the
+/// existing relay-to-resolver pattern (see
+/// [`crate::proto::relay_res::LifetimeP::RelayHello`]) and gives us
+/// equivalent identity binding — the dialing relay's `NodeId` is proven
+/// by Ed25519 signature against the wire transcript, and the receiver
+/// can drop the connection on any failure.
+///
+/// **Wire layout** (field order is load-bearing — both signing and
+/// verifying sides walk the [`dht_hello_signing_input`] helper which
+/// visits these in declaration order):
+///
+/// ```text
+/// DhtHello {
+///   node_id:   [u8; 32],   // claimed identity = BLAKE3(pubkey)
+///   pubkey:    [u8; 32],   // dialer's full Ed25519 identity pubkey
+///   timestamp: u64,        // ms since epoch; ±MAX_DHT_HELLO_SKEW_MS window
+///   sig:       [u8; 64],   // Ed25519 signature over the canonical transcript
+/// }
+/// ```
+///
+/// **Signed transcript** (`dht_hello_signing_input`):
+/// ```text
+/// DHT_HELLO_SIG_DOMAIN || PROTOCOL_VERSION (BE u16)
+///   || node_id (32) || pubkey (32) || timestamp (BE u64)
+/// ```
+///
+/// design-doc: `misc/specs/DHT.md` §2.3 (relay-to-relay handshake), §2.5
+/// (close-reason codes), §8.1-8.2 (Sybil/eclipse rationale).
+#[serde_as]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DhtHello {
+    /// Dialer's stable cryptographic ID, claimed identity. The verifier
+    /// also checks `BLAKE3(pubkey) == node_id` (id-binding) so an attacker
+    /// cannot present a benign pubkey under a different node_id.
+    pub node_id:   crate::quic::id::NodeId,
+    /// Dialer's full Ed25519 identity public key. Carried alongside
+    /// `node_id` because `node_id` is a BLAKE3 hash and is therefore not
+    /// invertible — the verifier needs the full key to check `sig`.
+    /// Same reasoning as [`crate::proto::relay_res::LifetimeP::RelayHello::pubkey`].
+    pub pubkey:    Bytes<32>,
+    /// Sender-local Unix time in milliseconds. Bound into the signed
+    /// transcript so the receiver can reject replays outside an accepted
+    /// clock-skew window ([`MAX_DHT_HELLO_SKEW_MS`]).
+    pub timestamp: u64,
+    /// Ed25519 signature over [`dht_hello_signing_input`]. Verified
+    /// under `pubkey` using `verify_strict`, mirroring the resolver's
+    /// `RelayHello` verification at
+    /// `resolver/src/resolver/mod.rs::verify_signed_packet`.
+    pub sig:       Bytes<64>,
+}
+
+/// Build the canonical signing transcript for [`DhtHello`].
+///
+/// Layout:
+/// ```text
+///   DHT_HELLO_SIG_DOMAIN || PROTOCOL_VERSION (BE u16)
+///     || node_id (32) || pubkey (32) || timestamp (BE u64)
+/// ```
+///
+/// The transcript layout deliberately mirrors
+/// [`crate::proto::relay_res::relay_hello_signing_input`] field-for-field
+/// — the only differences are the domain tag (so signatures are
+/// non-replayable across packet kinds) and the `timestamp` width (`u64`
+/// here vs `u128` in `relay_res`; chosen for parity with the rest of
+/// `dht_p2p.rs` which uses `u64` for all wall-clock fields like
+/// `not_before` / `not_after` / `deleted_at`).
+///
+/// Both signing (dialer) and verifying (receiver) sides call this helper,
+/// which makes it the byte-for-byte contract — there is no second
+/// implementation to keep in sync.
+pub fn dht_hello_signing_input(
+    node_id: &crate::quic::id::NodeId, pubkey: &[u8; 32], timestamp: u64,
+) -> Vec<u8> {
+    // domain (varies) + version (2) + node_id (32) + pubkey (32) + ts (8) = 76
+    // + domain bytes.
+    let mut buf = Vec::with_capacity(
+        DHT_HELLO_SIG_DOMAIN.len() + 2 + crate::quic::id::NodeId::LEN + 32 + 8,
+    );
+    buf.extend_from_slice(DHT_HELLO_SIG_DOMAIN);
+    buf.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+    buf.extend_from_slice(node_id.as_bytes());
+    buf.extend_from_slice(pubkey);
+    buf.extend_from_slice(&timestamp.to_be_bytes());
+    buf
+}
 
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
 //===:===:===:===:==: PRESENCE :==:===:===:===:===:===||
@@ -333,6 +457,39 @@ pub enum PresenceVerifyError {
     RelayIdMismatch,
 }
 
+/// Reasons a [`DhtHello`] can fail the inbound verification at
+/// `relay/src/dht/handler.rs::handle_peer_connection`.
+///
+/// Maps onto the [`crate::quic::CloseReason`]`::Dht*` variants 1:1:
+/// - [`Self::IdMismatch`], [`Self::MalformedPubkey`], [`Self::BadSignature`]
+///   → `DhtBadSignature` (or `DhtMalformedKey` for malformed pubkey
+///   shape — caller's choice).
+/// - [`Self::ClockSkew`] → `DhtClockSkew`.
+///
+/// design-doc: §2.5.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum DhtHelloVerifyError {
+    /// `node_id != BLAKE3(pubkey)` — the dialer is presenting a pubkey
+    /// that does not hash to the claimed identity.
+    #[error("dht hello: node_id != BLAKE3(pubkey)")]
+    IdMismatch,
+    /// `pubkey` did not parse as an Ed25519 verifying key. Distinct from
+    /// [`Self::BadSignature`] so callers can attribute key-shape problems
+    /// separately from signature-mismatch problems (mirrors
+    /// [`PresenceVerifyError::MalformedRelayPubkey`]).
+    #[error("dht hello: malformed Ed25519 pubkey")]
+    MalformedPubkey,
+    /// `sig` did not validate under `pubkey` over the canonical
+    /// transcript.
+    #[error("dht hello: bad signature")]
+    BadSignature,
+    /// `|now_ms − timestamp| > MAX_DHT_HELLO_SKEW_MS`. Indicates either a
+    /// replay outside the skew window or a misconfigured clock on the
+    /// dialer.
+    #[error("dht hello: stale or future timestamp (clock skew)")]
+    ClockSkew,
+}
+
 impl PresenceRecord {
     /// Multi-writer conflict resolution per `misc/specs/DHT.md` §5.3.
     ///
@@ -376,12 +533,73 @@ mod verify_impl {
     use ed25519_dalek::Verifier;
     use ed25519_dalek::VerifyingKey;
 
+    use super::DhtHello;
+    use super::DhtHelloVerifyError;
+    use super::MAX_DHT_HELLO_SKEW_MS;
     use super::PRESENCE_MAX_FUTURE_SKEW_MS;
     use super::PresenceRecord;
     use super::PresenceVerifyError;
+    use super::dht_hello_signing_input;
     use super::presence_record_relay_signing_input;
     use super::presence_record_user_signing_input;
     use crate::quic::id::NodeId;
+
+    impl DhtHello {
+        /// Validate a [`DhtHello`] received as the first frame on an
+        /// inbound `peer/1` connection. Returns `Ok(())` and binds the
+        /// connection's authenticated [`NodeId`] (callers stash
+        /// `self.node_id` post-success) on a clean check.
+        ///
+        /// Mirrors the order, semantics and failure modes of the
+        /// resolver-side `verify_signed_packet` at
+        /// `resolver/src/resolver/mod.rs:315-346`:
+        ///
+        /// 1. **id ↔ pubkey binding**: `BLAKE3(pubkey) == node_id`.
+        ///    Catches an attacker presenting a benign pubkey under a
+        ///    different claimed `node_id`.
+        /// 2. **Pubkey shape**: `pubkey` parses as an Ed25519 verifying
+        ///    key. Surfaced as `MalformedPubkey` (distinct from
+        ///    `BadSignature`) so operators can distinguish key-shape
+        ///    problems from sig-mismatch problems.
+        /// 3. **Signature**: `sig` verifies under `pubkey` over the
+        ///    canonical transcript built by
+        ///    [`dht_hello_signing_input`]. Uses `verify_strict` (same
+        ///    choice as `resolver/src/resolver/mod.rs:332`) for the
+        ///    standard small-subgroup defence.
+        /// 4. **Timestamp window**: `|now_ms − timestamp| ≤
+        ///    MAX_DHT_HELLO_SKEW_MS`.
+        ///
+        /// `now_ms` is wall-clock in milliseconds since the Unix epoch,
+        /// passed in explicitly so unit tests can pin a deterministic
+        /// clock.
+        pub fn verify(&self, now_ms: u64) -> Result<(), DhtHelloVerifyError> {
+            // 1. id-binding to pubkey. NodeId::new = BLAKE3(pubkey) —
+            //    same construction every other call site uses (cf.
+            //    `verify_signed_packet` and `PresenceRecord::verify`).
+            let derived_id = NodeId::new(self.pubkey.as_ref());
+            if derived_id != self.node_id {
+                return Err(DhtHelloVerifyError::IdMismatch);
+            }
+
+            // 2. Pubkey shape.
+            let vk = VerifyingKey::from_bytes(&self.pubkey.0)
+                .map_err(|_| DhtHelloVerifyError::MalformedPubkey)?;
+
+            // 3. Signature.
+            let sig = Signature::from_bytes(&self.sig.0);
+            let msg = dht_hello_signing_input(&self.node_id, &self.pubkey.0, self.timestamp);
+            vk.verify_strict(&msg, &sig)
+                .map_err(|_| DhtHelloVerifyError::BadSignature)?;
+
+            // 4. Timestamp freshness (replay protection).
+            let skew = now_ms.abs_diff(self.timestamp);
+            if skew > MAX_DHT_HELLO_SKEW_MS {
+                return Err(DhtHelloVerifyError::ClockSkew);
+            }
+
+            Ok(())
+        }
+    }
 
     impl PresenceRecord {
         /// Validate the record end-to-end:
@@ -1064,5 +1282,171 @@ mod tests {
             let decoded = DhtPacket::deser(&bytes).expect("deserialize response");
             assert_eq!(decoded, pkt);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // DhtHello — phase 1i (relay-to-relay connection-level handshake)
+    // -----------------------------------------------------------------
+
+    /// Sign a fresh, internally-consistent [`DhtHello`] with `key` at
+    /// `timestamp`. Mirrors the dialer-side construction in
+    /// `relay/src/dht/lookup.rs::send_dht_hello` so any drift between
+    /// the production helper and the test fixture immediately blows up
+    /// either side's verification.
+    fn build_dht_hello(key: &SigningKey, timestamp: u64) -> DhtHello {
+        let pubkey: [u8; 32] = key.verifying_key().to_bytes();
+        let node_id = NodeId::new(pubkey);
+        let msg = dht_hello_signing_input(&node_id, &pubkey, timestamp);
+        let sig = key.sign(&msg);
+        DhtHello {
+            node_id,
+            pubkey: pubkey.into(),
+            timestamp,
+            sig: sig.to_bytes().into(),
+        }
+    }
+
+    #[test]
+    fn dht_hello_round_trip() {
+        // postcard encode → decode round-trip: catches any accidental
+        // missing serde-derive or non-Deserialize-able field.
+        let key = fresh_signing_key();
+        let hello = build_dht_hello(&key, 1_700_000_000_000);
+        let bytes = hello.ser().expect("postcard serialize");
+        let decoded = DhtHello::deser(&bytes).expect("postcard deserialize");
+        assert_eq!(decoded, hello);
+    }
+
+    #[test]
+    fn dht_hello_signing_input_layout_is_stable() {
+        // Pin the byte-layout of the transcript so a future refactor
+        // that subtly reorders fields blows up here, not weeks later
+        // in production "all hellos suddenly fail" mode. Mirrors
+        // `user_signing_input_layout_is_stable` above.
+        let pubkey = [0u8; 32];
+        let mut bytes = [0u8; 32];
+        bytes[0] = 0x42;
+        let node_id = NodeId::from_bytes(bytes);
+        let timestamp: u64 = 0xDEAD_BEEF_CAFE_F00D;
+
+        let buf = dht_hello_signing_input(&node_id, &pubkey, timestamp);
+
+        // Domain (20) + version (2) + node_id (32) + pubkey (32) +
+        // ts (8) = 94 bytes. Anchor on the total length so a stray
+        // field change is caught immediately.
+        assert_eq!(buf.len(), DHT_HELLO_SIG_DOMAIN.len() + 2 + 32 + 32 + 8);
+
+        // Spot-check the header.
+        assert!(buf.starts_with(DHT_HELLO_SIG_DOMAIN));
+        let off = DHT_HELLO_SIG_DOMAIN.len();
+        assert_eq!(&buf[off..off + 2], &PROTOCOL_VERSION.to_be_bytes());
+        let off = off + 2;
+        assert_eq!(&buf[off..off + 32], node_id.as_bytes());
+        let off = off + 32;
+        assert_eq!(&buf[off..off + 32], &pubkey);
+        let off = off + 32;
+        assert_eq!(&buf[off..off + 8], &timestamp.to_be_bytes());
+    }
+
+    #[test]
+    fn dht_hello_verify_accepts_freshly_signed() {
+        let key = fresh_signing_key();
+        let now: u64 = 1_700_000_000_000;
+        let hello = build_dht_hello(&key, now);
+        // ±0 skew → must accept.
+        hello.verify(now).expect("freshly-signed hello must verify");
+        // Inside the skew window → must accept.
+        hello.verify(now + MAX_DHT_HELLO_SKEW_MS - 1).expect("inside skew");
+        hello.verify(now - (MAX_DHT_HELLO_SKEW_MS - 1)).expect("inside skew");
+    }
+
+    #[test]
+    fn dht_hello_verify_rejects_bad_pubkey_to_id_binding() {
+        // Sign with `key_a` but claim `key_b`'s NodeId. Catches the
+        // attacker-presenting-a-benign-pubkey-under-different-id case
+        // (mirror of `presence_record_relay_id_mismatch_fails` above).
+        let key_a = fresh_signing_key();
+        let key_b = fresh_signing_key();
+        let now: u64 = 1_700_000_000_000;
+        let mut hello = build_dht_hello(&key_a, now);
+        // Replace node_id with a *different* identity's id while keeping
+        // the original (a-derived) pubkey + sig.
+        let fake_id = NodeId::new(key_b.verifying_key().to_bytes());
+        hello.node_id = fake_id;
+        match hello.verify(now) {
+            Err(DhtHelloVerifyError::IdMismatch) => {}
+            other => panic!("expected IdMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dht_hello_verify_rejects_stale_timestamp() {
+        // Timestamp ~2 minutes in the past — far beyond the 60s skew.
+        let key = fresh_signing_key();
+        let now: u64 = 1_700_000_000_000;
+        let stale_ts = now - 120_000;
+        let hello = build_dht_hello(&key, stale_ts);
+        match hello.verify(now) {
+            Err(DhtHelloVerifyError::ClockSkew) => {}
+            other => panic!("expected ClockSkew, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dht_hello_verify_rejects_future_timestamp() {
+        // Timestamp ~2 minutes in the future — far beyond the 60s skew.
+        let key = fresh_signing_key();
+        let now: u64 = 1_700_000_000_000;
+        let future_ts = now + 120_000;
+        let hello = build_dht_hello(&key, future_ts);
+        match hello.verify(now) {
+            Err(DhtHelloVerifyError::ClockSkew) => {}
+            other => panic!("expected ClockSkew, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dht_hello_verify_rejects_bad_signature() {
+        // Flip one bit in the signature — verify must fail.
+        let key = fresh_signing_key();
+        let now: u64 = 1_700_000_000_000;
+        let mut hello = build_dht_hello(&key, now);
+        hello.sig.0[0] ^= 0x01;
+        match hello.verify(now) {
+            Err(DhtHelloVerifyError::BadSignature) => {}
+            other => panic!("expected BadSignature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dht_hello_two_relays_authenticate_each_other_synchronously() {
+        // Integration-style smoke test: two `Dht`-equivalent identity
+        // keys; one constructs a hello, the other verifies it. The
+        // resulting authenticated NodeId matches the claimed (and
+        // signed) identity. Phase 2 will exercise the actual QUIC
+        // round-trip (deferred per dispatch).
+        let dialer_key = fresh_signing_key();
+        let receiver_key = fresh_signing_key();
+        // dialer != receiver — receiver verifies dialer's hello.
+        assert_ne!(
+            dialer_key.verifying_key().to_bytes(),
+            receiver_key.verifying_key().to_bytes()
+        );
+
+        let now: u64 = 1_700_000_000_000;
+        let hello = build_dht_hello(&dialer_key, now);
+
+        // Wire round-trip (would be a quinn uni-stream in production).
+        let bytes = hello.ser().expect("serialize");
+        let received = DhtHello::deser(&bytes).expect("deserialize");
+
+        // Receiver verifies and stashes `received.node_id` as the
+        // connection's authenticated identity.
+        received.verify(now + 5).expect("hello must verify");
+        let authenticated_id = received.node_id;
+        assert_eq!(
+            authenticated_id,
+            NodeId::new(dialer_key.verifying_key().to_bytes())
+        );
     }
 }

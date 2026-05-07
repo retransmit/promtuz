@@ -2,8 +2,34 @@
 //!
 //! Replaces the old `relay/src/quic/handler/peer.rs` no-op stub with a
 //! single funnel into the DHT's RPC handlers. One QUIC connection ⇒ one
-//! task spawned in `handle_peer_connection`; that task accepts bi-streams
-//! in a loop and dispatches each to a per-RPC handler.
+//! task spawned in `handle_peer_connection`; that task waits for an
+//! application-layer signed handshake, then accepts bi-streams in a
+//! loop and dispatches each to a per-RPC handler.
+//!
+//! ## Phase 1i: signed `DhtHello` first, then RPCs
+//!
+//! Before any RPC is accepted, the dialer must send a [`DhtHello`]
+//! (Ed25519-signed transcript binding `node_id` to `pubkey` and a
+//! fresh timestamp) on the **first uni-stream** of the connection.
+//! The receiver:
+//!
+//! 1. Awaits `accept_uni()` with a 5-second timeout (
+//!    [`HELLO_RECV_TIMEOUT`]). A peer that connects but never sends a
+//!    hello gets dropped — see [`HELLO_RECV_TIMEOUT`] doc-comment for
+//!    the rationale on the value.
+//! 2. Decodes via `DhtHello::unpack` and validates with
+//!    `DhtHello::verify(now_ms())` — same checks the resolver does for
+//!    `RelayHello` (id-binding, signature, ±60s skew window).
+//! 3. On any failure, closes with the appropriate `CloseReason::Dht*`
+//!    and bumps `metrics.dht_hello_rejected`. On success, the
+//!    authenticated `NodeId` is bound to the connection for its full
+//!    lifetime.
+//!
+//! Authenticated identity then **replaces** the synthetic-stable_id
+//! and `[0u8; 32]` placeholders that phase 1h had to use because the
+//! TLS server config uses `with_no_client_auth()` (clients also reuse
+//! the same endpoint, so we can't enable mTLS without splitting the
+//! endpoint — see `relay/src/dht/tls_extract.rs` for that gap).
 //!
 //! ## Per-stream dispatch
 //!
@@ -20,31 +46,38 @@
 //!
 //! ## Routing-table feedback
 //!
-//! Every successful inbound RPC is observable as a "the requester is
+//! Every successful inbound RPC is observable as a "this peer is
 //! alive" signal — we touch the routing table by calling
-//! `RoutingTable::insert` with the requester's NodeId / addr / pubkey.
-//! Phase 1h plumbs the cert-chain pubkey through when available
-//! (`tls_extract::extract_pubkey_from_leaf_der`); when the relay's
-//! `peer/1` server config is `with_no_client_auth()` (current
-//! production state), `peer_identity()` returns `None` and we use a
-//! `[0u8; 32]` placeholder. The cert-pin check is enforced on the
-//! *outbound* side (`lookup::connect_to_peer`); see `tls_extract.rs`
-//! for the inbound-mTLS gap.
+//! `RoutingTable::insert` with the dialer's authenticated NodeId,
+//! `addr`, and verified pubkey. Phase 1i closes the placeholder-pubkey
+//! gap from phase 1h: the pubkey now comes from the verified `DhtHello`
+//! (`BLAKE3(pubkey) == node_id` was checked at hello time), not the
+//! `[0u8; 32]` placeholder.
 //!
 //! ## Per-peer rate limiting
 //!
 //! Phase 1h item 2: every inbound RPC is also passed through the
 //! per-peer keyed rate limiter on `Dht::rate_limiters` before being
-//! dispatched. Tripping the limiter closes the whole connection with
+//! dispatched. Phase 1i: the limiter key is now the authenticated
+//! `NodeId` for *every* inbound RPC, including the ones that don't
+//! carry an in-payload `requester` field (Ping, Store, Tombstone,
+//! MerkleSummary, MerkleDiff, FetchRecord). A reconnecting attacker
+//! therefore can't reset their quota — the NodeId is identity-bound.
+//! Tripping the limiter closes the whole connection with
 //! `CloseReason::DhtFlood` (and bumps `metrics.rate_limit_rejections`).
 //!
 //! design-doc: §2.3 (ALPN reuse: `peer/1` = relay-to-relay), §2.4 (RPC
-//! catalogue), §3.4 (peer learning from inbound RPCs).
+//! catalogue), §2.5 (close-reason codes), §3.4 (peer learning from
+//! inbound RPCs), §8.1-8.2 (Sybil/eclipse rationale for identity
+//! binding).
 
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use common::proto::dht_p2p::DhtHello;
+use common::proto::dht_p2p::DhtHelloVerifyError;
 use common::proto::dht_p2p::DhtPacket;
 use common::proto::dht_p2p::DhtRequest;
 use common::proto::dht_p2p::DhtResponse;
@@ -63,6 +96,7 @@ use common::quic::id::NodeId;
 use quinn::Connection;
 use quinn::SendStream;
 use tokio::sync::Semaphore;
+use tokio::time::timeout;
 
 use super::Dht;
 use super::rate_limit::RpcClass;
@@ -81,42 +115,60 @@ use super::tls_extract;
 /// design-doc: §8.7 (DoS / floods).
 const MAX_CONCURRENT_STREAMS_PER_PEER: usize = 16;
 
+/// Maximum time the receiver waits for the dialer's first uni-stream
+/// carrying a [`DhtHello`]. A peer that connects but never sends a
+/// hello is dropped at this point.
+///
+/// 5 s is several orders of magnitude above the round-trip needed to
+/// open a uni-stream and ship a 130-byte signed packet, but well below
+/// the QUIC idle timeout (`common/src/quic/config.rs:32-33`, 30 s) so
+/// a stalled hello doesn't get caught only by the idle path. Matches
+/// the order of magnitude of `LOOKUP_RPC_TIMEOUT_MS` (1500 ms in
+/// `dht/config.rs`), with extra slack for the *first* packet on a
+/// freshly-handshaked connection where TLS warmup can dominate.
+const HELLO_RECV_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Drive a single inbound `peer/1` connection through its full lifetime.
 ///
-/// 1. Attempt to extract the peer's TLS leaf-cert pubkey via
+/// 1. Best-effort TLS leaf-cert pubkey extraction via
 ///    [`tls_extract::extract_pubkey_from_leaf_der`]. Under the relay's
-///    current `with_no_client_auth()` server config this returns
-///    `Err(NoCertChain)` because the dialing peer never presents a
-///    client cert. We log once at info-level and proceed with a
-///    `[0u8; 32]` placeholder pubkey for any routing-table inserts.
-///    See module docs in `tls_extract.rs` for the inbound-mTLS gap.
-/// 2. Wait for bi-streams in a loop.
-/// 3. Spawn a per-stream task that reads one DhtRequest, checks the
-///    per-peer rate limiter ([`crate::dht::rate_limit`]), dispatches via
+///    current `with_no_client_auth()` server config this typically
+///    yields no cert chain at all; preserved as a forward-looking
+///    cross-check that *if* a cert chain ever lands (e.g. once mTLS
+///    is enabled on `peer/1` per the gap doc'd in `tls_extract.rs`),
+///    the cert SPKI agrees with the application-layer hello below.
+/// 2. **Phase 1i — application-layer signed handshake:** wait up to
+///    [`HELLO_RECV_TIMEOUT`] for the dialer's first uni-stream and
+///    decode it as a [`DhtHello`]. Verify with `DhtHello::verify` —
+///    on any failure close the connection with the appropriate
+///    `CloseReason::Dht*` and bump `metrics.dht_hello_rejected`.
+///    On success the `(authenticated_id, authenticated_pubkey)` pair
+///    is bound to this connection for its full lifetime, and the
+///    routing table / `peer_conns` cache is populated immediately
+///    so anti-entropy and bucket-refresh can find this peer even
+///    before it sends any RPC.
+/// 3. Wait for bi-streams in a loop.
+/// 4. Spawn a per-stream task that reads one DhtRequest, checks the
+///    per-peer rate limiter ([`crate::dht::rate_limit`]) keyed on the
+///    *authenticated* NodeId from step 2, dispatches via
 ///    `handle_dht_request`, writes the matching DhtResponse, and
 ///    `finish()`es the send side.
-/// 4. On `Connection::closed()` (peer rebooted, network failed), evict
+/// 5. On `Connection::closed()` (peer rebooted, network failed), evict
 ///    the routing-table entry only if it still points at this exact
 ///    `Connection` — same race-guard as `remove_client_if_same` at
 ///    `relay/src/quic/handler/client/mod.rs:43-52`.
 ///
-/// design-doc: §2.3, §3.4, §7.1, §8.7 (per-peer rate limiting).
+/// design-doc: §2.3, §2.5, §3.4, §7.1, §8.7 (per-peer rate limiting).
 pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
     let limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS_PER_PEER));
     let conn_id = conn.stable_id();
 
-    // Phase 1h item 1: best-effort TLS pubkey extraction. Under the
-    // current relay TLS server config (`with_no_client_auth`), the
-    // dialer does not present a client cert and `peer_identity()`
-    // returns `None` — `tls_extract::*` surfaces that as
-    // `Err(NoCertChain)`. We absorb the error and use the placeholder
-    // pubkey for routing-table inserts; the cert-pin check is enforced
-    // at the *outbound* path via `lookup::connect_to_peer`. Documented
-    // gap; closing it requires switching `peer/1` to mTLS.
-    //
-    // If the relay later flips to mTLS, the same code path here will
-    // start succeeding and back-fill verified pubkeys without further
-    // changes.
+    // Forward-compatible TLS pubkey extraction. Under the current
+    // `with_no_client_auth()` server config this returns `None`
+    // (clients don't present certs); preserved as defense-in-depth
+    // for the day mTLS lands on `peer/1`. If a cert chain *is* present
+    // and cleanly parses we cross-check it against the application-
+    // layer hello below: any mismatch is a hard close.
     let extracted_pubkey: Option<[u8; 32]> = {
         match conn.peer_identity().and_then(|id| {
             id.downcast_ref::<Vec<rustls::pki_types::CertificateDer<'static>>>()
@@ -137,6 +189,58 @@ pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
         }
     };
 
+    // Phase 1i: wait for, decode, and verify the dialer's signed
+    // `DhtHello`. The bound NodeId is the connection's authenticated
+    // identity for the rest of its lifetime.
+    let auth = match recv_and_verify_hello(&dht, &conn).await {
+        Ok(a) => a,
+        Err(()) => {
+            // recv_and_verify_hello already mapped the failure to a
+            // close-reason and bumped metrics; nothing more to do.
+            return;
+        }
+    };
+
+    // Optional cross-check: if mTLS *did* yield a cert SPKI and the
+    // hello-claimed pubkey disagrees, the connection is malicious or
+    // misconfigured. Same reasoning as the outbound-side post-handshake
+    // check at `lookup::connect_to_peer`.
+    if let Some(cert_pk) = extracted_pubkey {
+        if cert_pk != auth.pubkey {
+            dht.metrics.inc_dht_hello_rejected();
+            common::warn!(
+                "DHT inbound: cert SPKI != DhtHello.pubkey for {}; closing",
+                auth.node_id
+            );
+            CloseReason::DhtBadSignature.close(&conn);
+            return;
+        }
+    }
+
+    // Populate routing-table + peer_conns cache *now*, before any RPC
+    // arrives. Phase 1h had to defer this to the per-request path
+    // because there was no authenticated identity at connection time;
+    // phase 1i lets us do it once at the natural boundary, which also
+    // means RPCs that don't carry a `requester` field (Ping, Store,
+    // Tombstone, etc.) still get routing-table coverage.
+    {
+        let desc = NodeDescriptor {
+            id:     auth.node_id,
+            addr:   conn.remote_address(),
+            pubkey: auth.pubkey.into(),
+        };
+        let _ = dht.routing.write().insert(desc);
+    }
+    {
+        let mut map = dht.peer_conns.write();
+        // Race: another task may have raced ahead via outbound dial
+        // (`lookup::connect_to_peer`) to the same peer; drop the loser.
+        // We arbitrarily keep the first-cached entry so reconnection
+        // storms don't churn the cached `Connection` across a workload.
+        map.entry(auth.node_id).or_insert_with(|| (conn.clone(), auth.pubkey));
+    }
+    dht.metrics.inc_dht_hello_accepted();
+
     loop {
         let stream = match conn.accept_bi().await {
             Ok(s) => s,
@@ -156,18 +260,12 @@ pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
 
         let dht_clone = dht.clone();
         let conn_for_task = conn.clone();
+        let auth_clone = auth;
         tokio::spawn(async move {
             let _permit = permit;
             let mut recv = recv;
             let send = send;
-            handle_one_stream(
-                dht_clone,
-                conn_for_task,
-                send,
-                &mut recv,
-                extracted_pubkey,
-            )
-            .await;
+            handle_one_stream(dht_clone, conn_for_task, send, &mut recv, auth_clone).await;
         });
     }
 
@@ -193,23 +291,147 @@ pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
     }
 }
 
+/// Per-connection authenticated identity established by the [`DhtHello`]
+/// handshake. Once set, never re-verified for the connection's lifetime —
+/// the QUIC connection itself binds the peer to its peer-identifier
+/// (`stable_id`), and rotating the bound NodeId mid-connection has no
+/// known threat-model justification.
+///
+/// `Copy` because every field is plain bytes; cheap to pass-by-value
+/// into the per-stream task.
+#[derive(Clone, Copy, Debug)]
+struct AuthenticatedPeer {
+    node_id: NodeId,
+    pubkey:  [u8; 32],
+}
+
+/// Read the dialer's first uni-stream, decode as [`DhtHello`], verify,
+/// and on success return the authenticated `(node_id, pubkey)` pair.
+///
+/// Failure modes are exhaustively mapped to `CloseReason::Dht*`
+/// variants per design-doc §2.5:
+///
+/// | Cause | CloseReason |
+/// |---|---|
+/// | No uni-stream within `HELLO_RECV_TIMEOUT` | `DhtClockSkew` (re-used: peer "missed its window") |
+/// | Connection died before any frame | (connection already closed; no close-reason) |
+/// | Frame failed to decode as `DhtHello` | `DhtMalformedKey` |
+/// | `DhtHello::verify`: `IdMismatch` or `MalformedPubkey` | `DhtMalformedKey` |
+/// | `DhtHello::verify`: `BadSignature` | `DhtBadSignature` |
+/// | `DhtHello::verify`: `ClockSkew` | `DhtClockSkew` |
+///
+/// All paths bump `metrics.dht_hello_rejected` exactly once on failure,
+/// `metrics.dht_hello_accepted` once on success.
+async fn recv_and_verify_hello(
+    dht: &Arc<Dht>, conn: &Connection,
+) -> Result<AuthenticatedPeer, ()> {
+    // Wait for the first uni-stream within HELLO_RECV_TIMEOUT.
+    let mut recv = match timeout(HELLO_RECV_TIMEOUT, conn.accept_uni()).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            // Connection died before any frame arrived. The connection
+            // is already closed — nothing for us to close. We still
+            // bump the rejection counter so operators see this in
+            // metrics rather than diagnosing it via QUIC logs.
+            dht.metrics.inc_dht_hello_rejected();
+            common::debug!(
+                "DHT inbound from {}: connection ended before DhtHello: {e}",
+                conn.remote_address()
+            );
+            return Err(());
+        }
+        Err(_) => {
+            // Timeout. Peer connected but never sent a hello.
+            dht.metrics.inc_dht_hello_rejected();
+            common::warn!(
+                "DHT inbound from {}: no DhtHello within {:?}; closing",
+                conn.remote_address(),
+                HELLO_RECV_TIMEOUT
+            );
+            CloseReason::DhtClockSkew.close(conn);
+            return Err(());
+        }
+    };
+
+    // Decode the framed DhtHello. `unpack` reads the u16 length prefix
+    // and the body, applying `DhtHello`'s `Deserialize` impl.
+    let hello: DhtHello = match DhtHello::unpack(&mut recv).await {
+        Ok(h) => h,
+        Err(e) => {
+            dht.metrics.inc_dht_hello_rejected();
+            common::warn!(
+                "DHT inbound from {}: malformed DhtHello frame: {e}",
+                conn.remote_address()
+            );
+            CloseReason::DhtMalformedKey.close(conn);
+            return Err(());
+        }
+    };
+
+    // Verify (id-binding, pubkey shape, signature, timestamp window).
+    let now = now_ms();
+    match verify_hello_with_close_reason(&hello, now) {
+        Ok(()) => Ok(AuthenticatedPeer {
+            node_id: hello.node_id,
+            pubkey:  hello.pubkey.0,
+        }),
+        Err(reason) => {
+            dht.metrics.inc_dht_hello_rejected();
+            common::warn!(
+                "DHT inbound from {} failed DhtHello verification; closing with {:?}",
+                conn.remote_address(),
+                reason
+            );
+            reason.close(conn);
+            Err(())
+        }
+    }
+}
+
+/// Pure helper: verify `hello` against `now_ms`, mapping any
+/// [`DhtHelloVerifyError`] to the `CloseReason::Dht*` we'd send on the
+/// wire. Extracted from [`recv_and_verify_hello`] so the close-reason
+/// mapping can be unit-tested without spinning up QUIC.
+///
+/// The mapping table — same as the doc on
+/// [`recv_and_verify_hello`] — is:
+///
+/// | Verify error | CloseReason |
+/// |---|---|
+/// | `IdMismatch` / `MalformedPubkey` | `DhtMalformedKey` |
+/// | `BadSignature` | `DhtBadSignature` |
+/// | `ClockSkew` | `DhtClockSkew` |
+fn verify_hello_with_close_reason(
+    hello: &DhtHello, now_ms: u64,
+) -> Result<(), CloseReason> {
+    hello.verify(now_ms).map_err(|e| match e {
+        DhtHelloVerifyError::IdMismatch | DhtHelloVerifyError::MalformedPubkey => {
+            CloseReason::DhtMalformedKey
+        }
+        DhtHelloVerifyError::BadSignature => CloseReason::DhtBadSignature,
+        DhtHelloVerifyError::ClockSkew => CloseReason::DhtClockSkew,
+    })
+}
+
 /// Read one request frame, dispatch, write one response frame.
 ///
-/// `cert_pubkey` is the pubkey extracted (or stubbed as `None`) by
-/// [`handle_peer_connection`]. When present we use it as the routing-
-/// table entry's pubkey; absent (the inbound-no-mTLS case) we fall
-/// back to `[0u8; 32]`.
+/// `auth` is the connection-bound [`AuthenticatedPeer`] established by
+/// `recv_and_verify_hello` at connection accept time. **Every** stream
+/// on the connection — regardless of which RPC it carries — keys the
+/// rate limiter and refreshes the routing table against this same
+/// authenticated NodeId. This closes the phase 1h gap where RPCs
+/// without an in-payload `requester` (Ping, Store, Tombstone,
+/// MerkleSummary, MerkleDiff, FetchRecord) fell back to a per-
+/// connection synthetic id and a `[0u8; 32]` placeholder pubkey.
 ///
-/// Phase 1h item 2: per-peer rate-limit check happens **after** the
-/// request is fully parsed — parse-then-check is the safer pattern
-/// because a malformed wire payload also gets caught here (parse
-/// failure → `DhtMalformedKey` close), and a misbehaving peer can't
-/// avoid the bookkeeping cost of one parse per RPC. The downside is
-/// minimal: we still spent O(few KB) of postcard decode before
-/// deciding to throttle.
+/// Phase 1h item 2 (still applies): per-peer rate-limit check happens
+/// **after** the request is fully parsed — parse-then-check is the
+/// safer pattern because a malformed wire payload also gets caught
+/// here (parse failure → `DhtMalformedKey` close), and a misbehaving
+/// peer can't avoid the bookkeeping cost of one parse per RPC.
 async fn handle_one_stream(
     dht: Arc<Dht>, conn: Connection, mut send: SendStream,
-    recv: &mut quinn::RecvStream, cert_pubkey: Option<[u8; 32]>,
+    recv: &mut quinn::RecvStream, auth: AuthenticatedPeer,
 ) {
     // Read request packet.
     let pkt = match DhtPacket::unpack(recv).await {
@@ -229,36 +451,16 @@ async fn handle_one_stream(
         }
     };
 
-    let requester_id = requester_from_request(&req);
-
-    // Per-peer inbound rate limiting (phase 1h item 2). Keying:
-    // - If the RPC carries a `requester` NodeId (FindNode, FindValue),
-    //   key on that — it's the cleanest cross-connection identity.
-    // - Otherwise, key on a *synthetic* NodeId derived from the QUIC
-    //   `stable_id()` of this connection. This is per-connection
-    //   (not per-peer-NodeId) and so a single misbehaving peer that
-    //   reconnects gets a fresh quota — but the per-source-IP rate
-    //   limiter at the acceptor (a follow-up; see report) is the
-    //   right place to bound that. Within one connection, the
-    //   synthetic NodeId still bounds a flood of `Store`s or
-    //   `FetchRecord`s, which is the immediate DoS vector this item
-    //   targets.
-    //
-    // The cert-pubkey-derived NodeId would be a stronger key (it's
-    // what cert-pinning protects). Today the relay's `peer/1`
-    // server-side TLS config uses `with_no_client_auth()` so we
-    // never see the dialer's cert; cached `cert_pubkey` is `None`.
-    // When mTLS lands, swap in `cert_pubkey` here.
-    let limiter_key = match (requester_id, cert_pubkey) {
-        (Some(id), _) => id,
-        (None, Some(pk)) => NodeId::new(pk),
-        (None, None) => synthetic_id_from_conn(&conn),
-    };
+    // Phase 1i: per-peer inbound rate limiting now keyed on the
+    // authenticated NodeId for *every* RPC kind. A reconnecting
+    // attacker cannot reset their quota — the NodeId is identity-
+    // bound by the signed `DhtHello` we admitted at connection time.
     let class = RpcClass::for_request(&req);
-    if dht.rate_limiters.check(&limiter_key, class).is_err() {
+    if dht.rate_limiters.check(&auth.node_id, class).is_err() {
         dht.metrics.inc_rate_limit_rejections();
         common::warn!(
-            "DHT inbound rate limit tripped (key={limiter_key}, class={class:?}); closing connection"
+            "DHT inbound rate limit tripped (peer={}, class={class:?}); closing connection",
+            auth.node_id
         );
         CloseReason::DhtFlood.close(&conn);
         return;
@@ -266,33 +468,17 @@ async fn handle_one_stream(
 
     let resp = handle_dht_request(&dht, req).await;
 
-    // Routing-table feedback: insert or refresh the requester. Use the
-    // post-handshake-extracted cert pubkey when available (item 1);
-    // otherwise the placeholder. Even the placeholder path is useful —
-    // the requester's `id` and `addr` populate the routing table so
-    // later outbound dials can verify the cert chain via
-    // `lookup::connect_to_peer`'s post-handshake check.
-    if let Some(id) = requester_id {
-        let pubkey = cert_pubkey.unwrap_or([0u8; 32]);
+    // Routing-table feedback: refresh the peer's last-seen status.
+    // Insertion already happened at connection accept time; this
+    // is the LRU-rotate-to-tail path inside `RoutingTable::insert`.
+    {
         let desc = NodeDescriptor {
-            id,
+            id:     auth.node_id,
             addr:   conn.remote_address(),
-            pubkey: pubkey.into(),
+            pubkey: auth.pubkey.into(),
         };
         // Scoped write guard, never held across `await`.
-        let outcome = {
-            let mut routing = dht.routing.write();
-            routing.insert(desc)
-        };
-        let _ = outcome;
-    }
-
-    // Cache the connection. The cached pubkey here is whatever the
-    // post-handshake extraction returned (often `[0u8; 32]` on the
-    // inbound side under `with_no_client_auth`).
-    if let Some(id) = requester_id {
-        let mut map = dht.peer_conns.write();
-        map.entry(id).or_insert_with(|| (conn.clone(), cert_pubkey.unwrap_or([0u8; 32])));
+        let _ = dht.routing.write().insert(desc);
     }
 
     // Write response.
@@ -307,36 +493,6 @@ async fn handle_one_stream(
         return;
     }
     let _ = send.finish();
-}
-
-/// Pull the requester's NodeId out of a `DhtRequest`. Returns `None` for
-/// RPC kinds that don't carry one (`Ping`, `Store`, `Tombstone`,
-/// `MerkleSummary`, `MerkleDiff`, `FetchRecord`).
-fn requester_from_request(req: &DhtRequest) -> Option<NodeId> {
-    match req {
-        DhtRequest::FindNode(r) => Some(r.requester),
-        DhtRequest::FindValue(r) => Some(r.requester),
-        // Anonymous in the wire form. Phase 1h's rate limiter falls
-        // back to a synthetic per-connection key for these.
-        _ => None,
-    }
-}
-
-/// Derive a synthetic [`NodeId`] from a QUIC connection's
-/// `stable_id()`. Used by phase 1h's rate limiter as a per-connection
-/// fallback key when the inbound RPC carries no `requester` NodeId
-/// and the relay's TLS server config doesn't yield a peer cert.
-///
-/// `BLAKE3(stable_id_le_bytes)` is enough — a single connection has
-/// one `stable_id` for its lifetime and we just need a stable-per-call
-/// key for the keyed rate limiter, not a meaningful identity. Using a
-/// cryptographic hash (rather than a raw integer) keeps `NodeId` space
-/// uniform and avoids collisions with any real peer's NodeId.
-fn synthetic_id_from_conn(conn: &Connection) -> NodeId {
-    let bytes = (conn.stable_id() as u64).to_le_bytes();
-    let mut seed = [0u8; 32];
-    seed[..8].copy_from_slice(&bytes);
-    NodeId::new(seed)
 }
 
 /// Dispatch one fully-decoded `DhtRequest` to its handler. Lives as a
@@ -808,5 +964,125 @@ mod tests {
             DhtResponse::MerkleSummary(r) => assert!(r.roots.is_empty()),
             other => panic!("expected MerkleSummary, got {other:?}"),
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 1i — DhtHello close-reason mapping
+    // ---------------------------------------------------------------
+
+    use common::proto::dht_p2p::DhtHello;
+    use common::proto::dht_p2p::dht_hello_signing_input;
+    use common::types::bytes::Bytes;
+
+    /// Build a freshly-signed `DhtHello` for `key` at `timestamp`.
+    /// Mirrors the production dialer in `lookup::send_dht_hello`.
+    fn make_hello(key: &SigningKey, timestamp: u64) -> DhtHello {
+        let pubkey: [u8; 32] = key.verifying_key().to_bytes();
+        let node_id = NodeId::new(pubkey);
+        let msg = dht_hello_signing_input(&node_id, &pubkey, timestamp);
+        let sig = key.sign(&msg).to_bytes();
+        DhtHello {
+            node_id,
+            pubkey: Bytes(pubkey),
+            timestamp,
+            sig: Bytes(sig),
+        }
+    }
+
+    #[test]
+    fn verify_hello_close_reason_maps_clock_skew() {
+        // Stale timestamp → CloseReason::DhtClockSkew.
+        let key = fresh_signing_key();
+        let now: u64 = 1_700_000_000_000;
+        let stale = make_hello(&key, now - 120_000); // 2 min in the past
+        match verify_hello_with_close_reason(&stale, now) {
+            Err(CloseReason::DhtClockSkew) => {}
+            other => panic!("expected DhtClockSkew, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_hello_close_reason_maps_bad_signature() {
+        // Tamper signature → CloseReason::DhtBadSignature.
+        let key = fresh_signing_key();
+        let now: u64 = 1_700_000_000_000;
+        let mut hello = make_hello(&key, now);
+        hello.sig.0[0] ^= 0xFF;
+        match verify_hello_with_close_reason(&hello, now) {
+            Err(CloseReason::DhtBadSignature) => {}
+            other => panic!("expected DhtBadSignature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_hello_close_reason_maps_id_mismatch_to_malformed_key() {
+        // A pubkey that doesn't hash to the claimed node_id surfaces
+        // as `DhtMalformedKey` per the mapping table — same close
+        // bucket as a malformed-Ed25519-key shape.
+        let key_a = fresh_signing_key();
+        let key_b = fresh_signing_key();
+        let now: u64 = 1_700_000_000_000;
+        let mut hello = make_hello(&key_a, now);
+        // Replace node_id with a different identity's id while keeping
+        // the original (a-derived) pubkey + sig.
+        hello.node_id = NodeId::new(key_b.verifying_key().to_bytes());
+        match verify_hello_with_close_reason(&hello, now) {
+            Err(CloseReason::DhtMalformedKey) => {}
+            other => panic!("expected DhtMalformedKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_hello_close_reason_passes_freshly_signed() {
+        let key = fresh_signing_key();
+        let now: u64 = 1_700_000_000_000;
+        let hello = make_hello(&key, now);
+        verify_hello_with_close_reason(&hello, now).expect("valid hello must pass");
+        verify_hello_with_close_reason(&hello, now + 5)
+            .expect("inside skew window must pass");
+    }
+
+    #[test]
+    fn dht_hello_metrics_initially_zero_then_bump_on_reject() {
+        // Tests the metrics-counter wiring for the dht_hello_*
+        // counters added in phase 1i. Drive the counters via the
+        // public increment helpers (the same helpers
+        // `recv_and_verify_hello` calls) and confirm the observed
+        // values change predictably.
+        let mut self_seed = [0u8; 32];
+        self_seed[0] = 1;
+        let self_id = NodeId::new(self_seed);
+        let dht = fresh_dht(self_id);
+
+        // Initial state.
+        assert_eq!(
+            dht.metrics
+                .dht_hello_accepted
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            dht.metrics
+                .dht_hello_rejected
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+
+        // Bump and observe.
+        dht.metrics.inc_dht_hello_accepted();
+        dht.metrics.inc_dht_hello_rejected();
+        dht.metrics.inc_dht_hello_rejected();
+        assert_eq!(
+            dht.metrics
+                .dht_hello_accepted
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            dht.metrics
+                .dht_hello_rejected
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
     }
 }

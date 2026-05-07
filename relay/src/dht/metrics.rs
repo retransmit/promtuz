@@ -59,6 +59,22 @@ pub struct Metrics {
     /// in the phase 1h dispatch report for the inbound-path gap
     /// (peer_identity is `None` under `with_no_client_auth()`).
     pub cert_pubkey_extraction_failures: AtomicU64,
+
+    // --- DHT connection-level handshake (phase 1i) ---
+    /// Inbound `peer/1` connection accepted a valid signed `DhtHello`
+    /// from the dialer. Bumped once per successful application-layer
+    /// handshake — pairs with [`Self::peer_conns_opened`] (which only
+    /// counts the *outbound* dial side; the inbound side now uses this
+    /// counter to track authenticated-and-admitted peers).
+    pub dht_hello_accepted: AtomicU64,
+
+    /// Inbound `peer/1` connection rejected because the dialer's
+    /// `DhtHello` failed verification (bad signature, id-pubkey
+    /// mismatch, malformed pubkey, stale/future timestamp, or no
+    /// hello arrived within the 5s timeout). Bumped once per
+    /// rejected connection. See `relay/src/dht/handler.rs` for the
+    /// per-failure-mode close-reason mapping.
+    pub dht_hello_rejected: AtomicU64,
 }
 
 impl Metrics {
@@ -152,5 +168,15 @@ impl Metrics {
 
     pub fn inc_cert_pubkey_extraction_failures(&self) {
         self.cert_pubkey_extraction_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // --- DHT connection-level handshake (phase 1i) ---
+
+    pub fn inc_dht_hello_accepted(&self) {
+        self.dht_hello_accepted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_dht_hello_rejected(&self) {
+        self.dht_hello_rejected.fetch_add(1, Ordering::Relaxed);
     }
 }
