@@ -309,6 +309,30 @@ pub const MAX_QUEUE_FETCH_PAGES: usize = 10;
 /// §7.2 (lazy on `evict_expired` sweep).
 pub const MAX_MIGRATE_PER_SWEEP: usize = 256;
 
+/// Maximum number of in-flight `forward_to_homes` migration tasks
+/// the periodic scheduler will run in parallel during one drift
+/// sweep. Bounds the outbound RPC fan-out so a sweep can complete
+/// even when every candidate's new K-closest set is unhealthy:
+/// each migration opens up to K=3 outbound `Forward` RPCs (1500ms
+/// `FORWARD_TIMEOUT_MS` ceiling each), so a single migration can
+/// hold up to 3 outbound bi-streams worst-case. Capping concurrent
+/// migrations at 8 → ≤24 simultaneous outbound `Forward` streams,
+/// well inside any reasonable per-peer connection limit.
+///
+/// Same magnitude as [`FETCH_RECORD_CONCURRENCY`] (= 8) — both are
+/// "post-bootstrap I/O fan-out caps" in the same regime.
+///
+/// **Sweep wall-clock budget reasoning**: a fully-saturated
+/// `MAX_MIGRATE_PER_SWEEP = 256` candidates serialised across 8
+/// concurrent slots = 32 sequential mini-batches; each mini-batch
+/// completes in ≤`FORWARD_TIMEOUT_MS` (1500 ms) → upper bound ~48 s
+/// per sweep, comfortably inside the 60 s `EVICT_INTERVAL_MS`. A
+/// healthy network completes each migration in ~50 ms (one RTT
+/// per home), so the typical sweep finishes well under 2 s.
+///
+/// design-doc: `misc/specs/STICKY_HOME_RELAY.md` §4.4 / §7.2.
+pub const MAX_CONCURRENT_MIGRATIONS: usize = 8;
+
 // ---------------------------------------------------------------------------
 // Per-peer inbound-RPC rate limits (§8.4 / §8.7 DoS hardening)
 // ---------------------------------------------------------------------------

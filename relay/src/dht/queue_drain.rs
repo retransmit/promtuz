@@ -434,29 +434,50 @@ pub(crate) async fn handle_queue_fetch_rpc(
 
 /// Phase 2d — home-side handler for `DhtRequest::QueueFetchAck`.
 ///
-/// The ack signature only proves the user authorised deletion of the
-/// listed dispatch ids — it does **not** bind a home identity (the
-/// transcript is shared across all K homes by design, so one
-/// signature drains all). Each home only deletes the ids it actually
-/// holds; the rest are no-ops.
+/// The ack signature proves the user authorised deletion of the
+/// listed dispatch ids *and* (phase 2d-fix) authorised the specific
+/// requesting relay to drive the deletion. It does **not** bind a
+/// target-home identity — the transcript is shared across all K
+/// homes by design, so one signature drains all — but the
+/// requester-binding closes the cross-relay replay vector where a
+/// malicious relay R_evil that the user briefly authenticated to
+/// could otherwise forward the captured ack to the user's *other*
+/// K-closest homes (which it learned via DHT lookup) and force them
+/// to drop queued messages without delivery. Each home only deletes
+/// the ids it actually holds; the rest are no-ops.
 ///
-/// 1. `QueueFetchAck::verify(req, now_ms)` — user_sig + skew + length
-///    bound (`delivered_ids.len() <= MAX_FETCH_QUEUE_ACK_IDS`).
-/// 2. `delete_queue_entries(dht, &user_ipk, &delivered_ids)` —
+/// **Verification ladder**:
+/// 1. `req.requester_relay_id == authenticated_peer_id` — the
+///    connection's authenticated `DhtHello` peer id must equal the
+///    `requester_relay_id` field on the wire. Done first because a
+///    mismatch shortcuts the (more expensive) Ed25519 verify.
+/// 2. `QueueFetchAck::verify(req, now_ms)` — user_sig + skew +
+///    length bound (`delivered_ids.len() <=
+///    MAX_FETCH_QUEUE_ACK_IDS`).
+/// 3. `delete_queue_entries(dht, &user_ipk, &delivered_ids)` —
 ///    bounded prefix-scan + delete.
 ///
-/// On signature/skew/length failure we return `ok = false`; the
-/// per-stream dispatcher does NOT additionally close the connection
-/// because (per phase 2a contract) the per-RPC verifier returns soft
-/// rejects in the response body. Length-overflow specifically *would*
-/// merit a hard close (`CloseReason::DhtForwardRejected`) but the
-/// dispatcher contract is "one request, one response", so the soft
-/// reject is the only path available.
+/// On signature/skew/length/requester-mismatch failure we return
+/// `ok = false`; the per-stream dispatcher does NOT additionally
+/// close the connection because (per phase 2a contract) the per-RPC
+/// verifier returns soft rejects in the response body. Length-
+/// overflow specifically *would* merit a hard close
+/// (`CloseReason::DhtForwardRejected`) but the dispatcher contract is
+/// "one request, one response", so the soft reject is the only path
+/// available.
 ///
 /// design-doc: `STICKY_HOME_RELAY.md` §5.2 (`QueueFetchAck` shape).
 pub(crate) async fn handle_queue_fetch_ack_rpc(
-    dht: &Arc<Dht>, req: QueueFetchAck, now_ms: u64,
+    dht: &Arc<Dht>, req: QueueFetchAck, authenticated_peer_id: NodeId, now_ms: u64,
 ) -> QueueFetchAckResp {
+    // 1. Phase 2d-fix — requester binding. If the wire-claimed
+    //    `requester_relay_id` doesn't match the connection's
+    //    authenticated peer id, the ack was either captured on a
+    //    different connection (the cross-relay replay path) or the
+    //    requesting relay is misconfigured. Either way, reject.
+    if req.requester_relay_id != authenticated_peer_id {
+        return QueueFetchAckResp { ok: false };
+    }
     if req.verify(now_ms).is_err() {
         return QueueFetchAckResp { ok: false };
     }
@@ -509,6 +530,14 @@ fn xor_dist_qd(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
 /// a queue-not-deleted at one home means duplicate delivery on the
 /// next reconnect, which the client already dedupes by id.
 ///
+/// **Phase 2d-fix — `requester_relay_id`**: the wire ack binds this
+/// relay's NodeId into the user-signed transcript. Each home rejects
+/// the ack at the handler if its connection's authenticated peer id
+/// doesn't equal `dht.node_id` (i.e. each home only honours acks
+/// arriving on its connection from *this* relay). One signature
+/// still serves all K homes — the binding is to "the relay the user
+/// authenticated to," not to a specific home identity.
+///
 /// **Empty-`delivered_ids` short-circuit**: if the union is empty
 /// (no homes contributed messages), we still send the ack so the
 /// homes' rate-limiters log the ack RPC. Caller can also choose to
@@ -522,6 +551,7 @@ pub(crate) async fn ack_remote_queues(
     }
     let ack_pkt = QueueFetchAck {
         user_ipk: Bytes(*user_ipk),
+        requester_relay_id: dht.node_id,
         delivered_ids,
         timestamp,
         user_sig: Bytes(sig),

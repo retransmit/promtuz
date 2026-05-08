@@ -263,12 +263,14 @@ impl Relay {
                     if let Err(err) = match packet {
                         SRelayPacket::Deliver(msg) => handle_deliver(&mut send, ipk, msg).await,
                         SRelayPacket::AckAuthRequest {
+                            requester_relay_id,
                             delivered_ids,
                             suggested_timestamp,
                         } => {
                             handle_ack_auth_request(
                                 &mut send,
                                 ipk,
+                                requester_relay_id,
                                 delivered_ids,
                                 suggested_timestamp,
                             )
@@ -364,6 +366,16 @@ async fn handle_deliver(tx: &mut SendStream, ipk: VerifyingKey, msg: DeliverP) -
 /// signed pair out as `QueueFetchAck` to each home so the home-side
 /// `cf_dht_queue` entries get GC'd.
 ///
+/// **Phase 2d-fix — `requester_relay_id` binding**: the relay supplies
+/// its own NodeId via `requester_relay_id`; we sign that value
+/// verbatim into the transcript. The home cross-checks the field
+/// against the connection's authenticated peer id when handling the
+/// resulting `QueueFetchAck`, so a captured ack can no longer be
+/// redirected to a different home via a different relay (cross-relay
+/// replay defense). Libcore neither validates nor rewrites the
+/// supplied id — we trust the relay we authenticated to to provide
+/// its own identity correctly; the home does the cross-check.
+///
 /// **Why we trust `suggested_timestamp`** rather than reading our own
 /// clock: the relay's clock is what matters for the home-side skew
 /// check (the homes verify against the timestamp embedded in the
@@ -375,8 +387,8 @@ async fn handle_deliver(tx: &mut SendStream, ipk: VerifyingKey, msg: DeliverP) -
 /// verifier would reject it anyway (`QueueFetchAck::verify` returns
 /// `TooManyIds` past the cap); failing here saves the round trip.
 async fn handle_ack_auth_request(
-    tx: &mut SendStream, ipk: VerifyingKey, delivered_ids: Vec<[u8; 16]>,
-    suggested_timestamp: u64,
+    tx: &mut SendStream, ipk: VerifyingKey, requester_relay_id: NodeId,
+    delivered_ids: Vec<[u8; 16]>, suggested_timestamp: u64,
 ) -> Result<()> {
     if delivered_ids.len() > MAX_FETCH_QUEUE_ACK_IDS {
         warn!(
@@ -387,8 +399,12 @@ async fn handle_ack_auth_request(
         return Ok(());
     }
     let self_ipk = ipk.to_bytes();
-    let transcript =
-        queue_fetch_ack_signing_input(&self_ipk, &delivered_ids, suggested_timestamp);
+    let transcript = queue_fetch_ack_signing_input(
+        &self_ipk,
+        &requester_relay_id,
+        &delivered_ids,
+        suggested_timestamp,
+    );
     let sig = IdentitySigner::sign(&transcript)?;
     CRelayPacket::AckAuth {
         sig:       Bytes::from(sig.to_bytes()),
@@ -414,35 +430,44 @@ mod tests {
     //! here.
     use common::proto::dht_p2p::DHT_QUEUE_FETCH_ACK_SIG_DOMAIN;
     use common::proto::dht_p2p::queue_fetch_ack_signing_input;
+    use common::quic::id::NodeId;
 
     /// Pin the transcript shape: `domain || version (BE u16) || ipk
-    /// (32) || count (BE u32) || n*16 || ts (BE u64)`. Catches a
-    /// regression in either side of the helper / verifier boundary.
+    /// (32) || requester_relay_id (32) || count (BE u32) || n*16 ||
+    /// ts (BE u64)`. The phase 2d-fix `requester_relay_id` field sits
+    /// after `ipk` and before the count prefix; catches a regression
+    /// in either side of the helper / verifier boundary.
     #[test]
     fn handle_ack_auth_request_signs_correct_transcript() {
         let user_ipk: [u8; 32] = [0x11; 32];
+        let req_id = NodeId::new([0x42u8; 32]);
         let ids: Vec<[u8; 16]> = vec![[0xAA; 16], [0xBB; 16], [0xCC; 16]];
         let ts: u64 = 1_700_000_000_004;
 
-        let transcript = queue_fetch_ack_signing_input(&user_ipk, &ids, ts);
+        let transcript = queue_fetch_ack_signing_input(&user_ipk, &req_id, &ids, ts);
         let expected_len = DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len()
             + 2  // version
             + 32 // ipk
+            + NodeId::LEN // requester_relay_id (phase 2d-fix)
             + 4  // count BE u32
             + ids.len() * 16
             + 8; // ts BE u64
         assert_eq!(transcript.len(), expected_len);
 
         // Layout invariants: domain prefix at offset 0, version next,
-        // ipk after, count after that, then ids, then ts.
+        // ipk after, requester_relay_id after, count after that, then
+        // ids, then ts.
         assert!(transcript.starts_with(DHT_QUEUE_FETCH_ACK_SIG_DOMAIN));
         let off = DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len();
         // version is BE u16 at `off..off+2`
         assert_eq!(transcript[off..off + 2].len(), 2);
         // ipk at `off+2..off+2+32`
         assert_eq!(&transcript[off + 2..off + 2 + 32], &user_ipk);
-        // count at `off+2+32..off+2+32+4`
-        let count_off = off + 2 + 32;
+        // requester_relay_id at `off+2+32..off+2+32+32`
+        let rid_off = off + 2 + 32;
+        assert_eq!(&transcript[rid_off..rid_off + NodeId::LEN], req_id.as_bytes());
+        // count at `rid_off+32..rid_off+32+4`
+        let count_off = rid_off + NodeId::LEN;
         let count_bytes: [u8; 4] = transcript[count_off..count_off + 4].try_into().unwrap();
         assert_eq!(u32::from_be_bytes(count_bytes), ids.len() as u32);
         // ts at the end as BE u64
@@ -452,18 +477,25 @@ mod tests {
     }
 
     /// Confirm the empty-ids edge case is well-formed: the transcript
-    /// length collapses to `domain || version || ipk || count(0) ||
-    /// ts`, no body. The relay-side verifier accepts an empty-ids ack
-    /// (it's a probe-only "I'm here" signal).
+    /// length collapses to `domain || version || ipk ||
+    /// requester_relay_id || count(0) || ts`, no body. The relay-side
+    /// verifier accepts an empty-ids ack (it's a probe-only "I'm
+    /// here" signal).
     #[test]
     fn handle_ack_auth_request_empty_ids_transcript_is_well_formed() {
         let user_ipk: [u8; 32] = [0x22; 32];
+        let req_id = NodeId::new([0x55u8; 32]);
         let ids: Vec<[u8; 16]> = vec![];
         let ts: u64 = 1_700_000_000_005;
 
-        let transcript = queue_fetch_ack_signing_input(&user_ipk, &ids, ts);
-        let expected_len =
-            DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len() + 2 + 32 + 4 + 0 + 8;
+        let transcript = queue_fetch_ack_signing_input(&user_ipk, &req_id, &ids, ts);
+        let expected_len = DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len()
+            + 2
+            + 32
+            + NodeId::LEN
+            + 4
+            + 0
+            + 8;
         assert_eq!(transcript.len(), expected_len);
     }
 }

@@ -813,8 +813,20 @@ mod verify_impl {
         ///    before discovering the size violation.
         /// 2. **Pubkey shape**: `user_ipk` parses as Ed25519.
         /// 3. **Signature**: `user_sig` verifies under `user_ipk` over
-        ///    [`queue_fetch_ack_signing_input`].
+        ///    [`queue_fetch_ack_signing_input`] — the transcript binds
+        ///    `(user_ipk, requester_relay_id, delivered_ids,
+        ///    timestamp)`, so a captured signature is non-replayable
+        ///    against a different requester (phase 2d-fix replay
+        ///    defense; see [`QueueFetchAck`]'s doc-comment for the
+        ///    threat model).
         /// 4. **Timestamp window**: split stale / future.
+        ///
+        /// **Note**: this verifier does *not* check that
+        /// `requester_relay_id` matches the connection's authenticated
+        /// peer id. That check belongs in the handler (the wire-format
+        /// validator has no knowledge of the carrying connection); see
+        /// `relay::dht::queue_drain::handle_queue_fetch_ack_rpc` for
+        /// the corresponding handler-side enforcement.
         ///
         /// Empty `delivered_ids` is legal — see the [`QueueFetchAck`]
         /// doc-comment for the rationale.
@@ -832,6 +844,7 @@ mod verify_impl {
             let sig = Signature::from_bytes(&self.user_sig.0);
             let msg = queue_fetch_ack_signing_input(
                 &self.user_ipk.0,
+                &self.requester_relay_id,
                 &self.delivered_ids,
                 self.timestamp,
             );
@@ -1303,6 +1316,13 @@ pub struct QueueFetchResp {
 /// signature non-replayable across packet kinds — particularly important
 /// because a forged ack would force the home relay to drop queued
 /// messages.
+///
+/// The `-v1` suffix is preserved across the phase 2d-fix transcript
+/// extension (which added `requester_relay_id` after `user_ipk`) because
+/// the addition is a refinement of the existing protocol rather than a
+/// distinct ack-protocol revision; bumping to `-v2` would conflate
+/// "transcript-shape changed" with "ack semantics changed" and force a
+/// double protocol-version bump on every replica simultaneously.
 pub const DHT_QUEUE_FETCH_ACK_SIG_DOMAIN: &[u8] = b"promtuz-dht-queue-fetch-ack-v1";
 
 /// Recipient-relay → home-relay request: I successfully delivered these
@@ -1316,6 +1336,19 @@ pub const DHT_QUEUE_FETCH_ACK_SIG_DOMAIN: &[u8] = b"promtuz-dht-queue-fetch-ack-
 /// `CRelayPacket::AckDrain` semantics — only the user authorises
 /// deletion of their own queue.
 ///
+/// **Phase 2d-fix — cross-relay replay defense via `requester_relay_id`**:
+/// the original phase 2a transcript bound only `(user_ipk, delivered_ids,
+/// timestamp)`, which let a malicious relay R_evil that the user
+/// authenticated to once forward the same signed ack to OTHER K-closest
+/// homes (which it learned via DHT lookup) and force them to delete the
+/// listed dispatch IDs even though those dispatches may not have been
+/// delivered to the user. The fix mirrors the existing
+/// [`QueueFetch::requester_relay_id`] binding (§5.1): the requester relay
+/// id is now part of the signed transcript, and the home additionally
+/// checks `req.requester_relay_id == authenticated_peer_id` in its
+/// handler. A captured ack can no longer be redirected to a different
+/// home outside the user's chosen drainer.
+///
 /// **Empty ack is legal**: a `delivered_ids = []` ack is a no-op and the
 /// home relay's verifier accepts it. The flow doesn't currently produce
 /// empty acks, but the wire format permits them so future clients can
@@ -1326,6 +1359,16 @@ pub struct QueueFetchAck {
     /// User whose queue to GC. Must match the `QueueFetchResp` whose
     /// dispatches we're acking.
     pub user_ipk: Bytes<32>,
+    /// Requesting relay's `BLAKE3(NodeKey)` identity. Bound into the
+    /// signed transcript so a captured `user_sig` cannot be redirected
+    /// to a different home (the user authorises *this* relay to drain
+    /// + ack on their behalf, not any relay that gets hold of the
+    /// captured signature). Mirrors [`QueueFetch::requester_relay_id`]
+    /// for the same replay-defense reason; the home additionally
+    /// rejects the RPC at the handler layer if `requester_relay_id`
+    /// doesn't match the connection's authenticated `DhtHello` peer
+    /// id.
+    pub requester_relay_id: crate::quic::id::NodeId,
     /// Dispatch IDs to delete from `cf_dht_queue`. Bounded by
     /// [`MAX_FETCH_QUEUE_ACK_IDS`] (= [`MAX_FETCH_QUEUE_BATCH`]) — one
     /// ack covers exactly one fetch batch. `Vec<[u8; 16]>` because each
@@ -1345,7 +1388,8 @@ pub struct QueueFetchAck {
 /// Layout:
 /// ```text
 ///   DHT_QUEUE_FETCH_ACK_SIG_DOMAIN || PROTOCOL_VERSION (BE u16)
-///     || user_ipk (32) || count (BE u32) || id_0 (16) || ... || id_n (16)
+///     || user_ipk (32) || requester_relay_id (32)
+///     || count (BE u32) || id_0 (16) || ... || id_n (16)
 ///     || timestamp (BE u64)
 /// ```
 ///
@@ -1355,15 +1399,24 @@ pub struct QueueFetchAck {
 /// done explicitly here because signing-input helpers must be
 /// byte-stable across protocol revisions and not piggyback on postcard's
 /// internal length encoding.
+///
+/// **Phase 2d-fix**: `requester_relay_id` is positioned immediately after
+/// `user_ipk`, mirroring [`queue_fetch_signing_input`]'s layout. This is
+/// a wire-format break vs. the original phase 2a layout (no
+/// `requester_relay_id` in the transcript) but pre-1.0 the project
+/// accepts these breaks; `PROTOCOL_VERSION` already advanced past 2a's
+/// release.
 pub fn queue_fetch_ack_signing_input(
-    user_ipk: &[u8; 32], delivered_ids: &[[u8; 16]], timestamp: u64,
+    user_ipk: &[u8; 32], requester_relay_id: &crate::quic::id::NodeId,
+    delivered_ids: &[[u8; 16]], timestamp: u64,
 ) -> Vec<u8> {
     let count = delivered_ids.len() as u32;
-    // domain + version (2) + ipk (32) + count (4) + n*16 + ts (8)
+    // domain + version (2) + ipk (32) + node_id (32) + count (4) + n*16 + ts (8)
     let mut buf = Vec::with_capacity(
         DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len()
             + 2
             + 32
+            + crate::quic::id::NodeId::LEN
             + 4
             + delivered_ids.len() * 16
             + 8,
@@ -1371,6 +1424,7 @@ pub fn queue_fetch_ack_signing_input(
     buf.extend_from_slice(DHT_QUEUE_FETCH_ACK_SIG_DOMAIN);
     buf.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
     buf.extend_from_slice(user_ipk);
+    buf.extend_from_slice(requester_relay_id.as_bytes());
     buf.extend_from_slice(&count.to_be_bytes());
     for id in delivered_ids {
         buf.extend_from_slice(id);
@@ -2115,13 +2169,20 @@ mod tests {
     }
 
     fn build_queue_fetch_ack(
-        user: &SigningKey, delivered_ids: Vec<[u8; 16]>, timestamp: u64,
+        user: &SigningKey, requester_relay_id: NodeId,
+        delivered_ids: Vec<[u8; 16]>, timestamp: u64,
     ) -> QueueFetchAck {
         let user_ipk: [u8; 32] = user.verifying_key().to_bytes();
-        let msg = queue_fetch_ack_signing_input(&user_ipk, &delivered_ids, timestamp);
+        let msg = queue_fetch_ack_signing_input(
+            &user_ipk,
+            &requester_relay_id,
+            &delivered_ids,
+            timestamp,
+        );
         let sig = user.sign(&msg);
         QueueFetchAck {
             user_ipk: user_ipk.into(),
+            requester_relay_id,
             delivered_ids,
             timestamp,
             user_sig: sig.to_bytes().into(),
@@ -2196,8 +2257,11 @@ mod tests {
     #[test]
     fn queue_fetch_ack_round_trip() {
         let user = fresh_signing_key();
+        let req_relay = fresh_signing_key();
+        let req_id = NodeId::new(req_relay.verifying_key().to_bytes());
         let ack = build_queue_fetch_ack(
             &user,
+            req_id,
             vec![[1u8; 16], [2u8; 16], [3u8; 16]],
             1_700_000_000_000,
         );
@@ -2206,7 +2270,8 @@ mod tests {
         assert_eq!(decoded, ack);
 
         // Empty ack must also round-trip — wire format permits it.
-        let empty = build_queue_fetch_ack(&user, Vec::new(), 1_700_000_000_000);
+        let empty =
+            build_queue_fetch_ack(&user, req_id, Vec::new(), 1_700_000_000_000);
         let bytes = empty.ser().expect("ser");
         let decoded = QueueFetchAck::deser(&bytes).expect("deser");
         assert_eq!(decoded, empty);
@@ -2241,7 +2306,7 @@ mod tests {
         let now: u64 = 1_700_000_000_000;
         let fwd = build_forward(&sender_relay, dispatch.clone(), now);
         let qf = build_queue_fetch(&user, req_id, now);
-        let ack = build_queue_fetch_ack(&user, vec![[1u8; 16]], now);
+        let ack = build_queue_fetch_ack(&user, req_id, vec![[1u8; 16]], now);
 
         let requests = vec![
             DhtRequest::Forward(fwd),
@@ -2331,21 +2396,30 @@ mod tests {
     #[test]
     fn queue_fetch_ack_signing_input_layout_is_stable() {
         let ipk = [0x77u8; 32];
+        let mut node_bytes = [0u8; 32];
+        node_bytes[0] = 0x42;
+        let node_id = NodeId::from_bytes(node_bytes);
         let ids = vec![[0xAAu8; 16], [0xBBu8; 16]];
         let timestamp: u64 = 0xDEAD_BEEF_CAFE_F00D;
 
-        let buf = queue_fetch_ack_signing_input(&ipk, &ids, timestamp);
+        let buf = queue_fetch_ack_signing_input(&ipk, &node_id, &ids, timestamp);
 
-        // domain + version (2) + ipk (32) + count (4) + 2*16 + ts (8)
+        // domain + version (2) + ipk (32) + node_id (32) + count (4)
+        //   + 2*16 + ts (8)
         assert_eq!(
             buf.len(),
-            DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len() + 2 + 32 + 4 + 2 * 16 + 8
+            DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len() + 2 + 32 + 32 + 4 + 2 * 16 + 8
         );
         assert!(buf.starts_with(DHT_QUEUE_FETCH_ACK_SIG_DOMAIN));
         let off = DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len();
         assert_eq!(&buf[off..off + 2], &PROTOCOL_VERSION.to_be_bytes());
         let off = off + 2;
         assert_eq!(&buf[off..off + 32], &ipk);
+        let off = off + 32;
+        // Phase 2d-fix: requester_relay_id binds the transcript to the
+        // requesting relay so a captured ack can't be redirected to a
+        // different home (mirrors `queue_fetch_signing_input` §5.1).
+        assert_eq!(&buf[off..off + 32], node_id.as_bytes());
         let off = off + 32;
         assert_eq!(&buf[off..off + 4], &(ids.len() as u32).to_be_bytes());
         let off = off + 4;
@@ -2434,9 +2508,12 @@ mod tests {
     #[test]
     fn queue_fetch_ack_round_trip_and_verify() {
         let user = fresh_signing_key();
+        let req_relay = fresh_signing_key();
+        let req_id = NodeId::new(req_relay.verifying_key().to_bytes());
         let now: u64 = 1_700_000_000_000;
         let ack = build_queue_fetch_ack(
             &user,
+            req_id,
             vec![[1u8; 16], [2u8; 16], [3u8; 16]],
             now,
         );
@@ -2448,7 +2525,7 @@ mod tests {
         decoded.verify(now).expect("verify ok");
 
         // Empty ack must also verify cleanly — no-op deletion.
-        let empty = build_queue_fetch_ack(&user, Vec::new(), now);
+        let empty = build_queue_fetch_ack(&user, req_id, Vec::new(), now);
         empty.verify(now).expect("empty ack must verify");
     }
 
@@ -2561,9 +2638,40 @@ mod tests {
     #[test]
     fn queue_fetch_ack_verify_rejects_bad_user_sig() {
         let user = fresh_signing_key();
+        let req_relay = fresh_signing_key();
+        let req_id = NodeId::new(req_relay.verifying_key().to_bytes());
         let now: u64 = 1_700_000_000_000;
-        let mut ack = build_queue_fetch_ack(&user, vec![[1u8; 16]], now);
+        let mut ack =
+            build_queue_fetch_ack(&user, req_id, vec![[1u8; 16]], now);
         ack.user_sig.0[0] ^= 0x01;
+        match ack.verify(now) {
+            Err(QueueFetchAckVerifyError::BadUserSig) => {}
+            other => panic!("expected BadUserSig, got {other:?}"),
+        }
+    }
+
+    /// Phase 2d-fix — capture an ack the user signed for requester R_a,
+    /// then mutate `requester_relay_id` to a different R_b (as a
+    /// malicious relay would when attempting to redirect the captured
+    /// ack to a different home). The signature was bound to R_a in the
+    /// transcript, so verifying under the mutated R_b must fail with
+    /// `BadUserSig`. This is the wire-level part of the cross-relay
+    /// replay defense; the handler-side check that
+    /// `requester_relay_id == authenticated_peer_id` lives in
+    /// `relay::dht::queue_drain::handle_queue_fetch_ack_rpc`.
+    #[test]
+    fn queue_fetch_ack_verify_rejects_redirected_requester() {
+        let user = fresh_signing_key();
+        let req_a = fresh_signing_key();
+        let req_b = fresh_signing_key();
+        let req_a_id = NodeId::new(req_a.verifying_key().to_bytes());
+        let req_b_id = NodeId::new(req_b.verifying_key().to_bytes());
+        let now: u64 = 1_700_000_000_000;
+        let mut ack =
+            build_queue_fetch_ack(&user, req_a_id, vec![[1u8; 16]], now);
+        // Forward the captured ack with a different requester id (the
+        // attacker's redirection attempt).
+        ack.requester_relay_id = req_b_id;
         match ack.verify(now) {
             Err(QueueFetchAckVerifyError::BadUserSig) => {}
             other => panic!("expected BadUserSig, got {other:?}"),
@@ -2579,6 +2687,8 @@ mod tests {
         // designed-in defence per the doc-comment on
         // `QueueFetchAck::verify`).
         let user = fresh_signing_key();
+        let req_relay = fresh_signing_key();
+        let req_id = NodeId::new(req_relay.verifying_key().to_bytes());
         let now: u64 = 1_700_000_000_000;
         let oversize: Vec<[u8; 16]> =
             (0..MAX_FETCH_QUEUE_ACK_IDS as u32 + 1)
@@ -2588,7 +2698,7 @@ mod tests {
                     id
                 })
                 .collect();
-        let ack = build_queue_fetch_ack(&user, oversize, now);
+        let ack = build_queue_fetch_ack(&user, req_id, oversize, now);
         match ack.verify(now) {
             Err(QueueFetchAckVerifyError::TooManyIds) => {}
             other => panic!("expected TooManyIds, got {other:?}"),
@@ -2598,9 +2708,12 @@ mod tests {
     #[test]
     fn queue_fetch_ack_verify_rejects_stale_timestamp() {
         let user = fresh_signing_key();
+        let req_relay = fresh_signing_key();
+        let req_id = NodeId::new(req_relay.verifying_key().to_bytes());
         let now: u64 = 1_700_000_000_000;
         let stale_ts = now - 120_000;
-        let ack = build_queue_fetch_ack(&user, vec![[1u8; 16]], stale_ts);
+        let ack =
+            build_queue_fetch_ack(&user, req_id, vec![[1u8; 16]], stale_ts);
         match ack.verify(now) {
             Err(QueueFetchAckVerifyError::StaleTimestamp) => {}
             other => panic!("expected StaleTimestamp, got {other:?}"),

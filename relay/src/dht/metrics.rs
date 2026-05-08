@@ -144,6 +144,28 @@ pub struct Metrics {
     /// least one dispatch. Counts the *successful drain* event, not
     /// the per-RPC success — see `queue_fetches_sent` for that.
     pub queue_fetches_succeeded: AtomicU64,
+
+    // --- sticky-home K-set drift migration (phase 2d-fix) ---
+    /// `cf_dht_queue` entries the periodic scheduler attempted to
+    /// migrate to a recipient's new K-closest set. One bump per
+    /// candidate `(MessageKey, DispatchP)` returned by
+    /// `plan_drift_migrations` and submitted to the migration
+    /// driver. Pair with `migrations_succeeded` /
+    /// `migrations_failed` to compute the per-sweep churn ratio.
+    pub migrations_attempted: AtomicU64,
+
+    /// Migrated entries whose `forward_to_homes` outbound fan-out
+    /// reached `FORWARD_K_MIN` "Stored or Delivered" replies and
+    /// whose local `cf_dht_queue` row was subsequently deleted. The
+    /// scheduler only deletes on success; failures leave the entry
+    /// for the next sweep.
+    pub migrations_succeeded: AtomicU64,
+
+    /// Migrated entries whose `forward_to_homes` returned
+    /// `Err(_)` (insufficient replicas, no homes, etc.) or whose
+    /// per-task panicked / cancelled. The local entry is *not*
+    /// deleted on failure — the next sweep retries.
+    pub migrations_failed: AtomicU64,
 }
 
 impl Metrics {
@@ -295,5 +317,19 @@ impl Metrics {
 
     pub fn inc_queue_fetches_succeeded(&self) {
         self.queue_fetches_succeeded.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // --- sticky-home K-set drift migration (phase 2d-fix) ---
+
+    pub fn inc_migrations_attempted(&self) {
+        self.migrations_attempted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_migrations_succeeded(&self) {
+        self.migrations_succeeded.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_migrations_failed(&self) {
+        self.migrations_failed.fetch_add(1, Ordering::Relaxed);
     }
 }

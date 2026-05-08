@@ -466,7 +466,7 @@ async fn handle_one_stream(
         return;
     }
 
-    let resp = handle_dht_request(&dht, req).await;
+    let resp = handle_dht_request(&dht, req, auth.node_id).await;
 
     // Routing-table feedback: refresh the peer's last-seen status.
     // Insertion already happened at connection accept time; this
@@ -498,7 +498,18 @@ async fn handle_one_stream(
 /// Dispatch one fully-decoded `DhtRequest` to its handler. Lives as a
 /// pure function (no streams, no I/O) so unit tests can call it
 /// directly.
-pub(crate) async fn handle_dht_request(dht: &Arc<Dht>, req: DhtRequest) -> DhtResponse {
+///
+/// `authenticated_peer_id` is the connection-bound `DhtHello` peer
+/// id from `handle_one_stream`. Most handlers don't consume it — the
+/// per-RPC verify step on each request body already authenticates
+/// the *content*. The exception is
+/// [`super::queue_drain::handle_queue_fetch_ack_rpc`], which uses
+/// the authenticated peer id to enforce the phase 2d-fix
+/// `requester_relay_id` binding (a captured ack must arrive on the
+/// connection of the relay it was signed for).
+pub(crate) async fn handle_dht_request(
+    dht: &Arc<Dht>, req: DhtRequest, authenticated_peer_id: NodeId,
+) -> DhtResponse {
     match req {
         DhtRequest::Ping(p) => {
             dht.metrics.inc_pings_received();
@@ -571,7 +582,13 @@ pub(crate) async fn handle_dht_request(dht: &Arc<Dht>, req: DhtRequest) -> DhtRe
             super::queue_drain::handle_queue_fetch_rpc(dht, req, now_ms()).await,
         ),
         DhtRequest::QueueFetchAck(req) => DhtResponse::QueueFetchAck(
-            super::queue_drain::handle_queue_fetch_ack_rpc(dht, req, now_ms()).await,
+            super::queue_drain::handle_queue_fetch_ack_rpc(
+                dht,
+                req,
+                authenticated_peer_id,
+                now_ms(),
+            )
+            .await,
         ),
     }
 }
@@ -758,7 +775,7 @@ mod tests {
 
         let nonce = [42u8; 16];
         let req = DhtRequest::Ping(Ping { nonce: nonce.into(), timestamp: 999 });
-        let resp = handle_dht_request(&dht, req).await;
+        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
         match resp {
             DhtResponse::Pong(p) => {
                 assert_eq!(p.nonce.0, nonce);
@@ -802,7 +819,7 @@ mod tests {
             target:    (*target.as_bytes()).into(),
             requester,
         });
-        let resp = handle_dht_request(&dht, req).await;
+        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
         match resp {
             DhtResponse::FindNode(r) => {
                 assert!(r.closer.len() <= MAX_FIND_NODE_RESULTS);
@@ -837,7 +854,7 @@ mod tests {
             user_ipk: record.user_ipk,
             requester,
         });
-        let resp = handle_dht_request(&dht, req).await;
+        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
         match resp {
             DhtResponse::FindValue(r) => match r.result {
                 WireFindValueOutcome::Found(rec) => assert_eq!(rec, record),
@@ -863,7 +880,7 @@ mod tests {
             user_ipk:  [7u8; 32].into(),
             requester,
         });
-        let resp = handle_dht_request(&dht, req).await;
+        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
         match resp {
             DhtResponse::FindValue(r) => assert!(matches!(r.result, WireFindValueOutcome::NotPresent)),
             other => panic!("expected FindValue, got {other:?}"),
@@ -883,7 +900,7 @@ mod tests {
         let record = build_record(&user, &relay, 1, now, 600_000);
 
         let req = DhtRequest::Store(Store { record: record.clone() });
-        let resp = handle_dht_request(&dht, req).await;
+        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
         match resp {
             DhtResponse::Store(r) => assert_eq!(r.outcome, StoreOutcome::Stored),
             other => panic!("expected Store, got {other:?}"),
@@ -906,7 +923,7 @@ mod tests {
 
         let tomb = build_tombstone(&user, &relay, 5, now + 100);
         let req = DhtRequest::Tombstone(Tombstone { record: tomb });
-        let resp = handle_dht_request(&dht, req).await;
+        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
         match resp {
             DhtResponse::Tombstone(r) => assert_eq!(r.outcome, TombstoneOutcome::Stored),
             other => panic!("expected Tombstone, got {other:?}"),
@@ -925,6 +942,16 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0)
+    }
+
+    /// Stand-in authenticated peer id for tests that don't exercise
+    /// the phase 2d-fix `requester_relay_id` binding (i.e. every
+    /// test except the `QueueFetchAck` ones, which build their own
+    /// matching pair). The byte pattern is deliberately distinctive
+    /// so a debug log surfaces it as "fake_peer" rather than blending
+    /// in with the real test fixtures.
+    fn fake_peer_id() -> NodeId {
+        NodeId::new([0xFAu8; 32])
     }
 
     /// Phase 1h item 2 — rate-limit wiring: drive the per-peer
@@ -977,7 +1004,7 @@ mod tests {
         let req = DhtRequest::MerkleSummary(common::proto::dht_p2p::MerkleSummary {
             slices: [0u8; 32].into(),
         });
-        let resp = handle_dht_request(&dht, req).await;
+        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
         match resp {
             DhtResponse::MerkleSummary(r) => assert!(r.roots.is_empty()),
             other => panic!("expected MerkleSummary, got {other:?}"),
@@ -1191,7 +1218,7 @@ mod tests {
         let now = wall_clock_ms();
         let fwd = build_signed_forward(&sender_relay, dispatch.clone(), now);
         let req = DhtRequest::Forward(fwd);
-        let resp = handle_dht_request(&dht, req).await;
+        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
         match resp {
             DhtResponse::Forward(r) => assert_eq!(r.outcome, ForwardOutcome::Stored),
             other => panic!("expected Forward, got {other:?}"),
@@ -1224,7 +1251,7 @@ mod tests {
         fwd.sig.0[0] ^= 0xFF;
 
         let req = DhtRequest::Forward(fwd);
-        let resp = handle_dht_request(&dht, req).await;
+        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
         match resp {
             DhtResponse::Forward(r) => assert_eq!(r.outcome, ForwardOutcome::BadSig),
             other => panic!("expected Forward, got {other:?}"),
@@ -1253,7 +1280,7 @@ mod tests {
         let fwd = build_signed_forward(&sender_relay, dispatch, now);
 
         let req = DhtRequest::Forward(fwd);
-        let resp = handle_dht_request(&dht, req).await;
+        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
         match resp {
             DhtResponse::Forward(r) => assert_eq!(r.outcome, ForwardOutcome::BadSig),
             other => panic!("expected Forward, got {other:?}"),
@@ -1298,7 +1325,7 @@ mod tests {
         let fwd = build_signed_forward(&sender_relay, dispatch, now);
 
         let req = DhtRequest::Forward(fwd);
-        let resp = handle_dht_request(&dht, req).await;
+        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
         match resp {
             DhtResponse::Forward(r) => assert_eq!(r.outcome, ForwardOutcome::NotOwner),
             other => panic!("expected Forward, got {other:?}"),
@@ -1340,7 +1367,7 @@ mod tests {
             user_sig: Bytes(sig),
         });
 
-        let resp = handle_dht_request(&dht, req).await;
+        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
         match resp {
             DhtResponse::QueueFetch(r) => {
                 assert_eq!(r.messages.len(), 3, "all three queued returned");
@@ -1411,7 +1438,7 @@ mod tests {
             user_sig: Bytes(sig),
         });
 
-        let resp = handle_dht_request(&dht, req).await;
+        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
         match resp {
             DhtResponse::QueueFetch(r) => {
                 assert!(r.messages.is_empty());
@@ -1454,7 +1481,7 @@ mod tests {
             user_sig: Bytes(sig),
         });
 
-        let resp = handle_dht_request(&dht, req).await;
+        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
         match resp {
             DhtResponse::QueueFetch(r) => {
                 assert_eq!(r.messages.len(), MAX_FETCH_QUEUE_BATCH);
@@ -1498,7 +1525,7 @@ mod tests {
             user_sig: Bytes(sig),
         });
 
-        let resp = handle_dht_request(&dht, req).await;
+        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
         match resp {
             DhtResponse::QueueFetch(r) => {
                 assert_eq!(r.messages.len(), MAX_FETCH_QUEUE_BATCH);
@@ -1508,7 +1535,9 @@ mod tests {
         }
     }
 
-    /// Phase 2d — `handle_queue_fetch_ack_rpc` deletes the listed ids.
+    /// Phase 2d — `handle_queue_fetch_ack_rpc` deletes the listed ids
+    /// when the wire `requester_relay_id` matches the connection's
+    /// authenticated peer id.
     #[tokio::test(flavor = "current_thread")]
     async fn handle_queue_fetch_ack_rpc_deletes_listed_ids() {
         let mut self_seed = [0u8; 32];
@@ -1528,18 +1557,31 @@ mod tests {
             super::super::store::enqueue_for_home(&dht, &user_ipk, &dispatch, now);
         }
 
-        // Ack the first two; the third must remain.
+        // Ack the first two; the third must remain. Use a synthetic
+        // requester id (the "recipient relay" that drained the user's
+        // queue from this home). The test then passes the same id as
+        // the authenticated peer id so the phase 2d-fix binding check
+        // passes.
+        let mut req_seed = [0u8; 32];
+        req_seed[0] = 0x77;
+        let requester_relay_id = NodeId::new(req_seed);
         let to_delete = vec![ids[0], ids[1]];
-        let msg = queue_fetch_ack_signing_input(&user_ipk, &to_delete, now);
+        let msg = queue_fetch_ack_signing_input(
+            &user_ipk,
+            &requester_relay_id,
+            &to_delete,
+            now,
+        );
         let sig = user.sign(&msg).to_bytes();
         let req = DhtRequest::QueueFetchAck(QueueFetchAck {
             user_ipk: Bytes(user_ipk),
+            requester_relay_id,
             delivered_ids: to_delete,
             timestamp: now,
             user_sig: Bytes(sig),
         });
 
-        let resp = handle_dht_request(&dht, req).await;
+        let resp = handle_dht_request(&dht, req, requester_relay_id).await;
         match resp {
             DhtResponse::QueueFetchAck(r) => assert!(r.ok),
             other => panic!("expected QueueFetchAck, got {other:?}"),
@@ -1548,6 +1590,70 @@ mod tests {
         let remaining = super::super::store::lookup_queue_for_user(&dht, &user_ipk, 8);
         assert_eq!(remaining.len(), 1, "exactly one entry left");
         assert_eq!(remaining[0].1.id.0, ids[2], "the un-acked id survived");
+    }
+
+    /// Phase 2d-fix — when `req.requester_relay_id` does NOT match the
+    /// connection's authenticated peer id (the cross-relay replay
+    /// scenario), the ack is rejected with `ok = false` and the
+    /// queue is untouched. Even though the user signature is valid
+    /// for the *original* requester, the home refuses to honour the
+    /// ack because it arrived on a different connection.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_queue_fetch_ack_rpc_rejects_redirected_requester() {
+        let mut self_seed = [0u8; 32];
+        self_seed[0] = 1;
+        let self_id = NodeId::new(self_seed);
+        let dht = fresh_dht(self_id);
+
+        let user = fresh_signing_key();
+        let user_ipk: [u8; 32] = user.verifying_key().to_bytes();
+        let from_user = fresh_signing_key();
+        let now = wall_clock_ms();
+
+        let id = [42u8; 16];
+        let dispatch = build_dispatch(&from_user, &user_ipk, id, b"redirected");
+        super::super::store::enqueue_for_home(&dht, &user_ipk, &dispatch, now);
+
+        // The user signed the ack for `requester_a` (the legitimate
+        // drainer). A malicious relay then forwards the captured ack
+        // on its OWN connection — its authenticated peer id is
+        // `requester_b`. The handler must reject.
+        let mut a = [0u8; 32];
+        a[0] = 0xAA;
+        let requester_a = NodeId::new(a);
+        let mut b = [0u8; 32];
+        b[0] = 0xBB;
+        let requester_b = NodeId::new(b);
+
+        let to_delete = vec![id];
+        let msg = queue_fetch_ack_signing_input(
+            &user_ipk,
+            &requester_a,
+            &to_delete,
+            now,
+        );
+        let sig = user.sign(&msg).to_bytes();
+        let req = DhtRequest::QueueFetchAck(QueueFetchAck {
+            user_ipk: Bytes(user_ipk),
+            requester_relay_id: requester_a,
+            delivered_ids: to_delete,
+            timestamp: now,
+            user_sig: Bytes(sig),
+        });
+
+        // Authenticated peer is `requester_b` (the redirector), not
+        // `requester_a` (the original drainer). Must reject.
+        let resp = handle_dht_request(&dht, req, requester_b).await;
+        match resp {
+            DhtResponse::QueueFetchAck(r) => {
+                assert!(!r.ok, "redirected ack must be rejected");
+            }
+            other => panic!("expected QueueFetchAck, got {other:?}"),
+        }
+
+        // Queue untouched.
+        let remaining = super::super::store::lookup_queue_for_user(&dht, &user_ipk, 8);
+        assert_eq!(remaining.len(), 1, "queue untouched after rejection");
     }
 
     /// Phase 2d — bad ack signature → `ok = false`, queue untouched.
@@ -1567,15 +1673,21 @@ mod tests {
         let dispatch = build_dispatch(&from_user, &user_ipk, id, b"ack-bad");
         super::super::store::enqueue_for_home(&dht, &user_ipk, &dispatch, now);
 
-        // Bad sig.
+        // Bad sig. Use a matching `requester_relay_id` /
+        // authenticated peer id so the failure is unambiguously
+        // attributed to the signature, not the requester binding.
+        let mut req_seed = [0u8; 32];
+        req_seed[0] = 0x77;
+        let requester_relay_id = NodeId::new(req_seed);
         let req = DhtRequest::QueueFetchAck(QueueFetchAck {
             user_ipk: Bytes(user_ipk),
+            requester_relay_id,
             delivered_ids: vec![id],
             timestamp: now,
             user_sig: Bytes([0u8; 64]),
         });
 
-        let resp = handle_dht_request(&dht, req).await;
+        let resp = handle_dht_request(&dht, req, requester_relay_id).await;
         match resp {
             DhtResponse::QueueFetchAck(r) => assert!(!r.ok),
             other => panic!("expected QueueFetchAck, got {other:?}"),
@@ -1628,7 +1740,7 @@ mod tests {
         let now = wall_clock_ms();
         let fwd = build_signed_forward(&sender_relay, dispatch, now);
         let req = DhtRequest::Forward(fwd);
-        let resp = handle_dht_request(&dht, req).await;
+        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
         match resp {
             DhtResponse::Forward(r) => {
                 // `dht.clients` is `None` in this fixture → offline

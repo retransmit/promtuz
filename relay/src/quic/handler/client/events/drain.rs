@@ -326,10 +326,25 @@ async fn run_remote_ack_round(
     let (sender, receiver) = oneshot::channel::<AckAuthPayload>();
     *ctx.ack_auth.lock() = Some(sender);
 
-    // 3. Send the AckAuthRequest to the client.
+    // 3. Send the AckAuthRequest to the client. Phase 2d-fix: include
+    //    `requester_relay_id` so libcore signs the per-K-home ack
+    //    transcript binding to *this* relay's identity. The home
+    //    cross-checks `requester_relay_id == authenticated_peer_id`
+    //    to defeat cross-relay replay.
     let suggested_timestamp = systime().as_millis() as u64;
+    let requester_relay_id = match ctx.relay.dht.as_ref() {
+        Some(dht) => dht.node_id,
+        // No DHT is the legacy / DHT-disabled deployment; the
+        // ack round can't reach a home regardless, so abandon
+        // gracefully. The earlier short-circuit on empty `union`
+        // catches the common case but a non-DHT relay can still
+        // reach this path with a non-empty `union` if the union
+        // was carried in from a different drain round.
+        None => return Ok(()),
+    };
     SRelayPacket::AckAuthRequest {
-        delivered_ids:       union.clone(),
+        requester_relay_id,
+        delivered_ids: union.clone(),
         suggested_timestamp,
     }
     .send(tx)

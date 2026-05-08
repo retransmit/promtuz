@@ -470,7 +470,123 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                 if evicted > 0 {
                     info!("DHT scheduler: evicted {evicted} expired record(s)");
                 }
+                // Phase 2d-fix: lazy K-set drift migration. After
+                // pruning expired records, sweep `cf_dht_queue` for
+                // entries whose recipient is no longer in this
+                // relay's K-closest set and migrate them to the new
+                // K-closest. Bounded per-sweep by
+                // `MAX_MIGRATE_PER_SWEEP` (256 candidates) and
+                // `MAX_CONCURRENT_MIGRATIONS` (8 in-flight tasks).
+                // Errors are logged at the call-site, not here — a
+                // candidate that fails will be retried next sweep.
+                run_drift_migration_sweep(dht.clone()).await;
             }
+        }
+    }
+}
+
+/// Phase 2d-fix — drive one drift-migration sweep: walk
+/// `cf_dht_queue` for candidates whose recipient is no longer in
+/// this relay's K-closest set, fan out `Forward` RPCs to the new
+/// homes, and on success delete the local entry.
+///
+/// **Why split out from `run_scheduler`**: keeps the scheduler's
+/// `select!` block readable AND lets unit tests drive the sweep
+/// without spinning up the full anti-entropy interval loop.
+///
+/// **Bounded fan-out**:
+/// - `MAX_MIGRATE_PER_SWEEP` (256) candidates per sweep — bounds
+///   the routing-table-read + RocksDB-scan cost.
+/// - [`config::MAX_CONCURRENT_MIGRATIONS`] (8) in-flight migration
+///   tasks — bounds the outbound `Forward` RPC fan-out so a single
+///   sweep doesn't open hundreds of QUIC bi-streams at once.
+///
+/// **Lock contract**: every routing-table read is scoped + cloned
+/// out before any `await` (the same project-wide rule
+/// `forward_to_homes` follows). The sweep itself doesn't hold any
+/// lock across awaits.
+///
+/// design-doc: `misc/specs/STICKY_HOME_RELAY.md` §4.4 (drift
+/// handling), §7.2 (lazy on `evict_expired` sweep).
+pub(crate) async fn run_drift_migration_sweep(dht: Arc<Dht>) {
+    use tokio::task::JoinSet;
+
+    use super::config::MAX_MIGRATE_PER_SWEEP;
+
+    // 1. Plan: snapshot the candidate list out of the synchronous
+    //    planner (which holds the routing-table lock briefly per
+    //    cached recipient — see `plan_drift_migrations`).
+    let candidates = super::store::plan_drift_migrations(&dht, MAX_MIGRATE_PER_SWEEP);
+    if candidates.is_empty() {
+        return;
+    }
+
+    info!(
+        "DHT scheduler: drift-migration sweep planning {} candidate(s)",
+        candidates.len()
+    );
+
+    // 2. Drive: bounded-concurrency JoinSet, draining tasks as they
+    //    complete and submitting from `iter` until empty.
+    let mut iter = candidates.into_iter();
+    let mut set: JoinSet<()> = JoinSet::new();
+    let now = now_ms();
+
+    // Prime the set up to MAX_CONCURRENT_MIGRATIONS slots.
+    for _ in 0..config::MAX_CONCURRENT_MIGRATIONS {
+        let Some((key, dispatch)) = iter.next() else {
+            break;
+        };
+        let dht_clone = dht.clone();
+        set.spawn(async move {
+            migrate_one(dht_clone, key, dispatch, now).await;
+        });
+    }
+
+    // Refill on every completion until iter is exhausted.
+    while !set.is_empty() {
+        // join_next yields when *any* task completes; on completion
+        // we submit the next candidate to keep the in-flight count
+        // up to the cap.
+        let _ = set.join_next().await;
+        if let Some((key, dispatch)) = iter.next() {
+            let dht_clone = dht.clone();
+            set.spawn(async move {
+                migrate_one(dht_clone, key, dispatch, now).await;
+            });
+        }
+    }
+}
+
+/// Single-candidate migration step: run the sender-side
+/// `forward_to_homes` fan-out for `dispatch`, and on success
+/// (≥`FORWARD_K_MIN` homes Stored / Delivered) delete the local
+/// `cf_dht_queue` entry. On failure (no homes, insufficient
+/// replicas, transient peer churn) the local entry is preserved
+/// for the next sweep.
+///
+/// **Why not propagate the error**: each migration is independent
+/// + best-effort; a failure on one candidate must not stall the
+/// next one. The metric counters on `Dht::metrics` are the audit
+/// surface.
+async fn migrate_one(
+    dht: Arc<Dht>, key: crate::storage::MessageKey,
+    dispatch: common::proto::client_rel::DispatchP, now_ms: u64,
+) {
+    dht.metrics.inc_migrations_attempted();
+    match super::forward::forward_to_homes(dht.clone(), dispatch, now_ms).await {
+        Ok(_summary) => {
+            // Success → delete the local entry. The deletion is
+            // best-effort; a RocksDB write error gets the entry
+            // re-tried next sweep, but the message has already been
+            // durably stored at the new K-closest, so duplicate
+            // delivery (the only failure mode) is benign.
+            super::store::delete_migrated_entry(&dht, &key);
+            dht.metrics.inc_migrations_succeeded();
+        }
+        Err(_e) => {
+            dht.metrics.inc_migrations_failed();
+            // Don't delete; next sweep tries again.
         }
     }
 }
@@ -706,5 +822,196 @@ mod tests {
         let mut bs = [0u8; 32];
         set_slice_bit(&mut bs, 255);
         assert_eq!(bs[31], 0b1000_0000);
+    }
+
+    /// Phase 2d-fix — verify the `run_drift_migration_sweep` plumbing
+    /// actually feeds candidates from `plan_drift_migrations` into
+    /// the migration driver and bumps `migrations_attempted` on each
+    /// candidate. We can't test the actual outbound `Forward` RPC
+    /// outcome (that needs a live two-relay harness, deferred to
+    /// phase 2e) — only the wiring: scheduler → planner → driver →
+    /// metrics counter, with the per-candidate cap honoured.
+    ///
+    /// **Setup**: a `Dht` whose `self_id = [0xFF; 32]` is far from a
+    /// recipient at all-zero IPK; install K=3 peers strictly closer
+    /// to all-zero so the planner's drift check fires for every
+    /// queued entry.
+    ///
+    /// **Assertion**: after one sweep, the `migrations_attempted`
+    /// counter equals the number of queued entries (capped by
+    /// `MAX_MIGRATE_PER_SWEEP`). The actual outbound forwards will
+    /// fail (no live peers), so `migrations_failed` ≥
+    /// `migrations_succeeded`. We don't assert on the success/fail
+    /// split — the load-bearing piece is that the planner's
+    /// candidates were indeed dispatched.
+    #[tokio::test(flavor = "current_thread")]
+    async fn drift_migration_sweep_dispatches_planned_candidates() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU64;
+        use std::sync::atomic::Ordering as AtomicOrdering;
+
+        use common::proto::client_rel::DispatchP;
+        use common::proto::client_rel::dispatch_sig_message;
+        use common::proto::dht_p2p::NodeDescriptor;
+        use common::quic::id::NodeId;
+        use ed25519_dalek::Signer;
+        use ed25519_dalek::SigningKey;
+
+        use crate::dht::Dht;
+        use crate::dht::DhtConfig;
+        use crate::dht::dht_cf_descriptors;
+
+        // Inline `fresh_dht` analogue (sync/* tests don't share with
+        // store.rs's helper to avoid path-counter cross-talk).
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let id = SEQ.fetch_add(1, AtomicOrdering::SeqCst);
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("promtuz-mig-test-{pid}-{id}"));
+        let _ = std::fs::remove_dir_all(&path);
+
+        let mut opts = rust_rocksdb::Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+
+        let mut cfs = vec![rust_rocksdb::ColumnFamilyDescriptor::new(
+            "default",
+            rust_rocksdb::Options::default(),
+        )];
+        cfs.extend(dht_cf_descriptors());
+
+        let db = rust_rocksdb::DB::open_cf_descriptors(&opts, &path, cfs).expect("open db");
+        let signing = SigningKey::from_bytes(&[7u8; 32]);
+        let cfg = DhtConfig::default();
+        // self far from a 0-prefix target
+        let mut self_seed = [0u8; 32];
+        self_seed[0] = 0xFF;
+        let self_id = NodeId::new(self_seed);
+        let dht = Arc::new(Dht::new(self_id, signing, cfg, Arc::new(db)).expect("dht"));
+
+        // Install K=3 peers strictly closer to a 0-prefix target.
+        for i in 0..3u8 {
+            let mut s = [0u8; 32];
+            s[31] = i;
+            let pid = NodeId::new(s);
+            let desc = NodeDescriptor {
+                id:     pid,
+                addr:   "127.0.0.1:1".parse().unwrap(),
+                pubkey: [0u8; 32].into(),
+            };
+            dht.routing.write().insert(desc);
+        }
+
+        // Queue a few dispatches for an all-zero recipient. Self is
+        // now drifted out of K-closest for that recipient → planner
+        // returns these.
+        let from_user = SigningKey::from_bytes(&[42u8; 32]);
+        let from_ipk: [u8; 32] = from_user.verifying_key().to_bytes();
+        let to_ipk: [u8; 32] = [0u8; 32];
+        let queued = 5u8;
+        for i in 0..queued {
+            let mut id_bytes = [0u8; 16];
+            id_bytes[0] = i;
+            let msg = dispatch_sig_message(&to_ipk, &from_ipk, &id_bytes, b"drift");
+            let sig = from_user.sign(&msg);
+            let dispatch = DispatchP {
+                to:      to_ipk.into(),
+                from:    from_ipk.into(),
+                id:      id_bytes.into(),
+                payload: b"drift".to_vec().into(),
+                sig:     sig.to_bytes().into(),
+            };
+            super::super::store::enqueue_for_home(&dht, &to_ipk, &dispatch, 100 + i as u64);
+        }
+
+        // Sanity: the planner indeed sees `queued` candidates.
+        let candidates =
+            super::super::store::plan_drift_migrations(&dht, 16);
+        assert_eq!(candidates.len(), queued as usize, "planner sees all queued");
+
+        // Drive one sweep. Outbound `Forward` RPCs will fail (no
+        // live peers), but the wiring should still bump
+        // `migrations_attempted` once per candidate.
+        super::run_drift_migration_sweep(dht.clone()).await;
+
+        let attempted = dht
+            .metrics
+            .migrations_attempted
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            attempted, queued as u64,
+            "every planner candidate should reach the migration driver"
+        );
+
+        // Failures dominate (no peers reachable); no successes.
+        let failed = dht
+            .metrics
+            .migrations_failed
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let succeeded = dht
+            .metrics
+            .migrations_succeeded
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            failed + succeeded,
+            attempted,
+            "every attempted migration must end in success or failure"
+        );
+        // Without live peers, the lone-relay shortcut in
+        // `forward_to_homes` enqueues self-store but K_MIN=2 fails
+        // → ForwardError → migrations_failed bump.
+        assert!(
+            failed > 0,
+            "with no live peers, at least one migration must fail"
+        );
+    }
+
+    /// Phase 2d-fix — when the planner returns no candidates (the
+    /// steady-state case), the sweep is a no-op and nothing bumps.
+    /// Catches a regression where the sweep accidentally bumps
+    /// metrics on every tick regardless of work.
+    #[tokio::test(flavor = "current_thread")]
+    async fn drift_migration_sweep_is_noop_on_empty_plan() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU64;
+        use std::sync::atomic::Ordering as AtomicOrdering;
+
+        use common::quic::id::NodeId;
+        use ed25519_dalek::SigningKey;
+
+        use crate::dht::Dht;
+        use crate::dht::DhtConfig;
+        use crate::dht::dht_cf_descriptors;
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let id = SEQ.fetch_add(1, AtomicOrdering::SeqCst);
+        let pid = std::process::id();
+        let path =
+            std::env::temp_dir().join(format!("promtuz-mig-noop-test-{pid}-{id}"));
+        let _ = std::fs::remove_dir_all(&path);
+
+        let mut opts = rust_rocksdb::Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+
+        let mut cfs = vec![rust_rocksdb::ColumnFamilyDescriptor::new(
+            "default",
+            rust_rocksdb::Options::default(),
+        )];
+        cfs.extend(dht_cf_descriptors());
+
+        let db = rust_rocksdb::DB::open_cf_descriptors(&opts, &path, cfs).expect("open db");
+        let signing = SigningKey::from_bytes(&[7u8; 32]);
+        let cfg = DhtConfig::default();
+        let mut self_seed = [0u8; 32];
+        self_seed[0] = 1;
+        let self_id = NodeId::new(self_seed);
+        let dht = Arc::new(Dht::new(self_id, signing, cfg, Arc::new(db)).expect("dht"));
+
+        super::run_drift_migration_sweep(dht.clone()).await;
+        let attempted = dht
+            .metrics
+            .migrations_attempted
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(attempted, 0, "empty queue → no attempts");
     }
 }

@@ -217,10 +217,15 @@ pub enum CRelayPacket {
     /// asks libcore to sign the union of delivered ids drawn from all
     /// K homes). The transcript is
     /// [`crate::proto::dht_p2p::queue_fetch_ack_signing_input`] over
-    /// `(self_ipk, delivered_ids, timestamp)` — it does **not** bind a
-    /// specific home identity, so a single signature serves all K
-    /// homes; each home only deletes the ids it actually holds from
-    /// the union list.
+    /// `(self_ipk, requester_relay_id, delivered_ids, timestamp)` —
+    /// the same signature serves all K homes (the homes verify the
+    /// transcript byte-for-byte and only delete the ids they actually
+    /// hold from the union list), but each home additionally rejects
+    /// the RPC at the handler layer if `requester_relay_id` does not
+    /// match the connection's authenticated `DhtHello` peer id. This
+    /// is the phase 2d-fix cross-relay replay defense (an ack the
+    /// user signed for relay R_a is no longer redirectable to a
+    /// different home via a different relay R_b).
     ///
     /// **Why the user signs (not the relay)**: a malicious relay could
     /// otherwise forge an ack and force every home to drop a user's
@@ -251,11 +256,20 @@ pub enum SRelayPacket {
     /// (i.e. once the client has durably stored the delivered set).
     /// Libcore signs
     /// [`crate::proto::dht_p2p::queue_fetch_ack_signing_input`] over
-    /// `(self_ipk, delivered_ids, timestamp)` and replies with
-    /// [`CRelayPacket::AckAuth`]. The relay then fans out a
-    /// `QueueFetchAck` to each of the K homes with the same signed
-    /// `(timestamp, sig)` pair — the transcript doesn't bind a home
-    /// identity, so one signature works for all homes.
+    /// `(self_ipk, requester_relay_id, delivered_ids, timestamp)` and
+    /// replies with [`CRelayPacket::AckAuth`]. The relay then fans
+    /// out a `QueueFetchAck` to each of the K homes with the same
+    /// signed `(timestamp, sig)` pair — the transcript binds the
+    /// requesting relay so a captured ack can't be redirected to a
+    /// different home via a different relay (phase 2d-fix replay
+    /// defense), but it does NOT bind a target-home identity, so one
+    /// signature still works across the K homes within R_r's set.
+    ///
+    /// `requester_relay_id` is this relay's `BLAKE3(NodeKey)` identity
+    /// — the same id the relay would supply on `peer/1` `DhtHello`s.
+    /// Libcore signs the field's value verbatim into the transcript;
+    /// the home cross-checks `requester_relay_id ==
+    /// authenticated_peer_id` at the handler layer.
     ///
     /// `suggested_timestamp` is the relay's wall-clock at the moment
     /// of the request; libcore is free to substitute its own
@@ -266,7 +280,11 @@ pub enum SRelayPacket {
     /// [`crate::proto::dht_p2p::MAX_FETCH_QUEUE_ACK_IDS`] (= 64) — the
     /// same ceiling the home-side verifier enforces on
     /// [`crate::proto::dht_p2p::QueueFetchAck::delivered_ids`].
-    AckAuthRequest { delivered_ids: Vec<[u8; 16]>, suggested_timestamp: u64 },
+    AckAuthRequest {
+        requester_relay_id:  crate::quic::id::NodeId,
+        delivered_ids:       Vec<[u8; 16]>,
+        suggested_timestamp: u64,
+    },
 }
 
 #[cfg(feature = "client")]
@@ -361,7 +379,9 @@ mod tests {
     #[test]
     fn ack_auth_request_round_trip() {
         use super::SRelayPacket;
+        use crate::quic::id::NodeId;
         let pkt = SRelayPacket::AckAuthRequest {
+            requester_relay_id:  NodeId::new([0x42u8; 32]),
             delivered_ids:       vec![[0xAA; 16], [0xBB; 16], [0xCC; 16]],
             suggested_timestamp: 1_700_000_000_003,
         };
@@ -378,17 +398,21 @@ mod tests {
     #[test]
     fn ack_auth_transcript_matches_queue_fetch_ack_signing_input() {
         use crate::proto::dht_p2p::queue_fetch_ack_signing_input;
+        use crate::quic::id::NodeId;
 
         let user_ipk: [u8; 32] = [0x11; 32];
+        let req_id = NodeId::new([0x42u8; 32]);
         let ids: Vec<[u8; 16]> = vec![[0xAA; 16], [0xBB; 16]];
         let ts: u64 = 1_700_000_000_004;
 
-        let transcript = queue_fetch_ack_signing_input(&user_ipk, &ids, ts);
-        // Layout: domain || version(BE u16) || ipk(32) || count(BE u32)
-        //   || n*16 || ts(BE u64).
+        let transcript = queue_fetch_ack_signing_input(&user_ipk, &req_id, &ids, ts);
+        // Phase 2d-fix layout: domain || version(BE u16) || ipk(32)
+        //   || requester_relay_id(32) || count(BE u32) || n*16
+        //   || ts(BE u64).
         let expected_len = crate::proto::dht_p2p::DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len()
             + 2
             + 32
+            + NodeId::LEN
             + 4
             + ids.len() * 16
             + 8;
