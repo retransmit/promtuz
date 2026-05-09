@@ -132,8 +132,29 @@ impl RpcClass {
             // prefix iterator over `cf_dht_queue`. Both belong in the
             // expensive bucket per `STICKY_HOME_RELAY.md` §6.2.
             | DhtRequest::Forward(_)
-            | DhtRequest::QueueFetch(_) => RpcClass::Expensive,
+            | DhtRequest::QueueFetch(_)
+            // MLS Phase 2 (§6.1 of `MLS.md`): KeyPackage publish /
+            // fetch / refill all do Ed25519 verifies plus RocksDB
+            // I/O — same cost shape as Store / Forward. Spec
+            // explicitly says `RpcClass::Expensive`. Note: a separate
+            // *per-pair* `(target_ipk, requester_relay_id)` quota
+            // lives inside `mls_kp.rs` for the §5.6 anti-pinning
+            // policy; this per-peer bucket is the coarser first line.
+            | DhtRequest::KeyPackagePublish(_)
+            | DhtRequest::KeyPackageFetch(_)
+            | DhtRequest::KeyPackageRefill(_) => RpcClass::Expensive,
             DhtRequest::FetchRecord(_) => RpcClass::Bulk,
+            // MLS Phase 3a Component B: welcome publish carries up to
+            // a few KB of `welcome_blob` plus envelope metadata; fetch
+            // returns up to `MAX_WELCOMES_PER_RECIPIENT = 32` rows in
+            // a single RPC; ack is a small id-list. All three are
+            // bulk-class because `welcome_blob` can hit
+            // `MAX_WELCOME_BYTES = 256 KiB` in the worst case (large
+            // groups), making them the heaviest single-RPC payload in
+            // the DHT family.
+            DhtRequest::WelcomePublish(_)
+            | DhtRequest::WelcomeFetch(_)
+            | DhtRequest::WelcomeAck(_) => RpcClass::Bulk,
         }
     }
 }

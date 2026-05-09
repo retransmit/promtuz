@@ -51,6 +51,7 @@ use common::proto::dht_p2p::MAX_FETCH_QUEUE_ACK_IDS;
 use common::proto::dht_p2p::NodeDescriptor;
 use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
+use common::quic::xor32;
 use common::trace;
 use common::warn;
 use quinn::SendStream;
@@ -269,11 +270,10 @@ pub(super) async fn handle_ack_drain(
 
     // 2. Phase 2d — remote `QueueFetchAck` fan-out.
     let remote_state = ctx.pending_remote_drain.lock().take();
-    if let Some(state) = remote_state {
-        if let Err(err) = run_remote_ack_round(&ctx, tx, state).await {
+    if let Some(state) = remote_state
+        && let Err(err) = run_remote_ack_round(&ctx, tx, state).await {
             trace!("DRAIN: remote ack-fanout fell through: {err}");
         }
-    }
 
     Ok(())
 }
@@ -407,17 +407,9 @@ fn self_is_in_k_closest(dht: &Dht, user_ipk: &[u8; 32]) -> bool {
     }
 
     let kth = &descriptors[K - 1];
-    let self_dist = xor_dist(self_id.as_bytes(), user_ipk);
-    let kth_dist = xor_dist(kth.id.as_bytes(), user_ipk);
+    let self_dist = xor32(self_id.as_bytes(), user_ipk);
+    let kth_dist = xor32(kth.id.as_bytes(), user_ipk);
     self_dist < kth_dist
-}
-
-fn xor_dist(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = a[i] ^ b[i];
-    }
-    out
 }
 
 /// Walk the default CF for `recipient_prefix`, push every parsed

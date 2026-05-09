@@ -55,6 +55,7 @@ use common::proto::dht_p2p::dht_hello_signing_input;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
+use common::quic::xor32;
 use common::types::bytes::Bytes;
 use ed25519_dalek::Signer;
 use quinn::Connection;
@@ -129,14 +130,6 @@ struct Candidate {
     distance: [u8; 32],
 }
 
-fn xor32(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = a[i] ^ b[i];
-    }
-    out
-}
-
 fn distance(target: &[u8; 32], peer: &NodeId) -> [u8; 32] {
     xor32(target, peer.as_bytes())
 }
@@ -195,11 +188,10 @@ pub(crate) async fn connect_to_peer(
     dht: &Arc<Dht>, peer: &NodeDescriptor,
 ) -> anyhow::Result<Connection> {
     // Fast path: hit the cache.
-    if let Some((conn, _pk)) = dht.peer_conns.read().get(&peer.id).cloned() {
-        if conn.close_reason().is_none() {
+    if let Some((conn, _pk)) = dht.peer_conns.read().get(&peer.id).cloned()
+        && conn.close_reason().is_none() {
             return Ok(conn);
         }
-    }
 
     let endpoint = match dht.endpoint.as_ref() {
         Some(ep) => ep.clone(),
@@ -255,11 +247,10 @@ pub(crate) async fn connect_to_peer(
     // *which* one future calls reuse.
     {
         let mut conns = dht.peer_conns.write();
-        if let Some((existing, _)) = conns.get(&peer.id).cloned() {
-            if existing.close_reason().is_none() {
+        if let Some((existing, _)) = conns.get(&peer.id).cloned()
+            && existing.close_reason().is_none() {
                 return Ok(existing);
             }
-        }
         conns.insert(peer.id, (conn.clone(), verified_pubkey));
     }
     dht.metrics.inc_peer_conns_opened();
@@ -373,7 +364,7 @@ pub(crate) async fn lookup_node(
             Candidate { desc, distance }
         })
         .collect();
-    candidates.sort_by(|a, b| a.distance.cmp(&b.distance));
+    candidates.sort_by_key(|a| a.distance);
 
     let mut queried: HashSet<NodeId> = HashSet::new();
     queried.insert(dht.node_id); // never query self
@@ -470,7 +461,7 @@ pub(crate) async fn lookup_value(
             Candidate { desc, distance }
         })
         .collect();
-    candidates.sort_by(|a, b| a.distance.cmp(&b.distance));
+    candidates.sort_by_key(|a| a.distance);
 
     let mut queried: HashSet<NodeId> = HashSet::new();
     queried.insert(dht.node_id);
@@ -536,6 +527,13 @@ enum IterError {
 /// Returns `Ok(())` when the walk converged peacefully
 /// (`closest_so_far` is now populated), `Err(IterError::Lookup(_))` for
 /// failures.
+//
+// Eight args is the iterative-walk state (target + four mutable
+// candidate sets + deadline + is-value flag). Bundling into a
+// `LookupCtx` struct would split borrow patterns awkwardly across
+// the loop body — every iteration would need disjoint mutable
+// borrows on three of the fields. Allow the arity.
+#[allow(clippy::too_many_arguments)]
 async fn run_iterative_loop(
     dht: &Arc<Dht>, target: &[u8; 32], candidates: &mut Vec<Candidate>,
     queried: &mut HashSet<NodeId>, closest_so_far: &mut Vec<Candidate>, hops: &mut u32,
@@ -623,7 +621,7 @@ async fn run_iterative_loop(
         }
 
         *hops += 1;
-        candidates.sort_by(|a, b| a.distance.cmp(&b.distance));
+        candidates.sort_by_key(|a| a.distance);
         closest_so_far.clear();
         for c in candidates.iter().take(K) {
             closest_so_far.push(c.clone());
@@ -646,6 +644,12 @@ async fn run_iterative_loop(
 /// One peer's reply to a `FindValue` issued during the iterative walk.
 /// The collection of these is fed into [`decide_lookup_outcome`] for
 /// the §4.4 sybil/eclipse-mitigation quorum decision.
+//
+// Same shape as the wire `FindValueOutcome`; we keep the
+// `Found(PresenceRecord)` inline for the same reason — the
+// iterative loop holds at most α=3 of these in `replies` at once
+// and the comparison code reads through `Found(rec)` directly.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub(crate) enum ValueReply {
     /// Peer claimed it has the record. Carried so the quorum can
@@ -660,6 +664,11 @@ pub(crate) enum ValueReply {
 /// decision. Termination matches the standard Kademlia rule (§4.3) but
 /// **does not short-circuit on a `Found`** — every peer that responds
 /// before the deadline contributes to the decision.
+//
+// Same eight-arg shape as `run_iterative_loop`; same rationale —
+// a `LookupCtx` struct would fight the disjoint-mutable-borrow
+// pattern in the loop body.
+#[allow(clippy::too_many_arguments)]
 async fn run_iterative_loop_value(
     dht: &Arc<Dht>, target: &[u8; 32], candidates: &mut Vec<Candidate>,
     queried: &mut HashSet<NodeId>, closest_so_far: &mut Vec<Candidate>, hops: &mut u32,
@@ -742,7 +751,7 @@ async fn run_iterative_loop_value(
         }
 
         *hops += 1;
-        candidates.sort_by(|a, b| a.distance.cmp(&b.distance));
+        candidates.sort_by_key(|a| a.distance);
         closest_so_far.clear();
         for c in candidates.iter().take(K) {
             closest_so_far.push(c.clone());
@@ -840,6 +849,12 @@ pub(crate) fn decide_lookup_outcome(replies: Vec<ValueReply>) -> FindValueOutcom
 
 /// One-hop RPC outcome. We collapse the wire `DhtResponse` into a small
 /// enum for the iterative loop's match arm.
+//
+// `FindValueFound(PresenceRecord)` is large; the other variants are
+// `Vec<NodeDescriptor>` (heap-indirected, small inline). Boxing
+// would force an extra heap hop on every found-record reply, which
+// is the hot path for successful lookups.
+#[allow(clippy::large_enum_variant)]
 enum RpcResult {
     FindNodeReply(Vec<NodeDescriptor>),
     FindValueClose(Vec<NodeDescriptor>),

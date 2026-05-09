@@ -20,13 +20,23 @@
 // land — they're expected, and the noise drowns out real warnings.
 #![allow(dead_code)]
 
+// Original visibility was `pub(crate)`; the module-level pub-on-2-of-N
+// items is the historical pattern from earlier phases (`pub mod config`,
+// `pub mod metrics`). config + metrics stay `pub` because they're
+// referenced from public types like `DhtConfig` in `Dht::new` (already
+// re-exported below). Phase 5b bumps `handler` to `pub` so the e2e
+// harness in `libcore/tests/e2e_phase5b.rs` can drive
+// `handle_peer_connection` directly.
 pub(crate) mod bootstrap;
 pub(crate) mod cache;
 pub mod config;
 pub(crate) mod forward;
-pub(crate) mod handler;
+pub mod handler;
+pub(crate) mod key_helpers;
 pub(crate) mod lookup;
 pub mod metrics;
+pub(crate) mod mls_kp;
+pub(crate) mod mls_welcome;
 pub(crate) mod publish;
 pub(crate) mod queue_drain;
 pub(crate) mod rate_limit;
@@ -58,6 +68,10 @@ pub use config::DhtConfig;
 
 use self::cache::LookupCache;
 use self::metrics::Metrics;
+use self::mls_kp::CF_DHT_KEYPACKAGE;
+use self::mls_kp::KpFetchLimiters;
+use self::mls_welcome::CF_DHT_WELCOME;
+use self::mls_welcome::WelcomeLimiters;
 use self::routing::RoutingTable;
 use self::store::CF_DHT_MERKLE;
 use self::store::CF_DHT_PRESENCE;
@@ -183,6 +197,29 @@ pub struct Dht {
     /// limiter on every inbound stream.
     pub(crate) rate_limiters: rate_limit::PerPeerLimiters,
 
+    /// MLS Phase 2 — per-`(target_ipk, requester_relay_id)` rate
+    /// limiter for `KeyPackageFetch` (`MAX_KP_FETCH_PER_HOUR = 60`).
+    /// Distinct from [`Self::rate_limiters`] (which is keyed on the
+    /// requester alone, the coarse first-line bulkhead) because the
+    /// §5.6 anti-pinning policy demands per-pair attribution: a
+    /// misbehaving relay draining Bob's stash must not freeze its
+    /// quota for legitimate fetches against Alice's stash.
+    ///
+    /// design-doc: `misc/specs/MLS.md` §5.6.
+    pub(crate) kp_fetch_limiters: KpFetchLimiters,
+
+    /// MLS Phase 3a — per-relay rate limiter for the
+    /// `WelcomePublish` / `WelcomeFetch` / `WelcomeAck` family. The
+    /// welcome RPCs are classified `Bulk` in
+    /// [`Self::rate_limiters`] (the coarse first-line bulkhead);
+    /// this dedicated limiter adds a welcome-specific quota so a
+    /// peer that's well under the per-relay bulk quota cannot still
+    /// pin a single recipient's welcome queue. Mirrors the
+    /// [`Self::kp_fetch_limiters`] pattern.
+    ///
+    /// design-doc: `misc/specs/MLS.md` §6.1; Phase 3a Component B.
+    pub(crate) welcome_limiters: WelcomeLimiters,
+
     /// Shared reference to the relay's connected-clients map (phase 2d).
     ///
     /// The home-side `Forward` handler in
@@ -205,9 +242,13 @@ pub struct Dht {
     /// (`store::tests::fresh_dht`, `lookup::tests::fresh_dht`) keep
     /// compiling — a relay-level `Relay::new` populates this via
     /// [`Self::attach_clients`].
-    pub(crate) clients:
-        Option<Arc<RwLock<HashMap<[u8; 32], Connection>>>>,
+    pub(crate) clients: Option<ClientsMap>,
 }
+
+/// Shared reference to the relay's connected-clients map (phase 2d).
+/// Aliased so the field type stays readable. See `Dht::clients` for
+/// the lock contract and the `Option<...>` rationale.
+pub(crate) type ClientsMap = Arc<RwLock<HashMap<[u8; 32], Connection>>>;
 
 impl Dht {
     /// Construct the runtime DHT state.
@@ -246,6 +287,14 @@ impl Dht {
         rocks
             .cf_handle(CF_DHT_QUEUE)
             .with_context(|| format!("missing column family `{CF_DHT_QUEUE}` in DB"))?;
+        // MLS Phase 2 KeyPackage stash CF.
+        rocks
+            .cf_handle(CF_DHT_KEYPACKAGE)
+            .with_context(|| format!("missing column family `{CF_DHT_KEYPACKAGE}` in DB"))?;
+        // MLS Phase 3a welcome queue CF.
+        rocks
+            .cf_handle(CF_DHT_WELCOME)
+            .with_context(|| format!("missing column family `{CF_DHT_WELCOME}` in DB"))?;
 
         Ok(Self {
             routing: RwLock::new(RoutingTable::empty(node_id)),
@@ -261,6 +310,8 @@ impl Dht {
             endpoint: None,
             peer_client_cfg: None,
             rate_limiters: rate_limit::PerPeerLimiters::new(),
+            kp_fetch_limiters: KpFetchLimiters::new(),
+            welcome_limiters: WelcomeLimiters::new(),
             clients: None,
         })
     }
@@ -284,6 +335,33 @@ impl Dht {
     /// drive the home-side delivery path.
     pub fn attach_clients(&mut self, clients: Arc<RwLock<HashMap<[u8; 32], Connection>>>) {
         self.clients = Some(clients);
+    }
+
+    /// Phase 5b: pre-seed a peer descriptor into this relay's routing
+    /// table. Used by the e2e harness (`libcore/tests/e2e_phase5b.rs`)
+    /// to wire N relays' routing tables to each other before the test
+    /// fires its first `FindNode` RPC. Production paths populate the
+    /// table organically via `handle_peer_connection` post-DhtHello.
+    pub fn seed_routing_table(&self, descriptor: common::proto::dht_p2p::NodeDescriptor) {
+        let _ = self.routing.write().insert(descriptor);
+    }
+
+    /// Phase 5b: purge any routing-table entry whose `id` is not in
+    /// `allowed`. The e2e harness uses this to evict libcore-ephemeral
+    /// peers from the routing table after each operation that may have
+    /// added them, so subsequent `FindNode`s return only the curated
+    /// cross-wired set.
+    ///
+    /// Production code never calls this — it'd undermine the
+    /// learn-from-traffic policy.
+    pub fn purge_routing_to(&self, allowed: &[common::quic::id::NodeId]) {
+        let allowed: std::collections::HashSet<common::quic::id::NodeId> =
+            allowed.iter().copied().collect();
+        let mut rt = self.routing.write();
+        for bucket in rt.buckets.iter_mut() {
+            bucket.entries.retain(|e| allowed.contains(&e.id));
+            bucket.candidates.retain(|e| allowed.contains(&e.id));
+        }
     }
 
     /// Wire the resolver-session handle for the bootstrap-retry path
@@ -329,7 +407,8 @@ impl Dht {
 /// places that have to stay in sync about which CFs exist.
 ///
 /// design-doc: `misc/specs/DHT.md` §1.2 (presence + merkle CFs);
-/// `misc/specs/STICKY_HOME_RELAY.md` §6.1 (queue CF).
+/// `misc/specs/STICKY_HOME_RELAY.md` §6.1 (queue CF);
+/// `misc/specs/MLS.md` §2.5 (`cf_dht_keypackage`).
 pub fn dht_cf_descriptors() -> Vec<ColumnFamilyDescriptor> {
     // - `dht_presence`: no prefix extractor — point lookups only on
     //   32-byte keys (§1.2 trade-off note).
@@ -340,13 +419,23 @@ pub fn dht_cf_descriptors() -> Vec<ColumnFamilyDescriptor> {
     //   `recipient` field at offset 0 in `crate::storage::MessageKey`.
     //   Same shape as the relay's existing message-queue (default CF)
     //   so the per-recipient drain iterator works the same way.
+    // - `dht_keypackage`: 32-byte fixed prefix extractor matching the
+    //   `stash_prefix(ipk) = BLAKE3("kp:" || ipk)` field at offset 0
+    //   in the `(stash_prefix(32) || kp_ref(32))` storage key.
+    //   Layout per `mls_kp::stash_prefix`.
     let presence_opts = Options::default();
     let merkle_opts = Options::default();
     let mut queue_opts = Options::default();
     queue_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
+    let mut keypackage_opts = Options::default();
+    keypackage_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
+    let mut welcome_opts = Options::default();
+    welcome_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
     vec![
         ColumnFamilyDescriptor::new(CF_DHT_PRESENCE, presence_opts),
         ColumnFamilyDescriptor::new(CF_DHT_MERKLE, merkle_opts),
         ColumnFamilyDescriptor::new(CF_DHT_QUEUE, queue_opts),
+        ColumnFamilyDescriptor::new(CF_DHT_KEYPACKAGE, keypackage_opts),
+        ColumnFamilyDescriptor::new(CF_DHT_WELCOME, welcome_opts),
     ]
 }

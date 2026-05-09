@@ -101,6 +101,7 @@ use tokio::time::timeout;
 use super::Dht;
 use super::rate_limit::RpcClass;
 use super::routing::RoutingTable;
+use super::routing::self_in_top_k;
 use super::store;
 use super::tls_extract;
 
@@ -159,7 +160,12 @@ const HELLO_RECV_TIMEOUT: Duration = Duration::from_secs(5);
 ///    `relay/src/quic/handler/client/mod.rs:43-52`.
 ///
 /// design-doc: §2.3, §2.5, §3.4, §7.1, §8.7 (per-peer rate limiting).
-pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
+///
+/// Phase 5b note: bumped from `pub(crate)` to `pub` so the e2e
+/// integration harness in `libcore/tests/e2e_phase5b.rs` can consume
+/// it directly (the production caller is still
+/// `relay/src/quic/handler/peer.rs::handle_peer`, unchanged).
+pub async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
     let limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS_PER_PEER));
     let conn_id = conn.stable_id();
 
@@ -205,8 +211,8 @@ pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
     // hello-claimed pubkey disagrees, the connection is malicious or
     // misconfigured. Same reasoning as the outbound-side post-handshake
     // check at `lookup::connect_to_peer`.
-    if let Some(cert_pk) = extracted_pubkey {
-        if cert_pk != auth.pubkey {
+    if let Some(cert_pk) = extracted_pubkey
+        && cert_pk != auth.pubkey {
             dht.metrics.inc_dht_hello_rejected();
             common::warn!(
                 "DHT inbound: cert SPKI != DhtHello.pubkey for {}; closing",
@@ -215,7 +221,6 @@ pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
             CloseReason::DhtBadSignature.close(&conn);
             return;
         }
-    }
 
     // Populate routing-table + peer_conns cache *now*, before any RPC
     // arrives. Phase 1h had to defer this to the per-request path
@@ -282,12 +287,11 @@ pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
     };
     if let Some(id) = peer_id_to_remove {
         let mut map = dht.peer_conns.write();
-        if let Some((c, _pk)) = map.get(&id) {
-            if c.stable_id() == conn_id {
+        if let Some((c, _pk)) = map.get(&id)
+            && c.stable_id() == conn_id {
                 map.remove(&id);
                 dht.metrics.inc_peer_conns_closed();
             }
-        }
     }
 }
 
@@ -507,7 +511,13 @@ async fn handle_one_stream(
 /// the authenticated peer id to enforce the phase 2d-fix
 /// `requester_relay_id` binding (a captured ack must arrive on the
 /// connection of the relay it was signed for).
-pub(crate) async fn handle_dht_request(
+///
+/// Phase 5b: bumped from `pub(crate)` to `pub` so the e2e harness in
+/// `libcore/tests/e2e_phase5b.rs` can run a custom acceptor that
+/// dispatches RPCs *without* the production routing-table-population
+/// side effect of `handle_peer_connection`. Production callers
+/// (`handle_one_stream`) are unchanged.
+pub async fn handle_dht_request(
     dht: &Arc<Dht>, req: DhtRequest, authenticated_peer_id: NodeId,
 ) -> DhtResponse {
     match req {
@@ -596,6 +606,76 @@ pub(crate) async fn handle_dht_request(
             )
             .await,
         ),
+        // ----- MLS Phase 2: KeyPackage RPCs (`mls_kp.rs`) ---------------
+        //
+        // All three are sync handlers — they touch RocksDB and the
+        // governor-based per-pair limiter, no `await` inside. Wrapped
+        // in their `wrap_*_outcome` helpers so the dispatch returns
+        // the structured `*Resp` shape.
+        DhtRequest::KeyPackagePublish(req) => DhtResponse::KeyPackagePublish(
+            super::mls_kp::wrap_publish_outcome(
+                super::mls_kp::handle_keypackage_publish(
+                    dht,
+                    req,
+                    authenticated_peer_id,
+                    now_ms(),
+                ),
+            ),
+        ),
+        DhtRequest::KeyPackageFetch(req) => DhtResponse::KeyPackageFetch(
+            super::mls_kp::wrap_fetch_outcome(
+                super::mls_kp::handle_keypackage_fetch(
+                    dht,
+                    req,
+                    authenticated_peer_id,
+                    now_ms(),
+                ),
+            ),
+        ),
+        DhtRequest::KeyPackageRefill(req) => DhtResponse::KeyPackageRefill(
+            super::mls_kp::wrap_refill_outcome(
+                super::mls_kp::handle_keypackage_refill(
+                    dht,
+                    req,
+                    authenticated_peer_id,
+                    now_ms(),
+                ),
+            ),
+        ),
+        // ----- MLS Phase 3a Component B: Welcome queue (`mls_welcome.rs`) ---
+        //
+        // Three sync handlers — RocksDB I/O + verifies, no `await`
+        // inside. Wrapped in their `wrap_*_outcome` helpers; the ack
+        // returns its own concrete `WelcomeAckResp` so no wrapper is
+        // needed.
+        DhtRequest::WelcomePublish(req) => DhtResponse::WelcomePublish(
+            super::mls_welcome::wrap_publish_outcome(
+                super::mls_welcome::handle_welcome_publish(
+                    dht,
+                    req,
+                    authenticated_peer_id,
+                    now_ms(),
+                ),
+            ),
+        ),
+        DhtRequest::WelcomeFetch(req) => DhtResponse::WelcomeFetch(
+            super::mls_welcome::wrap_fetch_outcome(
+                super::mls_welcome::handle_welcome_fetch(
+                    dht,
+                    req,
+                    authenticated_peer_id,
+                    now_ms(),
+                ),
+            ),
+        ),
+        DhtRequest::WelcomeAck(req) => DhtResponse::WelcomeAck(
+            super::mls_welcome::handle_welcome_ack(
+                dht,
+                req,
+                authenticated_peer_id,
+                now_ms(),
+            ),
+        ),
     }
 }
 
@@ -627,28 +707,10 @@ fn closest_excluding(
         .collect()
 }
 
-/// True iff `dht.self_id` would be in the top-K for `target` under the
-/// current routing table. Mirrors the helper in `store.rs::self_is_owner`
-/// but reads-only (no mutation, no lock-up).
-fn self_in_top_k(dht: &Dht, target: &NodeId) -> bool {
-    let candidates = dht.routing.read().find_closest(target, super::config::K + 1);
-    if candidates.len() < super::config::K {
-        return true; // be permissive while routing table is sparse
-    }
-    let target_bytes = target.as_bytes();
-    let self_bytes = dht.node_id.as_bytes();
-    let mut self_dist = [0u8; 32];
-    for i in 0..32 {
-        self_dist[i] = self_bytes[i] ^ target_bytes[i];
-    }
-    let kth = candidates[super::config::K - 1].id;
-    let kth_bytes = kth.as_bytes();
-    let mut kth_dist = [0u8; 32];
-    for i in 0..32 {
-        kth_dist[i] = kth_bytes[i] ^ target_bytes[i];
-    }
-    self_dist <= kth_dist
-}
+// `self_in_top_k` lives in `super::routing` — see
+// `routing::self_in_top_k` for the canonical impl shared with
+// `store::store_record`, `mls_kp::self_is_owner_for_stash`, and
+// `mls_welcome::self_is_owner_for_recipient`.
 
 // ---------------------------------------------------------------------------
 // Tests

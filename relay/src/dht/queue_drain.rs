@@ -59,6 +59,7 @@ use common::proto::dht_p2p::QueueFetchResp;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
+use common::quic::xor32;
 use common::types::bytes::Bytes;
 use thiserror::Error;
 use tokio::time::timeout;
@@ -110,14 +111,15 @@ pub(crate) enum QueueDrainError {
 ///    callsite for self's own queue, not this module).
 /// 3. If the filtered set is empty, return `Err(NoHomes)`.
 /// 4. For each home in parallel ([`tokio::task::JoinSet`]):
-///    a. Open / reuse a `peer/1` connection via `lookup::connect_to_peer`.
-///    b. Send `QueueFetch { user_ipk, requester_relay_id =
-///       self_relay_id, timestamp = drain_auth.timestamp, user_sig =
-///       drain_auth.sig }`.
-///    c. Read `QueueFetchResp { messages, exhausted }`.
-///    d. While `exhausted == false`, page (same auth — the transcript
-///       doesn't bind page index, so the home reuses the same
-///       freshness check). Up to [`MAX_QUEUE_FETCH_PAGES`] pages.
+///    (a) Open / reuse a `peer/1` connection via
+///    `lookup::connect_to_peer`.
+///    (b) Send `QueueFetch { user_ipk, requester_relay_id =
+///    self_relay_id, timestamp = drain_auth.timestamp, user_sig =
+///    drain_auth.sig }`.
+///    (c) Read `QueueFetchResp { messages, exhausted }`.
+///    (d) While `exhausted == false`, page (same auth — the transcript
+///    doesn't bind page index, so the home reuses the same
+///    freshness check). Up to [`MAX_QUEUE_FETCH_PAGES`] pages.
 /// 5. Concat all dispatches and deduplicate by `DispatchP.id` so a
 ///    cross-home replicated message arrives at the client exactly
 ///    once. Order within `id`-duplicates is "first home in the
@@ -517,17 +519,9 @@ fn self_is_in_k_closest_qd(dht: &Dht, target: &[u8; 32]) -> bool {
         return true;
     }
     let self_id = dht.node_id;
-    let self_dist = xor_dist_qd(self_id.as_bytes(), target);
-    let kth_dist = xor_dist_qd(descriptors[K - 1].id.as_bytes(), target);
+    let self_dist = xor32(self_id.as_bytes(), target);
+    let kth_dist = xor32(descriptors[K - 1].id.as_bytes(), target);
     self_dist <= kth_dist
-}
-
-fn xor_dist_qd(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = a[i] ^ b[i];
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------

@@ -32,10 +32,13 @@ use std::time::Instant;
 
 use common::proto::dht_p2p::NodeDescriptor;
 use common::quic::id::NodeId;
+use common::quic::xor32;
 use quinn::Connection;
 
+use super::Dht;
 use super::config::BUCKETS;
 use super::config::BUCKET_SIZE;
+use super::config::K;
 
 // ---------------------------------------------------------------------------
 // Module-private constants
@@ -76,7 +79,7 @@ const RTT_EMA_DENOM: u32 = 8;
 ///
 /// design-doc: §1.3 (`RoutingEntry`), §3.4 (peer learning).
 #[derive(Debug, Clone)]
-pub(crate) struct RoutingEntry {
+pub struct RoutingEntry {
     /// Peer NodeId — full 32 bytes after the pre-phase widening.
     pub id: NodeId,
 
@@ -166,7 +169,7 @@ impl RoutingEntry {
 /// design-doc: §1.3 (`Bucket`), §3.3 (eviction policy with replacement
 /// cache).
 #[derive(Debug)]
-pub(crate) struct Bucket {
+pub struct Bucket {
     /// Active peers, head = LRU.
     ///
     /// `Vec` not `SmallVec`: the design doc suggests `SmallVec<…, B>` but
@@ -214,7 +217,7 @@ impl Bucket {
 ///
 /// design-doc: §3.3, §3.4.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum InsertOutcome {
+pub enum InsertOutcome {
     /// The descriptor's id matched [`RoutingTable::self_id`]; we never
     /// store ourselves in our own routing table. No-op.
     IsSelf,
@@ -289,7 +292,7 @@ pub(crate) enum PingFailedOutcome {
 ///
 /// design-doc: §1.3, §3.1.
 #[derive(Debug)]
-pub(crate) struct RoutingTable {
+pub struct RoutingTable {
     /// Self NodeId. Stored locally so distance computations don't need to
     /// reach back into `Dht`.
     pub self_id: NodeId,
@@ -304,7 +307,7 @@ pub(crate) struct RoutingTable {
 impl RoutingTable {
     /// Construct an empty routing table. All buckets start empty with
     /// `refresh_at = now`.
-    pub(crate) fn empty(self_id: NodeId) -> Self {
+    pub fn empty(self_id: NodeId) -> Self {
         let now = Instant::now();
         // The macro-y way to build a fixed-size array of non-`Copy` items
         // without depending on `arrayvec` or `array-init`.
@@ -332,7 +335,7 @@ impl RoutingTable {
     /// this returns.
     ///
     /// design-doc: §3.3, §3.4.
-    pub(crate) fn insert(&mut self, descriptor: NodeDescriptor) -> InsertOutcome {
+    pub fn insert(&mut self, descriptor: NodeDescriptor) -> InsertOutcome {
         let Some(bucket_idx) = bucket_for(&self.self_id, &descriptor.id) else {
             return InsertOutcome::IsSelf;
         };
@@ -494,7 +497,7 @@ impl RoutingTable {
                 scratch.push((dist, entry));
             }
         }
-        scratch.sort_by(|(a, _), (b, _)| a.cmp(b));
+        scratch.sort_by_key(|(a, _)| *a);
         scratch.truncate(count);
         scratch.into_iter().map(|(_, e)| e.clone()).collect()
     }
@@ -524,11 +527,10 @@ impl RoutingTable {
             // argument is in the future, which can't happen here — every
             // `refresh_at` was set by an earlier `Instant::now()`. Treat
             // the `None` case defensively as "not stale".
-            if let Some(age) = now.checked_duration_since(bucket.refresh_at) {
-                if age >= threshold {
+            if let Some(age) = now.checked_duration_since(bucket.refresh_at)
+                && age >= threshold {
                     out.push(idx);
                 }
-            }
         }
         out
     }
@@ -617,6 +619,44 @@ fn _distance_cmp_keep_alive() {
 }
 
 // ---------------------------------------------------------------------------
+// Self-in-top-K helper (shared by store / handler / mls_kp / mls_welcome)
+// ---------------------------------------------------------------------------
+
+/// True iff `dht.node_id` is among the K closest to `target` under the
+/// current routing-table view.
+///
+/// This is the single canonical implementation of the "is this relay
+/// one of the K-set owners?" check used by the four sticky-home /
+/// MLS-stash handlers (`store::self_is_owner`,
+/// `handler::self_in_top_k`, `mls_kp::self_is_owner_for_stash`,
+/// `mls_welcome::self_is_owner_for_recipient`).
+///
+/// **Permissive sparse-table policy**: if the routing table holds
+/// fewer than `K` candidates we return `true` rather than `false`.
+/// Per `misc/specs/DHT.md` §3.5 ("Ready is non-strict"), a relay
+/// that just bootstrapped is allowed to accept stores/publishes
+/// before its routing table is dense — otherwise we couldn't seed
+/// a fresh network. Migration sweeps re-balance later.
+///
+/// We query for `K + 1` rather than `K` so that a self-equal-distance
+/// entry at the K-th position cannot be tiebroken out and silently
+/// drop us out of the K-set.
+///
+/// **Lock contract**: takes the routing-table read lock briefly to
+/// snapshot the candidates; never held across `await` (this function
+/// is sync).
+pub(crate) fn self_in_top_k(dht: &Dht, target: &NodeId) -> bool {
+    let candidates = dht.routing.read().find_closest(target, K + 1);
+    if candidates.len() < K {
+        return true;
+    }
+    let target_bytes = target.as_bytes();
+    let self_dist = xor32(dht.node_id.as_bytes(), target_bytes);
+    let kth_dist = xor32(candidates[K - 1].id.as_bytes(), target_bytes);
+    self_dist <= kth_dist
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -683,12 +723,11 @@ mod tests {
             // distribution faster.
             seed[31] = (n & 0xff) as u8;
             let id = NodeId::new(seed);
-            if let Some(b) = bucket_for(self_id, &id) {
-                if b == target_bucket {
+            if let Some(b) = bucket_for(self_id, &id)
+                && b == target_bucket {
                     *cursor = n.wrapping_add(1);
                     return id;
                 }
-            }
         }
         panic!("could not find id mapping to bucket {target_bucket}")
     }
@@ -876,7 +915,7 @@ mod tests {
                 (dist, id)
             })
             .collect();
-        expected.sort_by(|a, b| a.0.cmp(&b.0));
+        expected.sort_by_key(|a| a.0);
         let expected_ids: Vec<NodeId> = expected.into_iter().take(5).map(|(_, id)| id).collect();
         let got_ids: Vec<NodeId> = got.iter().map(|d| d.id).collect();
         assert_eq!(got_ids, expected_ids);

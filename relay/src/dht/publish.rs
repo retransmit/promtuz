@@ -42,6 +42,7 @@ use common::proto::dht_p2p::StoreOutcome;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
+use common::quic::xor32;
 use thiserror::Error;
 use tokio::time::timeout;
 
@@ -152,9 +153,9 @@ pub(crate) async fn publish(
     let self_should_store = if descriptors.len() < K {
         true
     } else {
-        let self_dist = xor_dist(self_id.as_bytes(), &target_bytes);
+        let self_dist = xor32(self_id.as_bytes(), &target_bytes);
         let kth = &descriptors[K - 1];
-        let kth_dist = xor_dist(kth.id.as_bytes(), &target_bytes);
+        let kth_dist = xor32(kth.id.as_bytes(), &target_bytes);
         self_dist < kth_dist
     };
 
@@ -192,15 +193,6 @@ pub(crate) async fn publish(
     }
 
     Ok(PublishOutcome { stored_at, failed_at })
-}
-
-/// 32-byte XOR distance, big-endian-comparable.
-fn xor_dist(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = a[i] ^ b[i];
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------

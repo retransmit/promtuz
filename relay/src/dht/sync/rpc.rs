@@ -315,11 +315,10 @@ async fn bisect_slice(
 
     // All bisects complete — issue FetchRecord against the gathered
     // IPKs.
-    if !to_fetch.is_empty() {
-        if let Err(e) = fetch_and_apply(dht, conn, &to_fetch).await {
+    if !to_fetch.is_empty()
+        && let Err(e) = fetch_and_apply(dht, conn, &to_fetch).await {
             warn!("bisect_slice: fetch_and_apply failed: {e}");
         }
-    }
     Ok(())
 }
 

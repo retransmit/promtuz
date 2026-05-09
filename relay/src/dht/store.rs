@@ -45,6 +45,7 @@ use common::proto::dht_p2p::tombstone_signing_input;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
+use common::quic::xor32;
 use ed25519_dalek::Signature;
 use ed25519_dalek::Verifier;
 use ed25519_dalek::VerifyingKey;
@@ -187,45 +188,14 @@ enum TombstoneVerifyError {
 ///
 /// Implemented as: ask the routing table for its top-(k+1) closest peers,
 /// then compute the same XOR distance for self and check that self's
-/// distance is `<=` the kth peer's distance. We use `k+1` rather than
-/// `k` so that even if the routing table is fully populated and the kth
-/// position is *exactly* equal to self in distance, we don't get pushed
-/// out by a sort-tiebreak.
-///
-/// **Caveat (lock):** holds the routing-table read lock briefly to clone
-/// out the candidate descriptors; never across an `await` (this function
-/// is sync).
+/// One-line wrapper that defers to the canonical
+/// [`super::routing::self_in_top_k`] helper — see that fn for the
+/// permissive-sparse-table policy and the `K + 1` query rationale.
 ///
 /// design-doc: §5.1 (key→value, single relay per user) + §5.4 (ownership
 /// shifts handled lazily).
 fn self_is_owner(dht: &Dht, target: &[u8; 32]) -> bool {
-    let target_id = NodeId::from_bytes(*target);
-    // Compare distances on raw 32-byte XOR; a Vec is fine because the
-    // routing table at most has K+1 entries here.
-    let candidates = dht.routing.read().find_closest(&target_id, K + 1);
-
-    let self_dist = xor32(dht.node_id.as_bytes(), target);
-
-    if candidates.len() < K {
-        // Not enough peers known yet — be permissive. This matches the
-        // §3.5 bootstrap "Ready is non-strict" stance: a relay that just
-        // came online is allowed to accept stores even before its
-        // routing table is dense, otherwise we couldn't seed a fresh
-        // network.
-        return true;
-    }
-
-    // Find the k-th closest peer's distance (zero-indexed: index K-1).
-    let kth_dist = xor32(candidates[K - 1].id.as_bytes(), target);
-    self_dist <= kth_dist
-}
-
-fn xor32(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = a[i] ^ b[i];
-    }
-    out
+    super::routing::self_in_top_k(dht, &NodeId::from_bytes(*target))
 }
 
 // ---------------------------------------------------------------------------
@@ -292,8 +262,8 @@ pub(crate) fn store_record(dht: &Dht, record: PresenceRecord, now_ms: u64) -> St
         }
     };
 
-    if let Ok(Some(existing_bytes)) = dht.rocks.get_cf(&cf, key) {
-        if let Ok(existing) = PresenceRecord::deser(&existing_bytes) {
+    if let Ok(Some(existing_bytes)) = dht.rocks.get_cf(&cf, key)
+        && let Ok(existing) = PresenceRecord::deser(&existing_bytes) {
             match record.compare(&existing) {
                 std::cmp::Ordering::Greater => {
                     // New record wins — fall through to write.
@@ -314,7 +284,6 @@ pub(crate) fn store_record(dht: &Dht, record: PresenceRecord, now_ms: u64) -> St
         // If we couldn't deserialize the existing entry, treat the slot
         // as empty: better to overwrite a corrupted record than to wedge
         // forever.
-    }
 
     // 4. Persist with fsync.
     let bytes = match record.ser() {
@@ -383,23 +352,19 @@ pub(crate) fn store_tombstone(
     // 3. Compare against any existing record — only delete if the
     //    tombstone's generation is `>=`.
     let record_key = tomb.user_ipk.0;
-    if let Ok(Some(existing_bytes)) = dht.rocks.get_cf(&cf, record_key) {
-        if let Ok(existing) = PresenceRecord::deser(&existing_bytes) {
-            if tomb.generation < existing.generation {
+    if let Ok(Some(existing_bytes)) = dht.rocks.get_cf(&cf, record_key)
+        && let Ok(existing) = PresenceRecord::deser(&existing_bytes)
+            && tomb.generation < existing.generation {
                 return TombstoneOutcome::Stale;
             }
-        }
-    }
 
     // 4. Compare against any existing tombstone — keep higher generation.
     let tk = tombstone_key(&tomb.user_ipk.0);
-    if let Ok(Some(existing_tomb_bytes)) = dht.rocks.get_cf(&cf, tk) {
-        if let Ok(existing_tomb) = TombstoneRecord::deser(&existing_tomb_bytes) {
-            if tomb.generation < existing_tomb.generation {
+    if let Ok(Some(existing_tomb_bytes)) = dht.rocks.get_cf(&cf, tk)
+        && let Ok(existing_tomb) = TombstoneRecord::deser(&existing_tomb_bytes)
+            && tomb.generation < existing_tomb.generation {
                 return TombstoneOutcome::Stale;
             }
-        }
-    }
 
     let bytes = match tomb.ser() {
         Ok(b) => b,
@@ -526,11 +491,10 @@ pub fn evict_expired(dht: &Dht, now_ms: u64) -> usize {
         };
         match classify_key(&key) {
             KeyKind::Record(_) => {
-                if let Ok(rec) = PresenceRecord::deser(&value) {
-                    if now_ms >= rec.not_after {
+                if let Ok(rec) = PresenceRecord::deser(&value)
+                    && now_ms >= rec.not_after {
                         victims.push(key.to_vec());
                     }
-                }
             }
             KeyKind::Tombstone(ipk_slice) => {
                 // Honour-window check: drop only if the wall clock has
@@ -1396,7 +1360,7 @@ mod tests {
         let cf = dht.rocks.cf_handle(CF_DHT_QUEUE).expect("cf");
         let mut keys: Vec<Vec<u8>> = Vec::new();
         let mut values: Vec<Vec<u8>> = Vec::new();
-        for entry in dht.rocks.prefix_iterator_cf(&cf, &to_ipk) {
+        for entry in dht.rocks.prefix_iterator_cf(&cf, to_ipk) {
             let (k, v) = entry.expect("iter");
             if !k.starts_with(&to_ipk) {
                 break;
@@ -1460,7 +1424,7 @@ mod tests {
         // remains exactly at the cap (the `[0xFF; 16]` id we'd have
         // used absent the cap is not in the queue).
         let mut found_overflow = false;
-        for entry in dht.rocks.prefix_iterator_cf(&cf, &to_ipk) {
+        for entry in dht.rocks.prefix_iterator_cf(&cf, to_ipk) {
             let (k, _) = entry.expect("iter");
             if !k.starts_with(&to_ipk) {
                 break;

@@ -62,6 +62,7 @@ use common::proto::dht_p2p::forward_signing_input;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use common::quic::id::NodeId;
+use common::quic::xor32;
 use ed25519_dalek::Signature;
 use ed25519_dalek::Signer;
 use ed25519_dalek::VerifyingKey;
@@ -215,9 +216,9 @@ pub(crate) async fn forward_to_homes(
         // `publish::self_should_store`.
         true
     } else {
-        let self_dist = xor_dist(self_id.as_bytes(), &user_ipk_bytes);
+        let self_dist = xor32(self_id.as_bytes(), &user_ipk_bytes);
         let kth = &descriptors[K - 1];
-        let kth_dist = xor_dist(kth.id.as_bytes(), &user_ipk_bytes);
+        let kth_dist = xor32(kth.id.as_bytes(), &user_ipk_bytes);
         self_dist < kth_dist
     };
 
@@ -314,17 +315,6 @@ fn build_signed_forward(dht: &Dht, dispatch: DispatchP, timestamp: u64) -> Forwa
         timestamp,
         sig: sig.into(),
     }
-}
-
-/// 32-byte XOR distance, big-endian-comparable. Same helper shape as
-/// `publish.rs::xor_dist`, kept private to this module to avoid a thin
-/// `pub(super)` export for a 4-line function.
-fn xor_dist(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = a[i] ^ b[i];
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -597,8 +587,8 @@ fn self_is_in_k_closest(dht: &Dht, target: &[u8; 32]) -> bool {
         // drop messages.
         return true;
     }
-    let self_dist = xor_dist(dht.node_id.as_bytes(), target);
-    let kth_dist = xor_dist(descriptors[K - 1].id.as_bytes(), target);
+    let self_dist = xor32(dht.node_id.as_bytes(), target);
+    let kth_dist = xor32(descriptors[K - 1].id.as_bytes(), target);
     self_dist <= kth_dist
 }
 
@@ -822,7 +812,7 @@ mod tests {
         // `enqueue_for_home`.
         let cf = dht.rocks.cf_handle(CF_DHT_QUEUE).expect("cf");
         let mut found = false;
-        for entry in dht.rocks.prefix_iterator_cf(&cf, &to_ipk) {
+        for entry in dht.rocks.prefix_iterator_cf(&cf, to_ipk) {
             let (k, _) = entry.expect("iter");
             if k.starts_with(&to_ipk) {
                 found = true;

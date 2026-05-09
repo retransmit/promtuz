@@ -218,7 +218,7 @@ fn store_in_rocks(
     // million-entry queue on every dispatch.
     let mut count: usize = 0;
     let stop_at = MAX_QUEUED_PER_RECIPIENT.saturating_add(1);
-    for entry in ctx.relay.rocks.prefix_iterator(&recipient.0) {
+    for entry in ctx.relay.rocks.prefix_iterator(recipient.0) {
         let (key_bytes, _) = match entry {
             Ok(kv) => kv,
             // Treat a corrupted iterator as "we can't be sure we're under

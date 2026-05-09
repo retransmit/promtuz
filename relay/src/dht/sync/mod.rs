@@ -566,7 +566,7 @@ pub(crate) async fn run_drift_migration_sweep(dht: Arc<Dht>) {
 /// for the next sweep.
 ///
 /// **Why not propagate the error**: each migration is independent
-/// + best-effort; a failure on one candidate must not stall the
+/// and best-effort; a failure on one candidate must not stall the
 /// next one. The metric counters on `Dht::metrics` are the audit
 /// surface.
 async fn migrate_one(

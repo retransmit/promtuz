@@ -5,7 +5,7 @@ use anyhow::Result;
 use common::graceful;
 use common::info;
 use common::quic::config::build_client_cfg;
-use common::quic::config::build_server_cfg;
+use common::quic::config::build_server_cfg_with_alpn_split;
 use common::quic::config::load_root_ca;
 use common::quic::config::setup_crypto_provider;
 use common::quic::id::NodeKey;
@@ -97,15 +97,21 @@ pub struct Relay {
 }
 
 impl Relay {
-    fn endpoint(cfg: &AppConfig) -> Endpoint {
+    /// Build the relay's QUIC endpoint with an ALPN-split server config:
+    /// the peer/1 ALPN gets a NodeKey-bound self-signed Ed25519 cert
+    /// (so libcore can pin SPKI against `RelayDescriptor.pubkey`),
+    /// every other ALPN keeps the operator's CA-issued cert for the
+    /// existing trust chain. **Phase 8 (P0-2 residual).**
+    fn endpoint(cfg: &AppConfig, node_signing: &SigningKey) -> Endpoint {
         use ProtoRole as PR;
 
         graceful!(setup_crypto_provider(), "CRYPTO_ERR:");
 
         let server_cfg = graceful!(
-            build_server_cfg(
+            build_server_cfg_with_alpn_split(
                 &cfg.network.cert_path,
                 &cfg.network.key_path,
+                node_signing.clone(),
                 &[PR::Resolver, PR::Relay, PR::Peer, PR::Client],
             ),
             "SERVER_CFG_ERR:"
@@ -124,7 +130,7 @@ impl Relay {
 
         info!("initializing Relay with ID({key})");
 
-        let mut endpoint = Self::endpoint(&cfg);
+        let mut endpoint = Self::endpoint(&cfg, &keys.signing);
 
         let roots = graceful!(load_root_ca(&cfg.network.root_ca_path), "CA_ERR:");
 

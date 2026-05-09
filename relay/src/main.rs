@@ -57,8 +57,8 @@ async fn main() -> Result<()> {
     // client traffic with an empty routing table until a future
     // bootstrap attempt succeeds (phase 1h: periodic retry from the
     // scheduler).
-    if let Some(dht) = relay.dht.clone() {
-        if dht.cfg.enabled {
+    if let Some(dht) = relay.dht.clone()
+        && dht.cfg.enabled {
             // Phase 1h item 5: stash the resolver handle on `Dht` so
             // the scheduler's bootstrap-retry branch can re-call
             // `bootstrap()` when the routing table is sparse. The
@@ -95,7 +95,6 @@ async fn main() -> Result<()> {
                 sync::run_scheduler(dht_for_sched, cancel_for_sched).await;
             });
         }
-    }
 
     tokio::select! {
         _ = acceptor_handle => {}
