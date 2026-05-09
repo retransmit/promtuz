@@ -50,13 +50,12 @@ pub fn secret_from_key_or_create(key_path: &Path) -> Result<SigningKey, ()> {
         path = key_path,
     );
 
-    if let Some(parent) = key_path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
+    if let Some(parent) = key_path.parent()
+        && !parent.as_os_str().is_empty() && !parent.exists() {
             fs::create_dir_all(parent).map_err(|err| {
                 error!("failed to create parent dir {p:?}: {err}", p = parent);
             })?;
         }
-    }
 
     // ed25519-dalek 2.x's `SigningKey::generate` takes a `rand_core` 0.6
     // CSPRNG, but the workspace's `rand` crate sits on rand_core 0.9.

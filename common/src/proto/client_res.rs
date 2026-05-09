@@ -16,9 +16,9 @@ use crate::types::bytes::Bytes;
 /// > MAX_BOOTSTRAP_RESULTS` (after `u8`-saturating addition) so an
 /// unauthenticated caller cannot trigger an unbounded sort/scan. The
 /// combined cap is a small fraction of `MAX_RELAYS = 1024` (the registry
-/// size cap on the resolver) — large enough that a fresh-joining relay
-/// gets a useful seed set in one round-trip per design-doc §3.5, small
-/// enough that the per-request work stays trivial.
+/// > size cap on the resolver) — large enough that a fresh-joining relay
+/// > gets a useful seed set in one round-trip per design-doc §3.5, small
+/// > enough that the per-request work stays trivial.
 pub const MAX_BOOTSTRAP_RESULTS: u8 = 32;
 
 #[serde_as]

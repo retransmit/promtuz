@@ -362,6 +362,11 @@ pub fn presence_record_user_signing_input(
 /// `DHT_DOMAIN_PREFIX || b"-presence-v1" || PROTOCOL_VERSION (BE u16)`.
 /// The order below mirrors [`PresenceRecord`] field order *exactly* —
 /// reorder one and the signature stops verifying.
+//
+// Eight args mirrors the eight signed wire fields one-to-one;
+// bundling into a struct here would just add an indirection without
+// changing the semantics, so we accept the arity.
+#[allow(clippy::too_many_arguments)]
 pub fn presence_record_relay_signing_input(
     user_ipk: &[u8; 32], relay_id: &RelayId, relay_pubkey: &[u8; 32], not_before: u64,
     not_after: u64, generation: u64, capabilities: u16, user_sig: &[u8; 64],
@@ -942,6 +947,12 @@ pub struct FindValue {
 }
 
 /// Three response shapes per §2.4.3 / §4.2.
+//
+// `Found(PresenceRecord)` is ~250 B while `NotPresent` is zero-sized.
+// Boxing changes the postcard wire encoding (an extra layer of
+// indirection in the value path), so we keep the variants inline —
+// this is a wire enum, not an internal one.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FindValueOutcome {
     /// Responder is in the k owners and has the record.
@@ -1565,6 +1576,37 @@ pub enum DhtRequest {
     /// Sticky-home phase 2a (§5.2): recipient-relay → home-relay
     /// post-delivery GC of dispatch ids. Handler in phase 2d.
     QueueFetchAck(QueueFetchAck),
+
+    /// MLS Phase 2 (§3.4 of `MLS.md`): owner → home-relay full-batch
+    /// KeyPackage publish. Adds new records to the recipient's stash;
+    /// pre-existing records survive the publish (additive semantics
+    /// per §5.6 anti-pinning rotation). Handler in
+    /// `relay/src/dht/mls_kp.rs`.
+    KeyPackagePublish(crate::proto::mls_wire::KeyPackagePublishReq),
+    /// MLS Phase 2 (§3.5 of `MLS.md`): sender-relay → home-relay
+    /// pop-one KeyPackage from the target's stash. Strict one-shot
+    /// per fetch (`KP_PER_FETCH = 1`).
+    KeyPackageFetch(crate::proto::mls_wire::KeyPackageFetchReq),
+    /// MLS Phase 2 (§3.6 of `MLS.md`): owner → home-relay incremental
+    /// stash top-up. Distinct from `KeyPackagePublish` only via
+    /// signing-input domain (so a captured Refill sig cannot be
+    /// replayed as a Publish — the two have different replacement
+    /// semantics in the wider design, although both append at the
+    /// relay side per §5.6).
+    KeyPackageRefill(crate::proto::mls_wire::KeyPackageRefillReq),
+
+    /// MLS Phase 3a (Component B): sender-relay → home-relay
+    /// deliver-or-queue for a Welcome envelope. The home stores it in
+    /// `cf_dht_welcome` until the recipient drains via [`Self::WelcomeFetch`].
+    WelcomePublish(crate::proto::mls_wire::WelcomePublishReq),
+    /// MLS Phase 3a: recipient-relay → home-relay drain request for
+    /// the recipient's queued welcomes. Authentication mirrors
+    /// `QueueFetch` (user-sig + `requester_relay_id` binding).
+    WelcomeFetch(crate::proto::mls_wire::WelcomeFetchReq),
+    /// MLS Phase 3a: recipient-relay → home-relay deletion of
+    /// processed welcomes. Domain-separated from `WelcomeFetch` so a
+    /// captured fetch sig can't be replayed as an ack.
+    WelcomeAck(crate::proto::mls_wire::WelcomeAckReq),
 }
 
 /// All outbound DHT response payloads. Mirrored 1:1 with [`DhtRequest`]
@@ -1591,6 +1633,23 @@ pub enum DhtResponse {
     /// response variant for every request — see the
     /// [`QueueFetchAckResp`] doc-comment for the full rationale.
     QueueFetchAck(QueueFetchAckResp),
+
+    /// MLS Phase 2 — reply to [`DhtRequest::KeyPackagePublish`].
+    KeyPackagePublish(crate::proto::mls_wire::KeyPackagePublishResp),
+    /// MLS Phase 2 — reply to [`DhtRequest::KeyPackageFetch`].
+    /// Wraps `Found(record, remaining, static_hash) | NoStash |
+    /// NotOwner | RateLimited` as a single response (mirrors
+    /// `FindValueResp::result` pattern).
+    KeyPackageFetch(crate::proto::mls_wire::KeyPackageFetchResp),
+    /// MLS Phase 2 — reply to [`DhtRequest::KeyPackageRefill`].
+    KeyPackageRefill(crate::proto::mls_wire::KeyPackageRefillResp),
+
+    /// MLS Phase 3a — reply to [`DhtRequest::WelcomePublish`].
+    WelcomePublish(crate::proto::mls_wire::WelcomePublishResp),
+    /// MLS Phase 3a — reply to [`DhtRequest::WelcomeFetch`].
+    WelcomeFetch(crate::proto::mls_wire::WelcomeFetchResp),
+    /// MLS Phase 3a — reply to [`DhtRequest::WelcomeAck`].
+    WelcomeAck(crate::proto::mls_wire::WelcomeAckResp),
 }
 
 /// Outer DHT framing wrapper. Per §2.1, the wire grammar is open to
@@ -1723,7 +1782,7 @@ mod tests {
         // does not cover not_after, so verification reaches the
         // relay_sig stage and fails there.
         let mut tampered = rec.clone();
-        tampered.not_after = tampered.not_after + 1;
+        tampered.not_after += 1;
 
         match tampered.verify(now + 1) {
             Err(PresenceVerifyError::BadRelaySig) => {}
