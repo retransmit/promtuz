@@ -7,6 +7,22 @@ license.workspace = true
 repository.workspace = true
 default-run = "relay"
 
+# Phase 5b: relay exposes both a `[lib]` and the historic `[[bin]]`.
+# The library form is consumed by libcore's e2e integration tests
+# (`libcore/tests/e2e_phase5b.rs`) for spinning up real `Dht` instances
+# in-process. No new top-level dep on libcore — the relay code itself
+# is unchanged. The bin entry in `main.rs` is now a thin shell that
+# `use`s the lib crate; visibility on the lib's modules expanded from
+# `pub(crate)` to `pub` only where the shell binary needs them or the
+# tests do (documented in commits and `lib.rs`).
+[lib]
+name = "relay"
+path = "src/lib.rs"
+
+[[bin]]
+name = "relay"
+path = "src/main.rs"
+
 [dependencies]
 common = { path = "../common", features = [
     "proto",

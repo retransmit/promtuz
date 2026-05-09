@@ -7,7 +7,12 @@ license.workspace = true
 repository.workspace = true
 
 [lib]
-crate-type = ["cdylib"]
+# Phase 5b: add `rlib` alongside `cdylib` so libcore can be linked as a
+# regular Rust library in integration tests (the relay's
+# `tests/e2e_phase5b.rs` consumes libcore directly to drive
+# `MlsContext`-based clients against real `Dht` instances). The Android
+# JNI cdylib build is unaffected — `cargo build` emits both artifacts.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # Workspace Crates
@@ -43,3 +48,43 @@ thiserror = "2.0.18"
 uuid = { version = "1.21.0", features = ["v7"] }
 zeroize = { version = "1.8.2", features = ["aarch64", "derive"] }
 x509-parser = "0.18"
+
+# MLS (RFC 9420) — see misc/specs/MLS.md
+openmls = "0.8"
+openmls_traits = "0.5"
+openmls_rust_crypto = "0.5"
+openmls_basic_credential = "0.5"
+tls_codec = "0.4"
+# RFC 9420 §5.2 mandates `KeyPackageRef = SHA-256(tls_encode(KP))[..32]`
+# for cipher suite 0x0003. Direct dep so the KP-ref computation in
+# `mls::keypackage` doesn't have to indirect through `common`.
+sha2 = "0.10"
+# Phase 4: direct dep so the MLS messaging path's `mint_group_id` and
+# the dispatch_id derivation can hash without indirecting through
+# `common::crypto`. Already in the dep tree transitively via `common`;
+# this just makes the line item explicit. No new crate added.
+blake3 = "1.8"
+
+# Phase 3b's `mls::group` / `mls::welcome` / `mls::epoch_catchup` test
+# fixtures use openmls's `MlsMessageOut::into_welcome()`, which is gated
+# behind `test-utils` in openmls 0.8. Production code paths do not use
+# this method (it's only for fixture wiring). We enable it as a
+# dev-dependency feature so the in-tree tests compile without dragging
+# `test-utils` into release builds.
+[dev-dependencies]
+openmls = { version = "0.8", features = ["test-utils"] }
+# Phase 5a tokio scheduler tests need `start_paused` + `tokio::time::advance`
+# (deterministic clock simulation). The `test-util` feature is dev-only;
+# production builds rely on the wall clock.
+tokio = { workspace = true, features = ["full", "test-util"] }
+# `x509-parser` is a runtime dep too, but we re-import it under
+# `cfg(test)` for the `peer1_client` fake server's cert SPKI extractor.
+# Keep the dev-dep declaration so the test path doesn't depend on the
+# runtime version drift.
+x509-parser = "0.18"
+# Phase 5b: e2e integration tests in `tests/e2e_phase5b.rs` consume the
+# relay crate as a library so they can drive real `Dht` instances over
+# loopback `peer/1` QUIC connections. No cycle — relay does NOT depend
+# on libcore (libcore is the cdylib client; relay is the server).
+relay = { path = "../relay" }
+rust-rocksdb = { version = "0.46.0", features = ["multi-threaded-cf"] }
