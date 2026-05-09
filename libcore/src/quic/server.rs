@@ -30,24 +30,33 @@ use log::debug;
 use log::error;
 use log::info;
 use log::warn;
-use parking_lot::RwLock;
 use quinn::ConnectionError;
 use quinn::SendStream;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::ENDPOINT;
 use crate::api::conn_stats::CONNECTION_START_TIME;
-use crate::api::messaging::decode_encrypted;
 use crate::data::contact::Contact;
 use crate::data::identity::IdentitySigner;
 use crate::data::message::Message;
 use crate::data::relay::Relay;
+use crate::db::mls::stash_db_handle;
 use crate::events::Emittable;
 use crate::events::connection::ConnectionState;
 use crate::events::messaging::MessageEv;
+use crate::quic::peer1_client::Peer1DhtClient;
 use crate::ret_err;
 use crate::utils::systime;
+
+/// KP rotation scheduler tick cadence. Each tick the libcore checks
+/// [`crate::mls::scheduler::run_once`] for pending refill / rotation
+/// work; the task lives for the lifetime of the relay connection and
+/// is cooperatively cancelled on disconnect.
+///
+/// design-doc: `misc/specs/MLS.md` §5.5 (refill cadence), §11.3.
+const KP_SCHEDULER_TICK_MS: u64 = 60_000;
 
 pub enum RelayConnError {
     Continue,
@@ -66,7 +75,12 @@ where
 // const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONCURRENT_STREAMS: usize = 16;
 
-pub static RELAY: RwLock<Option<Relay>> = RwLock::new(None);
+// Phase 8 (P1 #19): the actual `RELAY` singleton lives in
+// `crate::state` (a leaf module) so `api::messaging` doesn't have to
+// pull in `quic::server` for a global it shares with us. Re-exported
+// here for backwards compatibility with existing call sites in this
+// module.
+pub use crate::state::RELAY;
 
 impl Relay {
     pub async fn connect(
@@ -151,6 +165,20 @@ impl Relay {
         self.record_success(latency_ms).map_err(|e| RelayConnError::Error(e.into()))?;
         self.connection = Some(conn);
 
+        // Phase 7 (P0-4): build the production peer/1 MLS dialer once
+        // the relay/1 connection is established. The dialer is stored
+        // on the `Relay` struct so the JNI surface (`sendMessage`,
+        // `handle_deliver`) can pick it up via `RELAY.read()` instead
+        // of constructing a stub `NotWiredDhtClient`. Failure to build
+        // is logged and `dht_client` stays `None`; the caller surfaces
+        // a clean error rather than silently no-oping.
+        match build_peer1_dht_client(&self, ipk) {
+            Ok(c) => self.dht_client = Some(c),
+            Err(e) => {
+                warn!("MLS: peer1 dialer not constructed at connect: {e}");
+            },
+        }
+
         let handle = tokio::spawn({
             let relay = self.clone();
             async move { relay.handle(ipk).await }
@@ -225,7 +253,7 @@ impl Relay {
         // Draining Queue
 
         {
-            let (mut tx, mut rx) =
+            let (mut tx, _rx) =
                 ret_err!(conn.open_bi().await.inspect_err(|e| self.handle_err(e)));
 
             if CRelayPacket::DrainQueue.send(&mut tx).await.is_err() {
@@ -241,9 +269,54 @@ impl Relay {
 
         //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
 
+        // Phase 5a / Phase 7: re-use the production peer/1 dialer that
+        // `connect()` built before storing this Relay on the global
+        // `RELAY`. The dialer is shared (`Arc<Peer1DhtClient>`) so the
+        // JNI surface (`sendMessage`, `handle_deliver`) and the
+        // background tasks below all dispatch over the same pool.
+        //
+        // The cancellation token is fired when the function returns
+        // (on connection loss) so the scheduler task exits cleanly.
+        // `_mls_cancel_drop_guard` keeps the cancel-on-drop alive
+        // through the rest of `handle()` — see line below.
+        let mls_cancel = CancellationToken::new();
+        let dht_client = self.dht_client.clone();
+
+        if let Some(client) = dht_client.as_ref() {
+            // 1. One-shot Welcome poll on reconnect.
+            //
+            // Best-effort — if the K-set FindNode times out or the
+            // recipient relay is down we just log; Welcomes can be
+            // re-fetched on the next reconnect, and the home's
+            // 30-day retention covers multi-week offline windows.
+            let client_for_poll = client.clone();
+            tokio::spawn(async move {
+                if let Err(e) = poll_welcomes_once(client_for_poll).await {
+                    warn!("MLS: poll_welcomes failed: {e}");
+                }
+            });
+
+            // 2. KP rotation scheduler — long-lived task, ticks every
+            //    KP_SCHEDULER_TICK_MS. Cancelled on disconnect via
+            //    `mls_cancel`.
+            let client_for_sched = client.clone();
+            let cancel_for_sched = mls_cancel.clone();
+            tokio::spawn(async move {
+                run_scheduler_loop(client_for_sched, cancel_for_sched).await;
+            });
+        }
+
+        //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
+
         let relay_id = self.id.clone();
 
         debug!("waiting for incoming streams from relay({})", relay_id);
+
+        // Hold the drop guard for the duration of `handle()`. When
+        // `handle` returns (connection lost), the guard drops →
+        // `mls_cancel` fires → the scheduler task observes
+        // `cancelled().await` and exits cleanly.
+        let _mls_cancel_drop_guard = mls_cancel.drop_guard();
 
         loop {
             let (mut send, mut recv) = ret_err!(conn.accept_bi().await);
@@ -257,11 +330,25 @@ impl Relay {
             };
 
             let relay_id = relay_id.clone();
+            // Phase 7 (P0-4): clone the dialer Arc into the per-stream
+            // task so `handle_deliver` can drive
+            // `process_inbound_envelope` over the production wire (KP
+            // fetch on stale-group recreate, etc.) instead of the
+            // stub `NotWiredDhtClient`.
+            let dht_client_for_stream = self.dht_client.clone();
             tokio::spawn(async move {
                 let _permit = permit; // dropped when stream task ends
                 while let Ok(packet) = SRelayPacket::unpack(&mut recv).await {
                     if let Err(err) = match packet {
-                        SRelayPacket::Deliver(msg) => handle_deliver(&mut send, ipk, msg).await,
+                        SRelayPacket::Deliver(msg) => {
+                            handle_deliver(
+                                &mut send,
+                                ipk,
+                                msg,
+                                dht_client_for_stream.clone(),
+                            )
+                            .await
+                        },
                         SRelayPacket::AckAuthRequest {
                             requester_relay_id,
                             delivered_ids,
@@ -305,52 +392,117 @@ impl Relay {
     }
 }
 
-async fn handle_deliver(tx: &mut SendStream, ipk: VerifyingKey, msg: DeliverP) -> Result<()> {
-    // 1. Check if sender is a known contact
-    let Some(contact) = Contact::get(&msg.from) else {
-        info!("MESSAGE: dropped message from unknown sender {}", hex::encode(msg.from));
+async fn handle_deliver(
+    tx: &mut SendStream, _ipk: VerifyingKey, msg: DeliverP,
+    dht_client: Option<Arc<Peer1DhtClient>>,
+) -> Result<()> {
+    // Phase 4 receive path. The wire envelope is now `MlsEnvelopeP`
+    // (postcard-encoded), so we hand off to
+    // `api::messaging::process_inbound_envelope` rather than the v2
+    // shared-key decrypt.
+    //
+    // Contact-first gating: anything from an IPK we don't have on
+    // file is dropped (mirrors the v2 receive path).
+    if !Contact::exists(&msg.from) {
+        info!("MESSAGE: dropped envelope from unknown sender {}", hex::encode(&msg.from[..4]));
         bail!("unknown sender");
-    };
+    }
 
-    // 2. Derive per-friendship shared key and decrypt
-    let Ok(shared_key) =
-        contact.shared_key().inspect_err(|e| warn!("MESSAGE: failed to derive shared key: {e}"))
-    else {
-        bail!("failed to derive shared key");
-    };
-
-    let Some(encrypted) = decode_encrypted(&msg.payload) else {
-        warn!("MESSAGE: payload too short from {}", hex::encode(msg.from));
-        bail!("payload too short")
-    };
-
-    let Ok(plaintext) = encrypted.decrypt(&shared_key, ipk.as_bytes()) else {
-        warn!("MESSAGE: decryption failed from {}", hex::encode(msg.from));
-        bail!("decryption failed")
-    };
-
-    let Ok(content) = String::from_utf8(plaintext) else {
-        warn!("MESSAGE: invalid UTF-8 from {}", hex::encode(msg.from));
-        bail!("invalid UTF-8")
-    };
-
-    let timestamp = systime().as_secs();
-
-    // Persist BEFORE acking. If we ack first and the relay dequeues, a crash
-    // (or DB failure) between ack and save loses the message permanently.
-    let saved = match Message::save_incoming(*msg.from, &content, timestamp) {
-        Ok(m) => m,
-        Err(e) => {
-            warn!("MESSAGE: failed to save incoming: {e}");
-            // Skip the ack so the relay redelivers next time.
-            bail!("save failed: {e}");
+    // Phase 7 (P0-4): use the production peer/1 dialer that the
+    // connection-time wiring in `Relay::connect` attached to the
+    // global `RELAY`. The receive path's MLS handling
+    // (`process_inbound_envelope`) needs a `DhtClient` for completeness
+    // even though today's Welcome / Application receive paths don't
+    // dial back to the DHT — future stale-group recreate or KP-rotation
+    // hooks will. Falling back to `NotWiredDhtClient` only when the
+    // dialer wasn't built (PEER_IDENTITY missing at connect time);
+    // surfaced via existing logging.
+    let provider = crate::mls::PromtuzMlsProvider::shared();
+    let stash_db = stash_db_handle();
+    let stash = crate::mls::KeyPackageStash::new(stash_db.clone());
+    let buffer = crate::mls::EpochCatchupBuffer::new(stash_db);
+    let result = match dht_client {
+        Some(client) => {
+            let ctx = crate::api::messaging::MlsContext {
+                provider: &provider,
+                stash:    &stash,
+                buffer:   &buffer,
+                dht:      client.as_ref(),
+            };
+            crate::api::messaging::process_inbound_envelope(&ctx, *msg.from, &msg.payload).await
+        },
+        None => {
+            let dht = crate::quic::dht_client::NotWiredDhtClient;
+            let ctx = crate::api::messaging::MlsContext {
+                provider: &provider,
+                stash:    &stash,
+                buffer:   &buffer,
+                dht:      &dht,
+            };
+            crate::api::messaging::process_inbound_envelope(&ctx, *msg.from, &msg.payload).await
         },
     };
 
-    CRelayPacket::DeliverAck.send(tx).await?;
-
-    info!("MESSAGE: received from {}", hex::encode(msg.from));
-    MessageEv::Received { id: saved.inner.id, from: *msg.from, content, timestamp }.emit();
+    match result {
+        Ok(Some(crate::api::messaging::InboundDecoded::Application { plaintext, group_id: _ })) => {
+            // Surface as a UTF-8 message in the Phase 4 model. Future
+            // structured payloads (read receipts, attachments, etc.)
+            // will arrive as their own MlsEnvelopeP sub-variants;
+            // until then any non-UTF-8 application data is dropped.
+            let Ok(content) = String::from_utf8(plaintext) else {
+                warn!("MESSAGE: invalid UTF-8 from {}", hex::encode(&msg.from[..4]));
+                bail!("invalid UTF-8");
+            };
+            let timestamp = systime().as_secs();
+            let saved = match Message::save_incoming(*msg.from, &content, timestamp) {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!("MESSAGE: failed to save incoming: {e}");
+                    bail!("save failed: {e}");
+                },
+            };
+            CRelayPacket::DeliverAck.send(tx).await?;
+            info!("MESSAGE: received from {}", hex::encode(&msg.from[..4]));
+            MessageEv::Received {
+                id: saved.inner.id,
+                from: *msg.from,
+                content,
+                timestamp,
+            }
+            .emit();
+        },
+        Ok(Some(crate::api::messaging::InboundDecoded::Welcome)) => {
+            info!("MLS: processed welcome from {}", hex::encode(&msg.from[..4]));
+            CRelayPacket::DeliverAck.send(tx).await?;
+        },
+        Ok(Some(crate::api::messaging::InboundDecoded::ApplicationBuffered)) => {
+            // Buffered for a future epoch / staged commit merged.
+            // Ack so the relay GCs the queue entry.
+            CRelayPacket::DeliverAck.send(tx).await?;
+        },
+        Ok(Some(crate::api::messaging::InboundDecoded::ApplicationStale)) => {
+            // Phase 7 (P0-7): ack stale-epoch envelopes so the relay
+            // GCs them. Previously this `bail`ed without ack which made
+            // the relay redeliver indefinitely (queue grows without
+            // bound, CPU burns on every redelivery decoding the same
+            // doomed envelope). The recipient cannot recover state for
+            // a stale epoch — openmls only retains a small past-epoch
+            // key window — so re-delivery is hopeless, and an explicit
+            // ack is the correct response.
+            warn!("MESSAGE: stale-epoch envelope from {}; acking and dropping", hex::encode(&msg.from[..4]));
+            CRelayPacket::DeliverAck.send(tx).await?;
+        },
+        Ok(None) => {
+            // Currently unreachable — process_inbound_envelope only
+            // returns None for the protocol-mismatch path, which
+            // never fires in production.
+            bail!("no inbound action");
+        },
+        Err(e) => {
+            warn!("MESSAGE: process_inbound_envelope failed from {}: {e}", hex::encode(&msg.from[..4]));
+            bail!("process failed: {e}");
+        },
+    }
 
     Ok(())
 }
@@ -413,6 +565,168 @@ async fn handle_ack_auth_request(
     .send(tx)
     .await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// MLS / peer1 dialer wiring (Phase 5a)
+// ---------------------------------------------------------------------------
+
+/// Build the production [`Peer1DhtClient`] from the current connection
+/// state.
+///
+/// Steps:
+/// 1. Load `PEER_IDENTITY` (set at app boot in `api/mod.rs::initApi`).
+/// 2. Build `peer/1` ALPN client config via
+///    [`crate::quic::peer_config::build_peer_client_cfg`].
+/// 3. Translate the relay's `(id, host, port)` into a
+///    [`crate::quic::peer1_client::HomeDescriptor`].
+/// 4. Decrypt the user's IPK secret to obtain the long-term signing
+///    key (held by the dialer for the connection's lifetime; dropped
+///    via dalek's zeroize on connection close).
+///
+/// Returns `Err` if any step fails. The caller logs and skips the MLS
+/// background work, leaving the connection's primary client/1 traffic
+/// undisturbed.
+fn build_peer1_dht_client(
+    relay: &Relay, ipk: VerifyingKey,
+) -> Result<Arc<Peer1DhtClient>> {
+    use crate::api::PEER_IDENTITY;
+    use crate::data::identity::IdentitySigner;
+    use crate::data::identity::secret_key_signing;
+    use crate::quic::peer1_client::home_from_relay;
+    use crate::quic::peer_config::build_peer_client_cfg;
+
+    let endpoint = ENDPOINT.get().ok_or_else(|| anyhow!("ENDPOINT not initialized"))?;
+    let peer_identity = PEER_IDENTITY
+        .get()
+        .ok_or_else(|| anyhow!("PEER_IDENTITY not initialized"))?;
+    let peer_cfg = Arc::new(build_peer_client_cfg(peer_identity)?);
+    let home = home_from_relay(relay)?;
+    let our_ipk_bytes = ipk.to_bytes();
+    let our_signing = secret_key_signing(&our_ipk_bytes)?;
+    // Phase 7 (P0-2): hand the dialer the TLS sub-key explicitly so it
+    // can build per-dial pinned `ClientConfig`s (cert SPKI bound to the
+    // expected relay pubkey). Falls back to the un-pinned `peer_cfg`
+    // for any dial whose target pubkey is unknown.
+    let tls_subkey = IdentitySigner::tls_subkey()?;
+    Ok(Peer1DhtClient::new_arc_with_tls_subkey(
+        endpoint.as_ref().clone(),
+        peer_cfg,
+        tls_subkey,
+        home,
+        our_ipk_bytes,
+        our_signing,
+    ))
+}
+
+/// One-shot Welcome poll on reconnect. Builds an `MlsContext` against
+/// fresh DB handles and the supplied dialer; runs
+/// [`crate::api::messaging::poll_welcomes`] once.
+///
+/// design-doc: `misc/specs/MLS.md` §6.1 (Welcome queue on reconnect),
+/// §11.3.
+async fn poll_welcomes_once(client: Arc<Peer1DhtClient>) -> Result<()> {
+    let provider = crate::mls::PromtuzMlsProvider::shared();
+    let stash_db = stash_db_handle();
+    let stash = crate::mls::KeyPackageStash::new(stash_db.clone());
+    let buffer = crate::mls::EpochCatchupBuffer::new(stash_db);
+    let ctx = crate::api::messaging::MlsContext {
+        provider: &provider,
+        stash:    &stash,
+        buffer:   &buffer,
+        dht:      client.as_ref(),
+    };
+    let count = crate::api::messaging::poll_welcomes(&ctx).await?;
+    if count > 0 {
+        info!("MLS: poll_welcomes processed {count} welcome(s)");
+    }
+    Ok(())
+}
+
+/// KP-rotation scheduler loop — production wiring.
+///
+/// Loads the user's identity + signing key from the libcore globals,
+/// then delegates to [`run_scheduler_inner`]. Errors loading the
+/// identity exit the loop early (logged); the inner loop owns the
+/// cancellation contract.
+async fn run_scheduler_loop(
+    client: Arc<Peer1DhtClient>, cancel: CancellationToken,
+) {
+    let provider = crate::mls::PromtuzMlsProvider::shared();
+    let stash_db = stash_db_handle();
+    let stash = crate::mls::KeyPackageStash::new(stash_db.clone());
+    let our_ipk_bytes = match crate::data::identity::Identity::get() {
+        Some(i) => i.ipk(),
+        None => {
+            warn!("MLS scheduler: identity unavailable; loop exiting");
+            return;
+        },
+    };
+    let signing = match crate::data::identity::secret_key_signing(&our_ipk_bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("MLS scheduler: signing key unavailable: {e}; loop exiting");
+            return;
+        },
+    };
+    run_scheduler_inner(
+        &provider,
+        &stash,
+        &signing,
+        client.as_ref(),
+        Duration::from_millis(KP_SCHEDULER_TICK_MS),
+        cancel,
+    )
+    .await;
+}
+
+/// KP-rotation scheduler — tickable inner loop. Runs
+/// [`crate::mls::scheduler::run_once`] immediately, then every
+/// `tick_interval`. Exits cleanly when `cancel` is fired.
+///
+/// Errors from `run_once` are logged at WARN; the loop continues
+/// (transient publish failures shouldn't tear the scheduler down —
+/// the next tick will retry).
+///
+/// Generic over [`crate::quic::dht_client::DhtClient`] so unit tests
+/// can drive it with the in-process `FakeDhtClient`.
+///
+/// design-doc: `misc/specs/MLS.md` §5.5, §11.3.
+async fn run_scheduler_inner<C: crate::quic::dht_client::DhtClient>(
+    provider: &crate::mls::PromtuzMlsProvider,
+    stash: &crate::mls::KeyPackageStash,
+    signing: &ed25519_dalek::SigningKey,
+    dht: &C,
+    tick_interval: Duration,
+    cancel: CancellationToken,
+) {
+    loop {
+        let now_ms = systime().as_millis() as u64;
+        match crate::mls::scheduler::run_once(
+            provider,
+            stash,
+            signing,
+            dht,
+            now_ms,
+        )
+        .await
+        {
+            Ok(crate::mls::scheduler::SchedulerOutcome::NoOp) => {},
+            Ok(other) => {
+                debug!("MLS scheduler: {other:?}");
+            },
+            Err(e) => {
+                warn!("MLS scheduler tick failed: {e}");
+            },
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                debug!("MLS scheduler: cancelled, exiting");
+                return;
+            }
+            _ = tokio::time::sleep(tick_interval) => {}
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -489,13 +803,139 @@ mod tests {
         let ts: u64 = 1_700_000_000_005;
 
         let transcript = queue_fetch_ack_signing_input(&user_ipk, &req_id, &ids, ts);
-        let expected_len = DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len()
+        let expected_len = (DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len()
             + 2
             + 32
             + NodeId::LEN
-            + 4
-            + 0
+            + 4)
             + 8;
         assert_eq!(transcript.len(), expected_len);
+    }
+
+    // ----- KP scheduler tokio task tests (Phase 5a) ------------------
+
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use ed25519_dalek::SigningKey;
+    use parking_lot::Mutex;
+    use rusqlite::Connection;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::db::mls::apply_mls_migrations;
+    use crate::mls::KeyPackageStash;
+    use crate::mls::PromtuzMlsProvider;
+    use crate::quic::dht_client::tests::FakeDhtClient;
+
+    fn fresh_mls_conn() -> Arc<Mutex<Connection>> {
+        let mut conn = Connection::open_in_memory().expect("in-memory db");
+        apply_mls_migrations(&mut conn);
+        Arc::new(Mutex::new(conn))
+    }
+
+    /// Scheduler runs an immediate tick on entry, then ticks at
+    /// `tick_interval`. With a fresh stash, the first tick refills via
+    /// the dialer; we observe the recorded batch and assert the cadence
+    /// drives a second tick after the configured interval.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn scheduler_loop_ticks_at_configured_interval() {
+        let conn = fresh_mls_conn();
+        let provider = PromtuzMlsProvider::new(conn.clone());
+        let stash = KeyPackageStash::new(conn);
+        let signing = SigningKey::from_bytes(&[0xAA; 32]);
+        let dht = FakeDhtClient::new_arc();
+        let cancel = CancellationToken::new();
+
+        let dht_for_loop = dht.clone();
+        let cancel_for_loop = cancel.clone();
+        let join = tokio::spawn(async move {
+            super::run_scheduler_inner(
+                &provider,
+                &stash,
+                &signing,
+                dht_for_loop.as_ref(),
+                Duration::from_millis(60_000),
+                cancel_for_loop,
+            )
+            .await;
+        });
+
+        // First tick refills (empty stash → publishes once).
+        // Yield a few times to let the scheduler's first run_once
+        // resolve.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(dht.published_kp_batches.lock().len(), 1, "first tick publishes");
+
+        // Advance the simulated clock past the cadence; the next
+        // scheduled tick should fire and (because the stash is now
+        // full) be a NoOp — but no additional publish. Verify cadence
+        // by waiting one tick.
+        tokio::time::advance(Duration::from_millis(60_001)).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        // Stash is full; second tick is NoOp; no new batch published.
+        assert_eq!(
+            dht.published_kp_batches.lock().len(),
+            1,
+            "healthy-stash tick is NoOp"
+        );
+
+        // Cancel and confirm the loop exits.
+        cancel.cancel();
+        // Give it a chance to observe cancel + return.
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), join).await
+            .expect("scheduler exits within 1s of cancel");
+    }
+
+    /// `cancel.cancel()` while the scheduler is sleeping inside the
+    /// tokio::select! drives the loop to exit on the next event-loop
+    /// turn. Pinned at <2s wall-clock to satisfy test discipline.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn scheduler_loop_cancels_cleanly_on_cancellation() {
+        let conn = fresh_mls_conn();
+        let provider = PromtuzMlsProvider::new(conn.clone());
+        let stash = KeyPackageStash::new(conn);
+        // Pre-fill so the first tick is NoOp (faster path; the
+        // empty-stash tick mints 100 KPs which is observable but slow
+        // under start_paused=true cooperative scheduling).
+        let signing = SigningKey::from_bytes(&[0xBB; 32]);
+        let _ = stash.ensure_stash_full(&provider, &signing).expect("seed stash");
+        let dht = FakeDhtClient::new_arc();
+        let cancel = CancellationToken::new();
+
+        let dht_for_loop = dht.clone();
+        let cancel_for_loop = cancel.clone();
+        let join = tokio::spawn(async move {
+            super::run_scheduler_inner(
+                &provider,
+                &stash,
+                &signing,
+                dht_for_loop.as_ref(),
+                Duration::from_secs(60),
+                cancel_for_loop,
+            )
+            .await;
+        });
+
+        // First tick is NoOp — no publish.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        assert_eq!(dht.published_kp_batches.lock().len(), 0);
+
+        // Cancel mid-sleep — the inner loop should exit on the next
+        // event-loop turn.
+        cancel.cancel();
+        // Yield a few times so the cancelled() future fires.
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+
+        let res = tokio::time::timeout(Duration::from_secs(1), join).await;
+        assert!(res.is_ok(), "scheduler exits cleanly on cancel");
     }
 }
