@@ -233,6 +233,60 @@ pub enum CRelayPacket {
     /// user's IPK signature mirrors the existing `DrainAuth` design
     /// for the fetch direction.
     AckAuth { sig: Bytes<64>, timestamp: u64 },
+
+    /// Phase 9 §3.9 — libcore wrapper around §3.4 `KeyPackagePublish`
+    /// (when `mode = Publish`) or §3.6 `KeyPackageRefill` (when
+    /// `mode = Refill`). The home verifies `sig` against the
+    /// connection-authenticated IPK + ±60s skew window via
+    /// [`crate::proto::mls_wire::kp_publish_wrap_signing_input`], then
+    /// translates and fans out over `peer/1` to the K=3 DHT homes of
+    /// the calling IPK. Reply: [`SRelayPacket::KeyPackagePublished`]
+    /// or [`SRelayPacket::DhtUnavailable`].
+    PublishKeyPackage {
+        records:    Vec<crate::proto::mls_wire::KeyPackageRecord>,
+        generation: u64,
+        timestamp:  u64,
+        mode:       crate::proto::mls_wire::KpPublishMode,
+        sig:        Bytes<64>,
+    },
+
+    /// Phase 9 §3.9 — libcore wrapper around §3.5 `KeyPackageFetch`.
+    /// Reply: [`SRelayPacket::KeyPackageFetched`] or
+    /// [`SRelayPacket::DhtUnavailable`].
+    FetchKeyPackage {
+        target_ipk: Bytes<32>,
+        timestamp:  u64,
+        sig:        Bytes<64>,
+    },
+
+    /// Phase 9 §3.9 — libcore wrapper around §6.1 Welcome publish to
+    /// the recipient's K=3 homes. Reply:
+    /// [`SRelayPacket::WelcomePublished`] or
+    /// [`SRelayPacket::DhtUnavailable`].
+    PublishWelcome {
+        envelope:  crate::proto::mls_wire::WelcomeEnvelopeP,
+        timestamp: u64,
+        sig:       Bytes<64>,
+    },
+
+    /// Phase 9 §3.9 — libcore wrapper around §6.1 Welcome drain.
+    /// Drains the *calling IPK's own* welcome queue from its K=3
+    /// homes. Reply: [`SRelayPacket::WelcomesFetched`] or
+    /// [`SRelayPacket::DhtUnavailable`].
+    FetchWelcomes {
+        timestamp: u64,
+        sig:       Bytes<64>,
+    },
+
+    /// Phase 9 §3.9 — libcore wrapper around §6.1 Welcome ack. The
+    /// home GCs the listed `welcome_ids` from the calling IPK's K=3
+    /// homes. Reply: [`SRelayPacket::WelcomesAcked`] or
+    /// [`SRelayPacket::DhtUnavailable`].
+    AckWelcomes {
+        welcome_ids: Vec<Bytes<8>>,
+        timestamp:   u64,
+        sig:         Bytes<64>,
+    },
 }
 
 /// Server Relay Packet
@@ -285,6 +339,51 @@ pub enum SRelayPacket {
         delivered_ids:       Vec<[u8; 16]>,
         suggested_timestamp: u64,
     },
+
+    /// Phase 9 §3.9 — reply to [`CRelayPacket::PublishKeyPackage`].
+    /// `homes_succeeded` is the count of K=3 DHT homes that returned a
+    /// success outcome (Stored for Publish, Appended for Refill).
+    /// `quorum_met` ⇔ `homes_succeeded ≥ K_MIN` (= 2).
+    KeyPackagePublished {
+        homes_succeeded: u8,
+        quorum_met:      bool,
+    },
+
+    /// Phase 9 §3.9 — reply to [`CRelayPacket::FetchKeyPackage`].
+    /// `record = None` collapses the Tier-2 `NoStash` and `NotOwner`
+    /// outcomes (libcore can't act on the distinction). `static_hash`
+    /// is the cross-replica hash from §3.5's `KeyPackageFetchFound`
+    /// (zeros if `record = None`).
+    KeyPackageFetched {
+        record:      Option<crate::proto::mls_wire::KeyPackageRecord>,
+        remaining:   u32,
+        static_hash: Bytes<32>,
+    },
+
+    /// Phase 9 §3.9 — reply to [`CRelayPacket::PublishWelcome`].
+    /// `quorum_met = true` ⇔ ≥ K_MIN of the recipient's K=3 homes
+    /// stored the envelope.
+    WelcomePublished {
+        quorum_met: bool,
+    },
+
+    /// Phase 9 §3.9 — reply to [`CRelayPacket::FetchWelcomes`]. The
+    /// home merges welcomes from the K=3 home replicas, deduplicates
+    /// by `(group_id, kp_ref_used)`, and returns the union.
+    WelcomesFetched {
+        entries: Vec<crate::proto::mls_wire::WelcomeEntry>,
+    },
+
+    /// Phase 9 §3.9 — reply to [`CRelayPacket::AckWelcomes`].
+    WelcomesAcked,
+
+    /// Phase 9 §3.9 — generic "your home's DHT is disabled" reply,
+    /// returned for any of the five wrapper RPCs when
+    /// `relay.dht.is_none()`. Libcore surfaces this as a clean per-RPC
+    /// error rather than retrying — operator must enable DHT on the
+    /// home (`relay/config.toml [dht] enabled = true`) for MLS to
+    /// function.
+    DhtUnavailable,
 }
 
 #[cfg(feature = "client")]
@@ -388,6 +487,121 @@ mod tests {
         let bytes = pkt.ser().expect("postcard serialize");
         let decoded = SRelayPacket::deser(&bytes).expect("postcard deserialize");
         assert_eq!(decoded, pkt);
+    }
+
+    /// Phase 9 — postcard round-trip every new Tier-1 wrapper request
+    /// variant. One catch-all test per `chip the clay`: a missing
+    /// serde derive on any of the 5 variants surfaces here.
+    #[test]
+    fn phase9_wrapper_request_variants_round_trip() {
+        use super::CRelayPacket;
+        use crate::proto::mls_wire::KeyPackageRecord;
+        use crate::proto::mls_wire::KpPublishMode;
+        use crate::proto::mls_wire::WelcomeEnvelopeP;
+        use crate::types::bytes::ByteVec;
+
+        let kp_record = KeyPackageRecord {
+            ipk:           Bytes([0x11; 32]),
+            kp_ref:        ByteVec(vec![0x22; 32]),
+            kp_bytes:      ByteVec(vec![0x33; 16]),
+            expires_at_ms: 1_700_000_000_000,
+            owner_sig:     Bytes([0x44; 64]),
+        };
+        let envelope = WelcomeEnvelopeP {
+            version:       1,
+            group_id:      Bytes([0x55; 32]),
+            sender_ipk:    Bytes([0x66; 32]),
+            recipient_ipk: Bytes([0x77; 32]),
+            welcome_blob:  ByteVec(vec![0x88; 64]),
+            kp_ref_used:   Bytes([0x99; 32]),
+            sender_sig:    Bytes([0xAA; 64]),
+        };
+
+        for pkt in [
+            CRelayPacket::PublishKeyPackage {
+                records:    vec![kp_record.clone()],
+                generation: 7,
+                timestamp:  1_700_000_000_001,
+                mode:       KpPublishMode::Publish,
+                sig:        Bytes([0xBB; 64]),
+            },
+            CRelayPacket::FetchKeyPackage {
+                target_ipk: Bytes([0xCC; 32]),
+                timestamp:  1_700_000_000_002,
+                sig:        Bytes([0xDD; 64]),
+            },
+            CRelayPacket::PublishWelcome {
+                envelope:  envelope.clone(),
+                timestamp: 1_700_000_000_003,
+                sig:       Bytes([0xEE; 64]),
+            },
+            CRelayPacket::FetchWelcomes {
+                timestamp: 1_700_000_000_004,
+                sig:       Bytes([0xFF; 64]),
+            },
+            CRelayPacket::AckWelcomes {
+                welcome_ids: vec![Bytes([0x01; 8]), Bytes([0x02; 8])],
+                timestamp:   1_700_000_000_005,
+                sig:         Bytes([0x10; 64]),
+            },
+        ] {
+            let bytes = pkt.ser().expect("postcard ser");
+            let decoded = CRelayPacket::deser(&bytes).expect("postcard deser");
+            assert_eq!(decoded, pkt);
+        }
+    }
+
+    /// Phase 9 — postcard round-trip every new Tier-1 wrapper reply
+    /// variant + the shared `DhtUnavailable` error reply.
+    #[test]
+    fn phase9_wrapper_reply_variants_round_trip() {
+        use super::SRelayPacket;
+        use crate::proto::mls_wire::KeyPackageRecord;
+        use crate::proto::mls_wire::WelcomeEntry;
+        use crate::proto::mls_wire::WelcomeEnvelopeP;
+        use crate::types::bytes::ByteVec;
+
+        let kp_record = KeyPackageRecord {
+            ipk:           Bytes([0x11; 32]),
+            kp_ref:        ByteVec(vec![0x22; 32]),
+            kp_bytes:      ByteVec(vec![0x33; 16]),
+            expires_at_ms: 1_700_000_000_000,
+            owner_sig:     Bytes([0x44; 64]),
+        };
+        let entry = WelcomeEntry {
+            welcome_id: Bytes([0x55; 8]),
+            envelope:   WelcomeEnvelopeP {
+                version:       1,
+                group_id:      Bytes([0x66; 32]),
+                sender_ipk:    Bytes([0x77; 32]),
+                recipient_ipk: Bytes([0x88; 32]),
+                welcome_blob:  ByteVec(vec![0x99; 32]),
+                kp_ref_used:   Bytes([0xAA; 32]),
+                sender_sig:    Bytes([0xBB; 64]),
+            },
+        };
+
+        for pkt in [
+            SRelayPacket::KeyPackagePublished { homes_succeeded: 2, quorum_met: true },
+            SRelayPacket::KeyPackageFetched {
+                record:      Some(kp_record.clone()),
+                remaining:   17,
+                static_hash: Bytes([0xCC; 32]),
+            },
+            SRelayPacket::KeyPackageFetched {
+                record:      None,
+                remaining:   0,
+                static_hash: Bytes([0; 32]),
+            },
+            SRelayPacket::WelcomePublished { quorum_met: true },
+            SRelayPacket::WelcomesFetched { entries: vec![entry.clone()] },
+            SRelayPacket::WelcomesAcked,
+            SRelayPacket::DhtUnavailable,
+        ] {
+            let bytes = pkt.ser().expect("postcard ser");
+            let decoded = SRelayPacket::deser(&bytes).expect("postcard deser");
+            assert_eq!(decoded, pkt);
+        }
     }
 
     /// Phase 2d — pin the transcript libcore signs in response to an
