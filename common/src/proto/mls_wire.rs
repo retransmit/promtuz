@@ -76,19 +76,16 @@ use crate::types::bytes::Bytes;
 /// MLS-layer protocol version field mixed into every signing
 /// transcript here.
 ///
-/// **Phase 4**: the global [`crate::PROTOCOL_VERSION`] has been bumped
-/// to `3`, converging with this constant. We retain the dedicated
-/// `MLS_WIRE_VERSION` symbol because it parameterises every MLS
-/// signing-input helper — flipping every call site to
-/// `crate::PROTOCOL_VERSION` would touch dozens of lines in
-/// `mls_kp.rs` / `mls_welcome.rs` / `mls/welcome.rs` /
-/// `mls/keypackage.rs` for no behavioural change. The two are
-/// guaranteed equal by the Phase-4 invariant that all MLS-aware
-/// endpoints speak `PROTOCOL_VERSION = 3`.
+/// **Phase 9**: bumped 3 → 4 alongside [`crate::PROTOCOL_VERSION`] so
+/// the §3.9 Tier-1 wrapper variants (`PublishKeyPackage`,
+/// `FetchKeyPackage`, `PublishWelcome`, `FetchWelcomes`,
+/// `AckWelcomes`) are wire-incompatible with any v3 (Option-A)
+/// endpoint that briefly shipped on `main`. The two constants are
+/// guaranteed equal by the Phase-9 cutover invariant.
 ///
-/// design-doc: `misc/specs/MLS.md` §0 (`PROTOCOL_VERSION = 3`),
-/// §11.4 (Phase M1 owns wire types; Phase 4 owns the bump).
-pub const MLS_WIRE_VERSION: u16 = 3;
+/// design-doc: `misc/specs/MLS.md` §0 (`PROTOCOL_VERSION = 4`),
+/// §11.3e (Phase 9 Option-B pivot).
+pub const MLS_WIRE_VERSION: u16 = 4;
 
 /// Inner envelope-version byte stamped into every
 /// [`MlsApplicationEnvelopeP`] / [`WelcomeEnvelopeP`]. Distinct from
