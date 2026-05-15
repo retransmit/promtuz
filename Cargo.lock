@@ -496,7 +496,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml",
- "x25519-dalek",
  "zeroize",
 ]
 

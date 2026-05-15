@@ -8,7 +8,6 @@ repository = "https://github.com/promtuz/promtuz"
 
 [workspace.dependencies]
 ed25519-dalek = { version = "2.2.0", features = ["pkcs8", "rand_core"] }
-x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
 rustls = { version = "0.23.35", features = ["aws-lc-rs"] }
 serde = { version = "1.0.228", features = ["derive"] }
 quinn = { version = "0.11.9", features = ["rustls"] }
