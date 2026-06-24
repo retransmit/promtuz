@@ -178,9 +178,12 @@ impl Relay {
         };
 
         let (timestamp, latency_ms) = match result {
-            SHSRP::Accept { timestamp } => {
+            SHSRP::Accept { timestamp, relay_node_id } => {
                 let latency_ms = systime().as_millis() as u64 - connect_start;
                 _ = self.record_success(latency_ms);
+                // Phase 9 §3.9 — stash the home's advertised DHT NodeId
+                // for the RelayDhtClient to bind in welcome fetch/ack sigs.
+                self.home_node_id = relay_node_id.map(|b| b.0);
                 (timestamp, latency_ms)
             },
             SHSRP::Reject { reason } => {

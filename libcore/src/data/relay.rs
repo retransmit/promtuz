@@ -86,6 +86,14 @@ pub struct Relay {
     /// migration; pinning falls back to the un-pinned verifier in that
     /// case (legacy posture, with a `log::warn` so operators notice).
     pub pubkey:     Option<[u8; 32]>,
+    /// **Phase 9 §3.9**: the home relay's DHT NodeId, learned from the
+    /// `ServerHandshakeResultP::Accept` reply. Connection-scoped (set in
+    /// `connect()` after handshake, `None` on DB-loaded rows). The
+    /// `RelayDhtClient` binds it as `requester_relay_id` when signing
+    /// the welcome fetch/ack wrappers. `None` when the home has DHT
+    /// disabled — those wrappers can't be signed and the home would
+    /// reply `DhtUnavailable` regardless.
+    pub home_node_id: Option<[u8; 32]>,
 }
 
 impl std::fmt::Debug for Relay {
@@ -97,6 +105,7 @@ impl std::fmt::Debug for Relay {
             .field("connection", &self.connection)
             .field("dht_client", &self.dht_client.as_ref().map(|_| "<Peer1DhtClient>"))
             .field("pubkey", &self.pubkey.as_ref().map(|pk| hex::encode(&pk[..4])))
+            .field("home_node_id", &self.home_node_id.as_ref().map(|id| hex::encode(&id[..4])))
             .finish()
     }
 }
@@ -344,6 +353,7 @@ impl Relay {
             connection: None,
             dht_client: None,
             pubkey:     chosen.pubkey,
+            home_node_id: None,
         })
     }
 

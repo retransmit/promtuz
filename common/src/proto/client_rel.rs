@@ -38,7 +38,18 @@ pub fn dispatch_sig_message(
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum ServerHandshakeResultP {
-    Accept { timestamp: u64 },
+    Accept {
+        timestamp: u64,
+        /// Phase 9 §3.9 — this relay's DHT NodeId (`BLAKE3(NodeKey)`),
+        /// or `None` when the relay has DHT disabled. The phone binds it
+        /// as `requester_relay_id` when signing the
+        /// `FetchWelcomes` / `AckWelcomes` wrappers (the inner Tier-2
+        /// `welcome_fetch/ack_signing_input` transcript names the
+        /// requesting relay). Absent ⇒ welcome fetch/ack can't be
+        /// signed for this home, which is fine because a DHT-disabled
+        /// relay replies `DhtUnavailable` to those RPCs anyway.
+        relay_node_id: Option<Bytes<32>>,
+    },
     Reject { reason: String },
 }
 
