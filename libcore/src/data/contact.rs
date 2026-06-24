@@ -21,23 +21,48 @@ pub struct Contact {
     pub inner: Arc<ContactRow>,
 }
 
+/// Result of [`Contact::save`] — distinguishes a brand-new contact from
+/// a re-pair with someone already in the address book. The QR/identity
+/// flow uses this to log (and, later, surface to the UI) "added X" vs
+/// "already connected with X".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveOutcome {
+    /// No prior row for this `ipk`; a fresh contact was inserted.
+    Created,
+    /// A contact with this `ipk` already existed. The display name was
+    /// refreshed, but `added_at` and `mls_group_id` were preserved.
+    Existed,
+}
+
 impl Contact {
-    /// Save a new contact. The `mls_group_id` defaults to `None`; the
-    /// messaging layer flips it to the freshly-minted group id on the
-    /// first dispatch to this peer.
-    pub fn save(ipk: [u8; 32], name: String) -> Result<Self> {
+    /// Insert a new contact, or refresh the display name of an existing
+    /// one. Returns whether the row was [`SaveOutcome::Created`] or
+    /// already [`SaveOutcome::Existed`].
+    ///
+    /// **Re-pair safety.** This is an upsert that *preserves* `added_at`
+    /// and `mls_group_id` on conflict — only `name` is refreshed. The
+    /// previous `INSERT OR REPLACE … mls_group_id NULL` silently orphaned
+    /// the established 1:1 MLS group on every re-scan: the peer kept the
+    /// old group while our next send forked a new one. If the preserved
+    /// id ever points at a group we no longer hold local state for, the
+    /// send path self-heals (`messaging.rs`: "mls_group_id has no local
+    /// state; recreating"), so preserving it is always the safe choice.
+    pub fn save(ipk: [u8; 32], name: String) -> Result<SaveOutcome> {
         let added_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
 
         let conn = CONTACTS_DB.lock();
+        let existed = conn
+            .query_row("SELECT 1 FROM contacts WHERE ipk = ?1", [ipk.as_slice()], |_| Ok(()))
+            .is_ok();
+
         conn.execute(
-            "INSERT OR REPLACE INTO contacts (ipk, name, added_at, mls_group_id) \
-             VALUES (?1, ?2, ?3, NULL)",
-            params![ipk, name.clone(), added_at],
+            "INSERT INTO contacts (ipk, name, added_at, mls_group_id) \
+             VALUES (?1, ?2, ?3, NULL) \
+             ON CONFLICT(ipk) DO UPDATE SET name = excluded.name",
+            params![ipk, name, added_at],
         )?;
 
-        Ok(Self {
-            inner: Arc::new(ContactRow { ipk, name, added_at, mls_group_id: None }),
-        })
+        Ok(if existed { SaveOutcome::Existed } else { SaveOutcome::Created })
     }
 
     pub fn get(ipk: &[u8; 32]) -> Option<Self> {

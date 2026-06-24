@@ -18,6 +18,7 @@ use crate::JC;
 use crate::RUNTIME;
 use crate::api::PEER_IDENTITY;
 use crate::data::contact::Contact;
+use crate::data::contact::SaveOutcome;
 use crate::data::identity::Identity;
 use crate::data::identity::IdentitySigner;
 use crate::data::idqr::IdentityQr;
@@ -133,8 +134,17 @@ pub extern "system" fn parseQRBytes(mut env: JNIEnv, _: JC, bytes: JByteArray) {
                                     peer_identity_qr.ipk,
                                     peer_identity_qr.name.clone(),
                                 ) {
-                                    Ok(_) => {
-                                        info!("INFO: saved contact {}", peer_identity_qr.name);
+                                    Ok(outcome) => {
+                                        match outcome {
+                                            SaveOutcome::Created => info!(
+                                                "INFO: saved contact {}",
+                                                peer_identity_qr.name
+                                            ),
+                                            SaveOutcome::Existed => info!(
+                                                "INFO: already connected with {} — name refreshed, group preserved",
+                                                peer_identity_qr.name
+                                            ),
+                                        }
 
                                         // Confirm to sharer so they can save too
                                         ClientPeerPacket::Identity(Confirmed)

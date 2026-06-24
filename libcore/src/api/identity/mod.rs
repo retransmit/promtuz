@@ -27,6 +27,7 @@ use crate::JC;
 use crate::JVM;
 use crate::RUNTIME;
 use crate::data::contact::Contact;
+use crate::data::contact::SaveOutcome;
 use crate::data::identity::Identity;
 use crate::data::idqr::IdentityQr;
 use crate::events::Emittable;
@@ -233,7 +234,12 @@ async fn handle_identity_connection(incoming: quinn::Incoming) -> Result<()> {
                             info!("IDENTITY: {name} confirmed");
 
                             match Contact::save(ipk, name.clone()) {
-                                Ok(_) => info!("IDENTITY: saved contact {name}"),
+                                Ok(SaveOutcome::Created) => {
+                                    info!("IDENTITY: saved contact {name}")
+                                },
+                                Ok(SaveOutcome::Existed) => {
+                                    info!("IDENTITY: re-paired existing contact {name} (group preserved)")
+                                },
                                 Err(e) => warn!("IDENTITY: failed to save contact {name}: {e}"),
                             }
                         },
