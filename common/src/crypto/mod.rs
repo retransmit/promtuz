@@ -1,4 +1,4 @@
-use chacha20poly1305::aead::{OsRng, rand_core::RngCore};
+use rand_core::{OsRng, RngCore};
 
 pub use ed25519_dalek::{SecretKey, SigningKey, VerifyingKey as PublicKey};
 

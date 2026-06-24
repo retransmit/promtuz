@@ -1383,9 +1383,9 @@ pub fn welcome_ack_wrap_ids_digest(
 
 #[cfg(all(test, feature = "crypto"))]
 mod tests {
-    use chacha20poly1305::aead::OsRng;
     use ed25519_dalek::Signer;
     use ed25519_dalek::SigningKey;
+    use rand_core::OsRng;
 
     use super::*;
     use crate::proto::pack::Packer;

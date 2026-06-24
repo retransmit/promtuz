@@ -1671,9 +1671,9 @@ pub enum DhtPacket {
 mod tests {
     use std::cmp::Ordering;
 
-    use chacha20poly1305::aead::OsRng;
     use ed25519_dalek::Signer;
     use ed25519_dalek::SigningKey;
+    use rand_core::OsRng;
 
     use super::*;
     use crate::PROTOCOL_VERSION;
@@ -1682,9 +1682,9 @@ mod tests {
     use crate::quic::id::NodeId;
 
     /// Mint a fresh Ed25519 keypair via OS-RNG. Mirrors the existing
-    /// `crypto::get_signing_key` pattern at `common/src/crypto/mod.rs:36`
-    /// — `chacha20poly1305::aead::OsRng` is the rand_core-0.6 CSPRNG
-    /// that `ed25519-dalek 2.x::SigningKey::generate` expects.
+    /// `crypto::get_signing_key` pattern at `common/src/crypto/mod.rs`
+    /// — `rand_core::OsRng` is the rand_core-0.6 CSPRNG that
+    /// `ed25519-dalek 2.x::SigningKey::generate` expects.
     fn fresh_signing_key() -> SigningKey {
         SigningKey::generate(&mut OsRng)
     }
