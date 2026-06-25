@@ -62,7 +62,10 @@ maintainer = "Promtuz <relay@promtuz.dev>"
 copyright = "2026 Promtuz, AGPL-3.0-or-later"
 section = "net"
 priority = "optional"
-depends = "$auto"
+# cargo-zigbuild static-links libstdc++/libgcc into the binary; the only
+# remaining runtime dep is glibc. Pinned explicitly (not "$auto") so the deb
+# builds on any host without dpkg-shlibdeps. Floor 2.28 = the zig glibc target.
+depends = "libc6 (>= 2.28)"
 extended-description = "Promtuz relay node: Kademlia DHT, client auth, presence + MLS handshake replication, store-and-forward."
 assets = [
     ["target/release/relay", "usr/bin/pzrelay", "755"],
