@@ -1,6 +1,8 @@
-//! `testnet deploy` — generate a real-server deployment kit (root CA +
-//! per-node certs + ready `config.toml` files), reusing the exact cert
-//! logic the loopback harness uses.
+//! `testnet deploy` — generate a real-server deployment kit (per-node certs
+//! signed by the **production** Promtuz RootCA + ready `config.toml` files),
+//! reusing the exact cert logic the loopback harness uses. Signing under the
+//! real root means a stock relay/client (which trusts `relay/cert/root_ca.pem`)
+//! accepts the testnet nodes — a throwaway CA would only trust itself.
 //!
 //! Output: `<out_dir>/{resolver,relay-0,relay-1,…}/`, each containing
 //! `node.crt`, `node.key`, `ca.pem`, `config.toml` with **relative** cert
@@ -28,6 +30,7 @@ use anyhow::bail;
 
 use crate::certs::Ca;
 use crate::certs::Leaf;
+use crate::certs::load_prod_ca;
 
 pub fn run(args: &[String]) -> Result<()> {
     if args.len() < 3 {
@@ -52,11 +55,10 @@ pub fn run(args: &[String]) -> Result<()> {
     }
     fs::create_dir_all(&out).context("create out dir")?;
 
-    let ca = Ca::new()?;
-    // Persist the CA at the kit root so `add-relay` can issue more relays
-    // under the same root later. `ca.key` stays local (never shipped to a
-    // node); `ca.pem` is the trust anchor each node already gets.
-    fs::write(out.join("ca.key"), ca.key_pem()).context("write ca.key")?;
+    let ca = load_prod_ca()?;
+    // Drop the public trust anchor (the production RootCA.pem) at the kit root
+    // for reference; every node dir gets its own copy too. The private key
+    // stays in `.tls/` — `add-relay`/`resign` reload it from there.
     fs::write(out.join("ca.pem"), ca.cert_pem()).context("write ca.pem")?;
 
     // Resolver binds 0.0.0.0 on the public port; relays seed `resolver_pub`.
@@ -81,7 +83,7 @@ pub fn run(args: &[String]) -> Result<()> {
 }
 
 /// `testnet add-relay <kit_dir> <name> <relay_bind_addr> <resolver_public_addr>`
-/// — issue ONE more relay under the kit's existing CA (no resolver), so it
+/// — issue ONE more relay under the production RootCA (no resolver), so it
 /// joins the same network. Writes `<kit_dir>/<name>/`.
 pub fn add_relay(args: &[String]) -> Result<()> {
     if args.len() != 4 {
@@ -97,14 +99,7 @@ pub fn add_relay(args: &[String]) -> Result<()> {
     let resolver_pub: SocketAddr =
         args[3].parse().with_context(|| format!("resolver_public_addr `{}`", args[3]))?;
 
-    let ca_key = fs::read_to_string(kit.join("ca.key")).with_context(|| {
-        format!(
-            "read {}/ca.key — regenerate the kit with `testnet deploy` (older kits didn't persist the CA key)",
-            kit.display()
-        )
-    })?;
-    let ca_cert = fs::read_to_string(kit.join("ca.pem")).context("read ca.pem")?;
-    let ca = Ca::load(ca_cert, &ca_key)?;
+    let ca = load_prod_ca()?;
 
     // The resolver IPK seeded into the relay config — recovered from the
     // kit's resolver key (so the caller need only pass the resolver addr).
@@ -117,6 +112,52 @@ pub fn add_relay(args: &[String]) -> Result<()> {
     println!("{name}  bind {bind}  id={}", leaf.node_id);
     println!("written to {}", kit.join(name).display());
     Ok(())
+}
+
+/// `testnet resign <kit_dir>` — re-sign every node in an existing kit under
+/// the production RootCA, in place. Reads each `<node>/node.key`, writes a
+/// fresh `node.crt` (same key → same NodeId) and refreshes `ca.pem`. Leaves
+/// `node.key` and `config.toml` untouched, so NodeIds, the resolver-seed IPK,
+/// and addresses are all preserved — only the trust root changes. Re-scp each
+/// node's `node.crt` + `ca.pem` and restart it.
+pub fn resign(args: &[String]) -> Result<()> {
+    if args.len() != 1 {
+        bail!("usage: testnet resign <kit_dir>");
+    }
+    let kit = PathBuf::from(&args[0]);
+    let ca = load_prod_ca()?;
+
+    let mut nodes = 0;
+    for entry in fs::read_dir(&kit).with_context(|| format!("read {}", kit.display()))? {
+        let dir = entry?.path();
+        if !dir.join("node.key").is_file() {
+            continue;
+        }
+        let key_pem = fs::read_to_string(dir.join("node.key"))?;
+        let leaf = ca.issue_for(&key_pem)?;
+        fs::write(dir.join("node.crt"), &leaf.cert_pem)?;
+        fs::write(dir.join("ca.pem"), ca.cert_pem())?;
+        println!("  {:14} id={}", name_of(&dir), leaf.node_id);
+        nodes += 1;
+    }
+    if nodes == 0 {
+        bail!("no node dirs (with node.key) under {}", kit.display());
+    }
+    fs::write(kit.join("ca.pem"), ca.cert_pem()).ok();
+
+    // Surface the resolver seed so a *production* relay can be wired in.
+    if let Ok(rk) = fs::read_to_string(kit.join("resolver/node.key")) {
+        println!("\nresolver seed IPK = {}", crate::certs::pubkey_hex_from_key_pem(&rk)?);
+    }
+    println!(
+        "\nre-signed {nodes} nodes under the production RootCA — NodeIds unchanged. \
+         Re-scp each node's node.crt + ca.pem and restart it."
+    );
+    Ok(())
+}
+
+fn name_of(dir: &Path) -> String {
+    dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 fn write_node(out: &Path, name: &str, ca: &Ca, leaf: &Leaf, config: &str) -> Result<()> {

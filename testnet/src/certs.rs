@@ -4,10 +4,14 @@
 //! their IPK/NodeId straight from `key_path` — exactly as
 //! `common/src/bin/certgen.rs` does for production certs.
 
+use std::env;
+use std::fs;
 use std::net::Ipv4Addr;
+use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::bail;
 use common::quic::id::NodeId;
 use rcgen::BasicConstraints;
 use rcgen::CertificateParams;
@@ -61,19 +65,27 @@ impl Ca {
         Ok(Self { cert_pem, key })
     }
 
-    /// The CA's PKCS#8 private-key PEM. Persist it locally (never ship it to
-    /// a node) so [`Ca::load`] can reissue leaves later.
-    pub fn key_pem(&self) -> String {
-        self.key.serialize_pem()
+    /// Mint a fresh CA-signed leaf (new Ed25519 key). CN/SAN carry the base32
+    /// `NodeId` — the TLS server name every dial leg uses — so validation is
+    /// identical to a production `certgen` cert; the `localhost`/`127.0.0.1`
+    /// SANs are inert extras that let the same routine serve the loopback
+    /// sandbox.
+    pub fn issue(&self) -> Result<Leaf> {
+        let key = KeyPair::generate_for(&PKCS_ED25519).context("generate leaf key")?;
+        self.sign_leaf(key)
     }
 
-    /// Mint a CA-signed leaf. CN/SAN carry the base32 `NodeId` so a dialer
-    /// that uses the NodeId as the TLS server name validates cleanly;
-    /// `localhost` + `127.0.0.1` SANs are added as belt-and-braces.
-    pub fn issue(&self) -> Result<Leaf> {
-        let issuer = Issuer::from_ca_cert_pem(&self.cert_pem, &self.key).context("load CA issuer")?;
+    /// Re-sign an *existing* leaf key (PKCS#8 PEM) under this CA — same key,
+    /// same `NodeId`, new issuer. Lets `resign` swap a kit's trust root
+    /// without disturbing node identities.
+    pub fn issue_for(&self, key_pem: &str) -> Result<Leaf> {
+        let key = KeyPair::from_pkcs8_pem_and_sign_algo(key_pem, &PKCS_ED25519)
+            .context("load leaf key")?;
+        self.sign_leaf(key)
+    }
 
-        let key = KeyPair::generate_for(&PKCS_ED25519).context("generate leaf key")?;
+    fn sign_leaf(&self, key: KeyPair) -> Result<Leaf> {
+        let issuer = Issuer::from_ca_cert_pem(&self.cert_pem, &self.key).context("load CA issuer")?;
         let pubkey = key.public_key_raw();
         let node_id = NodeId::new(pubkey);
         let cn = node_id.to_string();
@@ -91,6 +103,43 @@ impl Ca {
             node_id,
         })
     }
+}
+
+/// Load the **production** Promtuz root CA (`RootCA.pem` + `RootCA.key`) so a
+/// deploy kit is signed by the same anchor every real relay/client already
+/// trusts (`relay/cert/root_ca.pem`). Without this a kit gets a throwaway CA
+/// and only its own nodes trust each other.
+///
+/// Resolution: `$PROMTUZ_CA_DIR` if set, else the nearest `.tls/` walking up
+/// from the cwd (so `cargo run -p testnet -- deploy …` from the repo finds
+/// `.tls/RootCA.*`). The private key never leaves this machine.
+pub fn load_prod_ca() -> Result<Ca> {
+    let dir = prod_ca_dir()?;
+    let cert = fs::read_to_string(dir.join("RootCA.pem"))
+        .with_context(|| format!("read {}/RootCA.pem", dir.display()))?;
+    let key = fs::read_to_string(dir.join("RootCA.key"))
+        .with_context(|| format!("read {}/RootCA.key", dir.display()))?;
+    println!("signing under production RootCA at {}", dir.display());
+    Ca::load(cert, &key)
+}
+
+fn prod_ca_dir() -> Result<PathBuf> {
+    if let Ok(d) = env::var("PROMTUZ_CA_DIR") {
+        return Ok(PathBuf::from(d));
+    }
+    let mut cur = env::current_dir().context("cwd")?;
+    loop {
+        if cur.join(".tls/RootCA.key").is_file() {
+            return Ok(cur.join(".tls"));
+        }
+        if !cur.pop() {
+            break;
+        }
+    }
+    bail!(
+        "could not find .tls/RootCA.key from the cwd upward — run from the repo, \
+         or set PROMTUZ_CA_DIR to the dir holding RootCA.{{key,pem}}"
+    )
 }
 
 fn dns(name: &str) -> SanType {
