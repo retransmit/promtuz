@@ -1,109 +1,96 @@
-# Relay
+# pzrelay
 
-Relay is a node in a distributed system.  
-It maintains a persistent QUIC connection to a resolver and acts as a live
-participant in the network. The relay doesn’t own global state; its role is
-to announce its presence, stay reachable, and perform whatever responsibilities
-the broader system assigns to it.
+Promtuz relay node — a Kademlia DHT peer that authenticates clients, replicates
+presence + MLS handshake material (KeyPackages, Welcomes) across the network,
+and store-and-forwards ciphertext. Part of [promtuz](../README.md); relays see
+only ciphertext, never message contents.
 
-Think of it as a stateless worker with a heartbeat.
+## Install (Debian / Ubuntu)
 
----
+One line — adds the apt repo and installs `pzrelay`:
 
-## What the Relay Actually Does
+```sh
+curl -fsSL https://apt.promtuz.dev/install.sh | sudo sh
+```
 
-The relay boots up, establishes a QUIC endpoint, and tries to connect to one
-of the known resolvers. Once connected, it performs a small handshake:
+Latest builds instead of vetted ones:
 
-- identify itself  
-- prove it isn't a random ghost  
-- receive acknowledgement  
-- begin a steady heartbeat cycle  
+```sh
+curl -fsSL https://apt.promtuz.dev/install.sh | sudo CHANNEL=edge sh
+```
 
-After the handshake, the relay becomes “visible” to the resolver.  
-From that point on, the resolver can:
+### Manual (if you'd rather not pipe a script to a shell)
 
-- track whether the relay is alive  
-- send control messages  
-- inform clients or other nodes that this relay is available  
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+sudo curl -fsSL https://apt.promtuz.dev/promtuz-archive-keyring.asc \
+     -o /etc/apt/keyrings/promtuz.asc
 
-The relay is built to tolerate churn. If the resolver disappears or the
-connection drops, the relay simply retries until it finds another resolver.
+echo "deb [signed-by=/etc/apt/keyrings/promtuz.asc] https://apt.promtuz.dev stable main" \
+  | sudo tee /etc/apt/sources.list.d/promtuz.list
 
----
+sudo apt update && sudo apt install pzrelay
+```
 
-## Philosophy
+`signed-by` pins this repo to our key only — no other key can authorize these
+packages on your system.
 
-A relay is *ephemeral by design*.  
-It may die, restart, move hosts, get replaced — none of this should break the
-system. The resolver doesn’t depend on any individual relay; it only needs to
-know which ones are currently online.
+## Configure
 
-The relay therefore:
+Edit `/etc/pzrelay/relay.toml` — set the resolver seed key and your box's
+public address. Edits survive `apt upgrade` (it's a dpkg conffile).
 
-- avoids storing long-lived state  
-- avoids assuming it will be the “chosen one”  
-- avoids coupling with any other relay  
-- keeps its logic minimal and reactive  
+## Provision identity (enrollment)
 
-Everything else in the system should be able to treat relays as interchangeable.
+A relay is permissioned: it needs a cert signed by the Promtuz RootCA before it
+can serve. Today that material is obtained out-of-band and placed in
+`/var/lib/pzrelay/` as `node.crt` + `node.key` (automated enrollment is in
+progress). The Ed25519 identity key auto-generates on first start if absent.
 
----
+## Run
 
-## Communication Model
+```sh
+sudo systemctl enable --now pzrelay
+systemctl status pzrelay
+journalctl -u pzrelay -f
+```
 
-The relay uses unidirectional QUIC streams for all control messages.  
-There’s no long-lived “session stream” or multiplexed RPC channel. A message is
-a message: one stream, one CBOR payload, done.
+## Update
 
-This keeps things simple:
+```sh
+sudo apt update && sudo apt upgrade     # config preserved
+```
 
-- no stream management  
-- no backpressure chains  
-- no risk of blocking the wrong stream  
-- cheap to retry or discard  
+## Channels
 
-QUIC’s design fits this perfectly; streams are disposable and cheap.
+- **stable** — vetted builds, for production relays (default).
+- **edge** — latest builds, faster moving.
 
----
+Switch by editing the channel in `/etc/apt/sources.list.d/promtuz.list`.
 
-## Why QUIC?
+## Paths
 
-Because it gives:
+| What | Where |
+|------|-------|
+| binary | `/usr/bin/pzrelay` |
+| config | `/etc/pzrelay/relay.toml` (conffile) |
+| RootCA | `/etc/pzrelay/ca.pem` |
+| data + keys | `/var/lib/pzrelay/` (RocksDB, identity/TLS keys) |
+| logs | `journalctl -u pzrelay` |
+| version | `pzrelay --version` |
 
-- TLS by default  
-- true multiplexing  
-- no head-of-line blocking  
-- clean separation of messages  
-- cheap, stateless stream usage  
-- simple client/server roles via ALPN  
+Runs as the unprivileged `pzrelay` system user under a hardened systemd unit.
 
-TCP would force you to build framing.  
-WebSockets would force you to fight the protocol.  
-QUIC gives exactly what's needed.
+## Build from source
 
----
+Requires Rust, [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild),
+`cargo-deb`, and `zig` on `PATH`. The `.deb` is built against an old glibc so it
+runs on Debian 10+ / Ubuntu 18.04+:
 
-## Lifecycle
+```sh
+./relay/pkg/build-deb.sh
+# → target/x86_64-unknown-linux-gnu/debian/pzrelay_<version>_amd64.deb
+```
 
-A relay cycle looks like this:
-
-1. Boot  
-2. Load keys + config  
-3. Open QUIC endpoint  
-4. Try resolvers until one accepts  
-5. Send `RelayHello`  
-6. Receive `HelloAck`  
-7. Start heartbeat loop  
-8. Accept uni-stream messages from resolver  
-9. Repeat steps 7–8 until shutdown or disconnect  
-10. On disconnect → back to step 4  
-
-The relay never assumes the world is stable.
-
----
-
-## High-Level Goals
-
-- Stay online  
-- Stay known to the resolver  
+Plain `cargo deb` is **not** supported — it rebuilds against the host glibc and
+the package's pinned `libc6` dependency would be wrong. Always use the script.
