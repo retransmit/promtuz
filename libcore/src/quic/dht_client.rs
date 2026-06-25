@@ -40,10 +40,8 @@
 //! `<C: DhtClient>` bound. All callers are generic-monomorphised, so
 //! the cost is zero compared with `Box<dyn>`.
 //!
-//! design-doc: `misc/specs/MLS.md` §3.4-3.6 (KP RPCs), §6.1 (Welcome
-//! queue), §11.4 (migration scripts).
 
-#![allow(dead_code)] // Trait surface; full wiring lands across §A.
+#![allow(dead_code)] // Trait surface; not all methods are wired yet.
 
 use std::future::Future;
 
@@ -87,12 +85,9 @@ pub enum DhtClientError {
 /// Convenience alias.
 pub type DhtClientResult<T> = std::result::Result<T, DhtClientError>;
 
-/// A KeyPackage fetched on the wire plus the per-home auxiliary fields
-/// the spec exposes ([`KP_FETCH §3.5`]). We surface them so a future
-/// cross-replica static-fields check (§5.4) can compare across hedged
-/// responses.
-///
-/// design-doc: `misc/specs/MLS.md` §3.5.
+/// A KeyPackage fetched on the wire plus per-home auxiliary fields.
+/// Surfaced so a future cross-replica static-fields check can compare
+/// across hedged responses.
 #[derive(Debug, Clone)]
 pub struct FetchedKeyPackage {
     pub record:      KeyPackageRecord,
@@ -135,22 +130,20 @@ pub trait DhtClient: Send + Sync + 'static {
     ///
     /// `records` must already carry valid per-record `owner_sig`s;
     /// the caller produces them via `KeyPackageStash::generate_one`.
-    ///
-    /// design-doc: `misc/specs/MLS.md` §3.4.
     fn publish_keypackages(
         &self, records: &[KeyPackageRecord], outcome_filter: KpOutcomeFilter,
     ) -> impl Future<Output = DhtClientResult<()>> + Send;
 
     /// Top-up the existing stash. Same K-quorum as Publish but using
     /// the Refill domain so a captured Refill cannot be replayed as
-    /// a Publish (§3.6).
+    /// a Publish.
     fn refill_keypackages(
         &self, records: &[KeyPackageRecord], outcome_filter: KpOutcomeFilter,
     ) -> impl Future<Output = DhtClientResult<()>> + Send;
 
     /// Fetch one of `target_ipk`'s published KeyPackages. Concrete
     /// impls hedge α=3 against the target's K homes and return the
-    /// first valid response (§3.5).
+    /// first valid response.
     fn fetch_keypackage_for(
         &self, target_ipk: &[u8; 32],
     ) -> impl Future<Output = DhtClientResult<FetchedKeyPackage>> + Send;
@@ -158,9 +151,6 @@ pub trait DhtClient: Send + Sync + 'static {
     /// Publish a Welcome envelope to the **recipient's** K=3 homes.
     /// Idempotent at the recipient's side (the home generates its own
     /// `welcome_id` on store).
-    ///
-    /// design-doc: `misc/specs/MLS.md` §6.1 (Welcome queue distinct
-    /// from `cf_dht_queue`).
     fn publish_welcome_to_homes(
         &self, envelope: &WelcomeEnvelopeP,
     ) -> impl Future<Output = DhtClientResult<PublishOutcome>> + Send;

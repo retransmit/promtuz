@@ -2,7 +2,7 @@
 //! (`mls_kp_originate`, `mls_welcome_originate`).
 //!
 //! When a phone delegates a KeyPackage / Welcome operation to its home
-//! relay over the `client/0` §3.9 wrappers, the home relay becomes the
+//! relay over the `client/0` wrappers, the home relay becomes the
 //! *originator* of the real `peer/1` DHT fan-out — the role libcore's
 //! deleted `Peer1DhtClient` used to play. These helpers are the generic
 //! analogue of `forward.rs`'s `Forward`-specialised

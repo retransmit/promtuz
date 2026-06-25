@@ -14,8 +14,6 @@
 //!
 //! No new code lives in this file. Behaviour changes happen in the
 //! underlying modules (`dht`, `quic`, etc.); this is purely a façade.
-//!
-//! design-doc: `misc/specs/MLS.md` §11.3d (e2e harness pattern).
 
 pub mod dht;
 pub mod quic;

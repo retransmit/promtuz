@@ -1,6 +1,6 @@
 //! Per-slice radix-16 Merkle trie covering 16-bit leaves of `user_ipk`.
 //!
-//! ## Geometry (§6.1)
+//! ## Geometry
 //!
 //! Each `SliceTree` covers all `user_ipk`s whose top
 //! `MERKLE_SLICE_BITS == 8` bits equal `slice_id` (so 256 slices over the
@@ -22,19 +22,15 @@
 //! Most slices touch only a handful of leaves; rather than allocating
 //! `16^4 = 65 536` slots per slice, we keep a `HashMap<NodePath, Bytes32>`
 //! and a `HashMap<NodePath, Vec<LeafEntry>>` and recompute the root from
-//! the affected leaf-to-root path on each `insert` / `remove`. This is
-//! exactly the lazy-population pattern §6.1 calls for.
+//! the affected leaf-to-root path on each `insert` / `remove`.
 //!
 //! ## Recovery from process restart
 //!
-//! Per the dispatch's "no persistence" decision, the on-disk
-//! `dht_merkle` CF is **not** populated by this implementation. On
-//! relay restart the tree is rebuilt from `cf_dht_presence` records via
-//! [`MerkleState::rebuild_from_records`] — at design-doc §6.4 scale (~300
-//! records per relay) this is a few-millisecond walk and avoids a second
-//! source of truth that could diverge.
-//!
-//! design-doc: §6.1 (per-slice Merkle tree), §6.3 (sync sequence).
+//! The on-disk `dht_merkle` CF is **not** populated by this
+//! implementation. On relay restart the tree is rebuilt from
+//! `cf_dht_presence` records via [`MerkleState::rebuild_from_records`]
+//! — at ~300 records per relay this is a few-millisecond walk and
+//! avoids a second source of truth that could diverge.
 
 use std::collections::HashMap;
 
@@ -82,7 +78,7 @@ pub(crate) const TREE_DEPTH: usize = (MERKLE_LEAF_BITS as usize) / 4;
 /// Length 0 = the slice root; length [`TREE_DEPTH`] (4) = a leaf node.
 /// Stored as a `Vec<u8>` rather than a `[u8; 4]` so tests / RPC
 /// handlers can reuse the same type for partial-depth paths during
-/// bisect (§6.3).
+/// bisect.
 pub(crate) type NodePath = Vec<u8>;
 
 /// Compute the full `(slice_id, nibble_path)` path for a `user_ipk`. The
@@ -192,7 +188,7 @@ pub(crate) struct SliceTree {
 
 impl SliceTree {
     /// Empty tree for `slice_id`. No allocations beyond the struct
-    /// itself; populated lazily as records arrive (§6.2).
+    /// itself; populated lazily as records arrive.
     pub(crate) fn new(slice_id: u8) -> Self {
         Self {
             slice_id,
@@ -435,8 +431,8 @@ mod tests {
 
     #[test]
     fn merkle_state_value_hash_change_changes_root() {
-        // Same key, different value-hash → different root. This is the
-        // §6.3 "convergence on diverging value, not just absence" case.
+        // Same key, different value-hash → different root (convergence
+        // on diverging value, not just absence).
         let k = ipk_for(5, 0x11, 0x22, 0x33);
         let mut a = SliceTree::new(5);
         a.insert(&k, [1u8; 32]);

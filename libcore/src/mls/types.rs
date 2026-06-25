@@ -3,10 +3,6 @@
 //! [`PromtuzMlsStorageError`] is the storage-side error.
 //! [`MlsGroupError`] is the error type surfaced by the
 //! `MlsGroupHandle`, Welcome processing, and epoch-catchup paths.
-//!
-//! See `misc/specs/MLS.md` §9.3 for the storage contract and §4 / §6
-//! / §7 / §8 for group lifecycle / queue integration / epoch catchup /
-//! session reset.
 
 use thiserror::Error;
 
@@ -33,7 +29,7 @@ pub enum PromtuzMlsStorageError {
 
     /// Writing this entity would push the per-`group_id` storage past
     /// `MLS_GROUP_STATE_BUDGET_BYTES` (1 MiB). The write is *rejected*;
-    /// no partial write occurs. Spec §9.3.
+    /// no partial write occurs.
     #[error(
         "MLS group storage budget exceeded: group needs {requested} B, \
          existing {existing} B, limit {limit} B"
@@ -67,8 +63,7 @@ impl PromtuzMlsStorageError {
 /// strings).
 ///
 /// `BadCipherSuite`, `EpochAhead`, and `EpochStale` are present in the
-/// enum so `messaging.rs` can match on them (spec §0 cipher-suite pin,
-/// spec §6.3 / §7.5 epoch ordering).
+/// enum so `messaging.rs` can match on them by variant kind.
 #[derive(Error, Debug)]
 #[allow(dead_code)]
 pub enum MlsGroupError {
@@ -83,14 +78,13 @@ pub enum MlsGroupError {
     OpenMls(String),
 
     /// Outer envelope signature failed verification (`process_welcome`
-    /// rejects before openmls touches the welcome blob). Spec §3.3 /
-    /// §12.7.
+    /// rejects before openmls touches the welcome blob).
     #[error("envelope signature failed verification")]
     BadSignature,
 
     /// Cipher suite mismatch between the wire and our pinned suite
     /// (`MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`,
-    /// `0x0003`). Spec §0.
+    /// `0x0003`).
     #[error("cipher suite mismatch (expected MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519)")]
     BadCipherSuite,
 
@@ -98,7 +92,7 @@ pub enum MlsGroupError {
     /// current group epoch. The caller stashed it in
     /// `mls_epoch_ahead`; this is informational, not an error in the
     /// strict sense — present in the enum so call sites can pattern-
-    /// match. Spec §6.3 / §7.5.
+    /// match.
     #[error("message epoch {message} is ahead of current epoch {current}; buffered")]
     EpochAhead { current: u64, message: u64 },
 

@@ -2,11 +2,7 @@
 //!
 //! Top-level [`Dht`] struct wires the sub-systems together; the actual
 //! routing-table / store / lookup / sync / publish logic lives in
-//! sibling modules. Sub-lock layout follows §9.3 of the design doc.
-//!
-//! design-doc: `misc/specs/DHT.md`. Sections most relevant to this file:
-//! §0 (constants), §1.2 (CFs), §1.3 (routing-table state), §9.1 (module
-//! tree), §9.3 (Relay-struct sub-lock layout).
+//! sibling modules.
 
 // Some routing/lookup/store helpers are only reachable from code paths
 // that aren't always compiled in; suppress dead-code warnings so the
@@ -75,7 +71,7 @@ use self::sync::MerkleState;
 
 /// Top-level DHT runtime state.
 ///
-/// Lock granularity matches §9.3:
+/// Lock granularity:
 /// - [`routing`] — `RwLock<RoutingTable>`, read-mostly.
 /// - [`merkle`] — `RwLock<MerkleState>`, write-heavy.
 /// - [`cache`] — `Mutex<LookupCache>` (a `Mutex` because every cache
@@ -88,15 +84,13 @@ use self::sync::MerkleState;
 /// project-wide rule documented at
 /// `relay/src/quic/handler/client/events/forward.rs:59`).
 ///
-/// design-doc: §9.3.
-///
 /// `routing`/`merkle`/`cache`/`peer_conns` are `pub(crate)` because only
 /// in-relay code holds an `Arc<Dht>`; `node_id`/`signing_key`/`cfg`/
 /// `metrics` are `pub` so admin tools (`bin/ldb.rs` and friends) can read
 /// without going through accessor stubs.
 #[derive(Debug)]
 pub struct Dht {
-    /// 256-bucket routing table (§3.1).
+    /// 256-bucket routing table.
     pub(crate) routing: RwLock<RoutingTable>,
 
     /// Shared `RocksDB` handle (the *same* DB the relay's message queue
@@ -110,14 +104,14 @@ pub struct Dht {
     /// can't be stored back as a struct field without painful self-refs.
     pub(crate) rocks: Arc<RocksDB>,
 
-    /// Per-slice Merkle anti-entropy state (§6).
+    /// Per-slice Merkle anti-entropy state.
     pub(crate) merkle: RwLock<MerkleState>,
 
-    /// `(target_ipk → relay_descriptor)` cache for repeat lookups (§4.4).
+    /// `(target_ipk → relay_descriptor)` cache for repeat lookups.
     pub(crate) cache: Mutex<LookupCache>,
 
     /// Hot relay-to-relay connections, keyed by remote `NodeId`. Strong
-    /// reference held here; routing-table entries hold a `Weak` (§1.3).
+    /// reference held here; routing-table entries hold a `Weak`.
     ///
     /// **Verified TLS pubkey caching.** The value is a
     /// `(Connection, [u8; 32])` tuple where the second element is the
@@ -154,21 +148,20 @@ pub struct Dht {
     /// to "log the warning, do nothing" when absent.
     pub(crate) resolver: parking_lot::RwLock<Option<ResolverLinkHandle>>,
 
-    /// This relay's NodeId — `BLAKE3(NodeKey)` (§0).
+    /// This relay's NodeId — `BLAKE3(NodeKey)`.
     pub node_id: NodeId,
 
     /// This relay's identity signing key. Used to sign `relay_sig` on
-    /// every outgoing `PresenceRecord` (§1.1.1) and tombstones.
-    /// Distinct from the TLS server key (`Relay::keys::signing` is the
-    /// one and only identity key — see the doc comment on
-    /// `relay/src/relay/mod.rs::RelayKeys`).
+    /// every outgoing `PresenceRecord` and tombstones. Distinct from the
+    /// TLS server key (`Relay::keys::signing` is the one and only identity
+    /// key — see `relay/src/relay/mod.rs::RelayKeys`).
     pub signing_key: SigningKey,
 
     /// Local copy of the runtime config so DHT code paths don't have to
     /// reach back into `Relay::cfg`.
     pub cfg: DhtConfig,
 
-    /// Aggregate operation counters (§9.1).
+    /// Aggregate operation counters.
     pub metrics: Metrics,
 
     /// QUIC endpoint we use to dial outbound peer connections. Cloned
@@ -195,23 +188,18 @@ pub struct Dht {
     /// `KeyPackageFetch` (`MAX_KP_FETCH_PER_HOUR = 60`).
     /// Distinct from [`Self::rate_limiters`] (which is keyed on the
     /// requester alone, the coarse first-line bulkhead) because the
-    /// §5.6 anti-pinning policy demands per-pair attribution: a
-    /// misbehaving relay draining Bob's stash must not freeze its
-    /// quota for legitimate fetches against Alice's stash.
-    ///
-    /// design-doc: `misc/specs/MLS.md` §5.6.
+    /// anti-pinning policy demands per-pair attribution: a misbehaving
+    /// relay draining Bob's stash must not freeze its quota for
+    /// legitimate fetches against Alice's stash.
     pub(crate) kp_fetch_limiters: KpFetchLimiters,
 
     /// Per-relay rate limiter for the
     /// `WelcomePublish` / `WelcomeFetch` / `WelcomeAck` family. The
-    /// welcome RPCs are classified `Bulk` in
-    /// [`Self::rate_limiters`] (the coarse first-line bulkhead);
-    /// this dedicated limiter adds a welcome-specific quota so a
-    /// peer that's well under the per-relay bulk quota cannot still
-    /// pin a single recipient's welcome queue. Mirrors the
-    /// [`Self::kp_fetch_limiters`] pattern.
-    ///
-    /// design-doc: `misc/specs/MLS.md` §6.1.
+    /// welcome RPCs are classified `Bulk` in [`Self::rate_limiters`]
+    /// (the coarse first-line bulkhead); this dedicated limiter adds a
+    /// welcome-specific quota so a peer that's well under the per-relay
+    /// bulk quota cannot still pin a single recipient's welcome queue.
+    /// Mirrors the [`Self::kp_fetch_limiters`] pattern.
     pub(crate) welcome_limiters: WelcomeLimiters,
 
     /// Shared reference to the relay's connected-clients map.
@@ -250,7 +238,7 @@ impl Dht {
     /// Idempotently opens the `dht_presence` and `dht_merkle` column
     /// families on the supplied `RocksDB` path. The same DB instance the
     /// caller already opened for the message queue is reused; CFs
-    /// separate the two key-spaces (§1.2). "Already exists" is **not**
+    /// separate the two key-spaces. "Already exists" is **not**
     /// an error — the relay-restart case is exactly that.
     ///
     /// **Important:** `rocks` must already have been opened with the
@@ -376,8 +364,8 @@ impl Dht {
     /// the `Relay`-level shutdown handler so in-flight DHT RPCs cleanly
     /// finish before the QUIC endpoint is torn down.
     ///
-    /// design-doc: §7.1 (conn-close watcher). Symmetric to the resolver's
-    /// `Resolver::close` (`resolver/src/resolver/mod.rs`).
+    /// Symmetric to the resolver's `Resolver::close`
+    /// (`resolver/src/resolver/mod.rs`).
     pub async fn shutdown(&self) {
         use common::quic::CloseReason;
         // Drain the map first so we don't hold the write lock across the
@@ -398,13 +386,9 @@ impl Dht {
 ///
 /// Used by `crate::util::rocksdb` so DB-open and DHT-init aren't two
 /// places that have to stay in sync about which CFs exist.
-///
-/// design-doc: `misc/specs/DHT.md` §1.2 (presence + merkle CFs);
-/// `misc/specs/STICKY_HOME_RELAY.md` §6.1 (queue CF);
-/// `misc/specs/MLS.md` §2.5 (`cf_dht_keypackage`).
 pub fn dht_cf_descriptors() -> Vec<ColumnFamilyDescriptor> {
     // - `dht_presence`: no prefix extractor — point lookups only on
-    //   32-byte keys (§1.2 trade-off note).
+    //   32-byte keys.
     // - `dht_merkle`: no prefix extractor — keys are 3 bytes
     //   (slice/level/index) which would be malformed under any
     //   non-trivial extractor.

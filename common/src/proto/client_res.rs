@@ -16,9 +16,9 @@ use crate::types::bytes::Bytes;
 /// > MAX_BOOTSTRAP_RESULTS` (after `u8`-saturating addition) so an
 /// unauthenticated caller cannot trigger an unbounded sort/scan. The
 /// combined cap is a small fraction of `MAX_RELAYS = 1024` (the registry
-/// > size cap on the resolver) — large enough that a fresh-joining relay
-/// > gets a useful seed set in one round-trip per design-doc §3.5, small
-/// > enough that the per-request work stays trivial.
+/// size cap on the resolver) — large enough that a fresh-joining relay
+/// gets a useful seed set in one round-trip, small enough that the
+/// per-request work stays trivial.
 pub const MAX_BOOTSTRAP_RESULTS: u8 = 32;
 
 #[serde_as]
@@ -32,10 +32,9 @@ pub struct RelayDescriptor {
     /// Vended by the resolver because every code path that *uses* a
     /// `RelayDescriptor` to open a relay-to-relay QUIC connection needs
     /// to verify the leaf cert's SPKI against the relay's pubkey on
-    /// first contact (design-doc §2.3, §3.4 paragraph "From RPC
-    /// responses"). The resolver already has this pubkey from
-    /// authenticated `RelayHello` (`LifetimeP::RelayHello::pubkey`,
-    /// `relay_res.rs:35`), so shipping it costs the resolver nothing.
+    /// first contact. The resolver already has this pubkey from
+    /// authenticated `RelayHello` (`LifetimeP::RelayHello::pubkey`),
+    /// so shipping it costs the resolver nothing.
     ///
     /// Existing libcore consumers (`libcore/src/data/relay.rs::refresh`)
     /// ignore the field — it only matters at the relay-to-relay edge.
@@ -45,16 +44,15 @@ pub struct RelayDescriptor {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ClientRequest {
     GetRelays(),
-    /// DHT bootstrap query (design-doc §3.5, §9.4). Asks the resolver for
-    /// two ranked slices of its registry: one XOR-close to `near` (the
-    /// requesting relay's own NodeId — used to seed neighbouring
-    /// k-buckets), one ranked by recency-of-liveness as a proxy for
-    /// "well-positioned" relays.
+    /// DHT bootstrap query. Asks the resolver for two ranked slices of
+    /// its registry: one XOR-close to `near` (the requesting relay's own
+    /// NodeId — used to seed neighbouring k-buckets), one ranked by
+    /// recency-of-liveness as a proxy for "well-positioned" relays.
     ///
-    /// Auth: **none**. Per §9.4 this is a public query — any peer holding
-    /// the `client/1` ALPN may issue it. The response is a strict subset
-    /// of the data already exposed by [`ClientRequest::GetRelays`]; the
-    /// new RPC just supplies a smarter ranking.
+    /// Auth: **none**. This is a public query — any peer holding the
+    /// `client/1` ALPN may issue it. The response is a strict subset of
+    /// the data already exposed by [`ClientRequest::GetRelays`]; the new
+    /// RPC just supplies a smarter ranking.
     GetBootstrapPeers {
         /// Requester's NodeId. Used as the pivot for the XOR ranking; not
         /// authenticated against the connection.
@@ -65,7 +63,7 @@ pub enum ClientRequest {
         /// over the cap are rejected by the resolver.
         count_xor_near: u8,
         /// Number of descriptors to return by lowest *resolver-to-relay*
-        /// liveness recency (proxy for RTT — see design-doc §11.3).
+        /// liveness recency (proxy for RTT).
         count_rtt_near: u8,
     },
 }
@@ -74,7 +72,7 @@ pub enum ClientRequest {
 pub enum ClientResponse {
     /// Resolver's response to [ClientRequest::GetRelays]
     GetRelays { relays: Vec<RelayDescriptor> },
-    /// Resolver's response to [ClientRequest::GetBootstrapPeers] (§9.4).
+    /// Resolver's response to [`ClientRequest::GetBootstrapPeers`].
     ///
     /// Two parallel lists, intentionally not de-duplicated: a relay can
     /// legitimately appear in both rankings (close-by-XOR *and*
@@ -84,8 +82,8 @@ pub enum ClientResponse {
         /// Up to `count_xor_near` descriptors, sorted ascending by XOR
         /// distance from the requester's `near` NodeId.
         xor_near: Vec<RelayDescriptor>,
-        /// Up to `count_rtt_near` descriptors, sorted ascending by
-        /// liveness-recency proxy for RTT (most-recently-active first).
+        /// Up to `count_rtt_near` descriptors, sorted by liveness-recency
+        /// proxy for RTT (most-recently-active first).
         rtt_near: Vec<RelayDescriptor>,
     },
 }

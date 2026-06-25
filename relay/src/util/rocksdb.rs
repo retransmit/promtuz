@@ -14,9 +14,9 @@ use crate::dht::dht_cf_descriptors;
 /// - `default`: per-recipient message queue (existing). 32-byte fixed
 ///   prefix extractor for the `MessageKey::recipient` field
 ///   (`relay/src/storage/mod.rs`).
-/// - `dht_presence` / `dht_merkle`: DHT replica state (`relay/src/dht`,
-///   §1.2 of the DHT design doc). No prefix extractors — point lookups
-///   on 32-byte keys (presence) and 3-byte keys (merkle).
+/// - `dht_presence` / `dht_merkle`: DHT replica state (`relay/src/dht`).
+///   No prefix extractors — point lookups on 32-byte keys (presence)
+///   and 3-byte keys (merkle).
 ///
 /// `create_missing_column_families(true)` makes this idempotent: a
 /// pre-DHT DB on disk gets its CFs created on first restart with the
@@ -32,7 +32,7 @@ pub fn rocksdb() -> Result<DB> {
     // Default-CF options. The 32-byte fixed prefix extractor groups all
     // messages for a single recipient (per `MessageKey` layout). It
     // belongs ONLY on the default CF — the DHT CFs use unrelated key
-    // shapes (§1.2).
+    // shapes.
     let mut default_opts = Options::default();
     default_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
 

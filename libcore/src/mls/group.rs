@@ -3,18 +3,17 @@
 //!
 //! # Scope
 //!
-//! - **Lifecycle**: create / add / remove / self-update / leave (spec
-//!   §4).
-//! - **Application messaging**: encrypt-out, decrypt-in (spec §3.1
-//!   inner MLS message wrapping; outer envelope is in `welcome.rs`
-//!   and the `messaging.rs` wiring).
-//! - **Export secret** for SFrame integration (spec §10.2).
+//! - **Lifecycle**: create / add / remove / self-update / leave.
+//! - **Application messaging**: encrypt-out, decrypt-in (inner MLS
+//!   message wrapping; outer envelope is in `welcome.rs` and the
+//!   `messaging.rs` wiring).
+//! - **Export secret** for SFrame integration.
 //!
 //! # Cipher suite pin
 //!
 //! Hard-pinned to
 //! `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519` (suite
-//! `0x0003`) per spec §0. Note that openmls 0.8's
+//! `0x0003`). Note that openmls 0.8's
 //! `MlsGroupCreateConfig::default()` selects a *different* suite
 //! (`MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`) — we override at
 //! construction time. **Mismatch on this would silently shift the
@@ -23,7 +22,7 @@
 //!
 //! # Group ID shape
 //!
-//! Spec §4.1 mandates `group_id` is 32 B. `openmls::group::GroupId`
+//! `group_id` is fixed at 32 B. `openmls::group::GroupId`
 //! accepts arbitrary length; we constrain at construction by passing
 //! `&[u8; 32]` and convert via `GroupId::from_slice`.
 //!
@@ -37,9 +36,6 @@
 //! half. Both [`super::signer::Ed25519Signer::public_key`] and
 //! `openmls_basic_credential::SignatureKeyPair::public()` expose the
 //! 32-byte slice the constructor wants.
-//!
-//! design-doc: `misc/specs/MLS.md` §0 (cipher suite), §3.1 (envelope
-//! shape), §4 (lifecycle), §10 (calls / export_secret).
 
 // All public items here are consumed by `messaging.rs`; the cdylib
 // compiler can't see across the JNI boundary so it flags them as
@@ -54,7 +50,7 @@ use openmls_traits::OpenMlsProvider;
 use super::provider::PromtuzMlsProvider;
 use super::types::MlsGroupError;
 
-/// The single cipher suite we use across promtuz, pinned per spec §0.
+/// The single cipher suite used across promtuz.
 pub const PROMTUZ_CIPHERSUITE: Ciphersuite =
     Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519;
 
@@ -80,12 +76,12 @@ impl MlsGroupHandle {
     /// Construct a fresh group with the caller as the founding member.
     ///
     /// `own_ipk` is the caller's long-term Ed25519 IPK; it becomes the
-    /// `BasicCredential::identity` (spec §5.2). `signer` is the
-    /// **leaf** signing key (distinct from IPK, see `signer.rs`);
-    /// `leaf_signing_public` is its 32-byte verifying half (the
-    /// `Signer` trait can't expose this directly — see module docs).
+    /// `BasicCredential::identity`. `signer` is the **leaf** signing key
+    /// (distinct from IPK, see `signer.rs`); `leaf_signing_public` is its
+    /// 32-byte verifying half (the `Signer` trait can't expose this
+    /// directly — see module docs).
     ///
-    /// `group_id` is the 32-byte promtuz group identifier (spec §4.1).
+    /// `group_id` is the 32-byte promtuz group identifier.
     ///
     /// **Cipher suite is pinned** to [`PROMTUZ_CIPHERSUITE`].
     pub fn create<S: Signer>(
@@ -103,8 +99,7 @@ impl MlsGroupHandle {
             // `use_ratchet_tree_extension(true)` ships the ratchet tree
             // inside the GroupInfo / Welcome rather than out-of-band.
             // Without it joiners would require a separately-conveyed
-            // RatchetTreeIn — we don't have that channel today (spec
-            // §4.2 step 8 implicitly assumes the tree is in-band).
+            // RatchetTreeIn — we don't have that channel today.
             .use_ratchet_tree_extension(true)
             .build();
 
@@ -136,7 +131,7 @@ impl MlsGroupHandle {
     /// Per openmls 0.8: `MlsGroup::add_members` returns
     /// `(commit, welcome, Option<GroupInfo>)`. We expose only
     /// `(commit, welcome)` — the optional GroupInfo is reserved for
-    /// external-commit rejoin (spec §8.2), not used in v1.
+    /// external-commit rejoin, not used today.
     ///
     /// **The caller must merge the pending commit afterwards** via
     /// [`Self::merge_pending_commit`]. Until then the group is in
@@ -171,7 +166,7 @@ impl MlsGroupHandle {
         Ok(commit)
     }
 
-    /// Rotate own leaf key (Update commit, spec §4.6 — PCS).
+    /// Rotate own leaf key (Update commit — PCS).
     ///
     /// The new leaf's HPKE init key + signature key are derived
     /// internally by openmls. The caller does *not* supply a fresh
@@ -188,14 +183,11 @@ impl MlsGroupHandle {
         Ok(commit)
     }
 
-    /// Self-removal (spec §4.7).
+    /// Self-removal.
     ///
-    /// **Important asymmetry vs. spec prose**: `MlsGroup::leave_group`
-    /// in openmls 0.8 returns a *Remove proposal*, **not** a Commit.
-    /// The remaining members must commit it (via their own
-    /// `commit_to_pending_proposals`). That diverges slightly from
-    /// §4.7 ("Alice commits her own removal"); we follow openmls's
-    /// actual API and document it here.
+    /// **Important**: `MlsGroup::leave_group` in openmls 0.8 returns a
+    /// *Remove proposal*, **not** a Commit. The remaining members must
+    /// commit it (via their own `commit_to_pending_proposals`).
     pub fn leave<S: Signer>(
         &mut self, provider: &PromtuzMlsProvider, signer: &S,
     ) -> Result<MlsMessageOut> {
@@ -264,10 +256,9 @@ impl MlsGroupHandle {
     /// Current group ID as a 32-byte array.
     ///
     /// Returns the first 32 bytes of the underlying `GroupId` (the
-    /// rest is dropped). Spec §4.1 fixes IDs to 32 B; this defensive
+    /// rest is dropped). Group IDs are fixed at 32 B; this defensive
     /// truncation handles loaded-from-disk groups that may have
-    /// shorter values from a future tooling that admitted shorter
-    /// IDs — they get zero-padded rather than panicking.
+    /// shorter values — they get zero-padded rather than panicking.
     pub fn group_id(&self) -> [u8; 32] {
         let slice = self.inner.group_id().as_slice();
         let mut out = [0u8; 32];
@@ -297,8 +288,7 @@ impl MlsGroupHandle {
             .map(|m| m.index)
     }
 
-    /// Export an MLS exporter secret for SFrame / call key derivation
-    /// (spec §10.2).
+    /// Export an MLS exporter secret for SFrame / call key derivation.
     pub fn export_secret(
         &self, provider: &PromtuzMlsProvider, label: &str, context: &[u8], length: usize,
     ) -> Result<Vec<u8>> {
@@ -339,9 +329,8 @@ impl MlsGroupHandle {
 }
 
 /// TLS-serialise an `MlsMessageOut` for stuffing into
-/// `MlsApplicationEnvelopeP::mls_message`. Mirrors the spec §3.1
-/// transcript discipline: we never invent our own framing for the
-/// inner MLS bytes — openmls owns it.
+/// `MlsApplicationEnvelopeP::mls_message`. We never invent our own
+/// framing for the inner MLS bytes — openmls owns it.
 #[allow(dead_code)] // messaging.rs caller.
 pub fn mls_message_to_bytes(msg: &MlsMessageOut) -> Result<Vec<u8>> {
     msg.tls_serialize_detached().map_err(MlsGroupError::from_codec)
@@ -387,7 +376,7 @@ mod tests {
     impl Party {
         fn new(provider: &PromtuzMlsProvider, ipk_seed: u8) -> Self {
             // IPK is deterministic; leaf signing key is random — the
-            // separation matches spec §5.2.
+            // separation mirrors the leaf-key-distinct-from-IPK design.
             let ipk = ed25519_dalek::SigningKey::from_bytes(&[ipk_seed; 32])
                 .verifying_key()
                 .to_bytes();

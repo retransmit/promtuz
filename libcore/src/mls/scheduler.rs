@@ -1,8 +1,5 @@
 //! KeyPackage rotation scheduler.
 //!
-//! Spec: `misc/specs/MLS.md` §5.5 (refill cadence) + §5.6 (anti-pinning
-//! rotation).
-//!
 //! # Responsibilities
 //!
 //! - **On reconnect**: ensure the stash is full
@@ -25,8 +22,6 @@
 //! Tests pass a closure `now_ms_fn: impl Fn() -> u64` so they can pin
 //! "rotation due" without wall-clock games. The default
 //! [`run_once`] entry point reads `crate::utils::systime`.
-//!
-//! design-doc: `misc/specs/MLS.md` §5.5, §5.6, §13.4.
 
 #![allow(dead_code)] // The production caller is a tokio::spawn from
 // `quic/server.rs`, which needs the production DhtClient wiring.
@@ -50,8 +45,7 @@ pub enum SchedulerOutcome {
     /// metrics counter ("KP refills sent").
     Refilled { count: usize },
     /// We rotated the entire stash (anti-pinning trigger). Distinct
-    /// from [`Self::Refilled`] so a UI can surface the cadence event
-    /// to the user (§5.6 "your privacy posture rotated today").
+    /// from [`Self::Refilled`] so a UI can surface the cadence event.
     Rotated { count: usize },
 }
 
@@ -67,9 +61,8 @@ pub enum SchedulerOutcome {
 /// 2. Else if `should_rotate` (oldest unconsumed KP older than
 ///    `KP_SCHEDULED_ROTATION_MS`) → mint a full batch, publish via
 ///    Refill domain so a captured Publish sig from a prior cycle
-///    cannot replay (§3.6). The old (still-in-lifetime) records
-///    survive at the home; this is the *additive* anti-pinning
-///    rotation per §5.6.
+///    cannot replay. The old (still-in-lifetime) records survive at
+///    the home; this is the *additive* anti-pinning rotation.
 /// 3. Else → NoOp.
 ///
 /// # Errors
@@ -102,11 +95,10 @@ pub async fn run_once<C: DhtClient>(
             return Ok(SchedulerOutcome::NoOp);
         }
         // Refill domain — additive at the home, distinct from Publish
-        // so a captured Publish sig can't replay (§3.6). The choice
-        // mirrors §5.5 pseudo-code: when both "stash dipped under
-        // low-water" AND "rotation cadence elapsed" are true we go
-        // through Publish (the `should_refill` branch above); the
-        // pure-cadence case here is Refill.
+        // so a captured Publish sig can't replay. When both "stash
+        // dipped under low-water" AND "rotation cadence elapsed" are
+        // true we go through Publish (the `should_refill` branch above);
+        // the pure-cadence case here is Refill.
         dht.refill_keypackages(&recs, KpOutcomeFilter::Default)
             .await
             .map_err(|e| anyhow!("refill_keypackages: {e}"))?;

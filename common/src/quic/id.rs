@@ -96,7 +96,7 @@ impl NodeId {
     ///
     /// Returns the full 32-byte BLAKE3 hash of `key`. The full width is
     /// required so relay NodeIds and user IPKs share a coherent 256-bit
-    /// keyspace under XOR distance (see `misc/specs/DHT.md` §0).
+    /// keyspace under XOR distance.
     pub fn new<K: AsRef<[u8]>>(key: K) -> Self {
         let hash = blake3::hash(key.as_ref());
         Self::from_bytes(*hash.as_bytes())

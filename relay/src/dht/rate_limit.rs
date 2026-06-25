@@ -9,8 +9,7 @@
 //!
 //! ## Why three classes
 //!
-//! Per design-doc §8.7 ("Floods: per-peer rate limits on every RPC
-//! kind, scaled by RPC cost"), the cost of an RPC drives the quota:
+//! The cost of an RPC drives the quota:
 //!
 //! - **Cheap** (`Ping`, `FindNode`, `FindValue`, `MerkleSummary`,
 //!   `MerkleDiff`): zero crypto verification, only routing-table
@@ -40,7 +39,6 @@
 //! `governor::RateLimiter` is internally lock-free under the
 //! `DefaultKeyedStateStore` (DashMap-backed). Calls do not block.
 //!
-//! design-doc: §2.5 (`DhtFlood`), §8.4 (storage flooding), §8.7 (DoS).
 
 use std::num::NonZeroU32;
 
@@ -130,16 +128,15 @@ impl RpcClass {
             // disk write (queue) or stream open (deliver).
             // `QueueFetch` does a user-sig verify plus a per-recipient
             // prefix iterator over `cf_dht_queue`. Both belong in the
-            // expensive bucket per `STICKY_HOME_RELAY.md` §6.2.
+            // expensive bucket.
             | DhtRequest::Forward(_)
             | DhtRequest::QueueFetch(_)
-            // MLS (§6.1 of `MLS.md`): KeyPackage publish / fetch /
-            // refill all do Ed25519 verifies plus RocksDB I/O — same
-            // cost shape as Store / Forward. Spec explicitly says
-            // `RpcClass::Expensive`. Note: a separate *per-pair*
+            // MLS KeyPackage publish / fetch / refill all do Ed25519
+            // verifies plus RocksDB I/O — same cost shape as Store /
+            // Forward; expensive class. A separate per-pair
             // `(target_ipk, requester_relay_id)` quota lives inside
-            // `mls_kp.rs` for the §5.6 anti-pinning policy; this
-            // per-peer bucket is the coarser first line.
+            // `mls_kp.rs` for the anti-pinning policy; this per-peer
+            // bucket is the coarser first line.
             | DhtRequest::KeyPackagePublish(_)
             | DhtRequest::KeyPackageFetch(_)
             | DhtRequest::KeyPackageRefill(_) => RpcClass::Expensive,

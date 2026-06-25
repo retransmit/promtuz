@@ -54,8 +54,6 @@ use crate::utils::systime;
 /// [`crate::mls::scheduler::run_once`] for pending refill / rotation
 /// work; the task lives for the lifetime of the relay connection and
 /// is cooperatively cancelled on disconnect.
-///
-/// design-doc: `misc/specs/MLS.md` §5.5 (refill cadence), §11.3.
 const KP_SCHEDULER_TICK_MS: u64 = 60_000;
 
 pub enum RelayConnError {
@@ -180,7 +178,7 @@ impl Relay {
             SHSRP::Accept { timestamp, relay_node_id } => {
                 let latency_ms = systime().as_millis() as u64 - connect_start;
                 _ = self.record_success(latency_ms);
-                // §3.9 — stash the home's advertised DHT NodeId for the
+                // Stash the home's advertised DHT NodeId for the
                 // RelayDhtClient to bind in welcome fetch/ack sigs.
                 self.home_node_id = relay_node_id.map(|b| b.0);
                 (timestamp, latency_ms)
@@ -199,13 +197,12 @@ impl Relay {
         self.record_success(latency_ms).map_err(|e| RelayConnError::Error(e.into()))?;
         self.connection = Some(conn);
 
-        // §3.9: build the production DHT-RPC dialer once the relay/1
-        // connection is established. The dialer rides this same
-        // connection (no peer/1), stored on the `Relay` struct so the
-        // JNI surface (`sendMessage`, `handle_deliver`) picks it up via
-        // `RELAY.read()`. Failure to build is logged and `dht_client`
-        // stays `None`; the caller surfaces a clean error rather than
-        // silently no-oping.
+        // Build the production DHT-RPC dialer once the relay/1 connection
+        // is established. The dialer rides this same connection, stored on
+        // the `Relay` struct so the JNI surface (`sendMessage`,
+        // `handle_deliver`) picks it up via `RELAY.read()`. Failure to
+        // build is logged and `dht_client` stays `None`; the caller
+        // surfaces a clean error rather than silently no-oping.
         match build_relay_dht_client(&self, ipk) {
             Ok(c) => self.dht_client = Some(c),
             Err(e) => {
@@ -600,7 +597,7 @@ async fn handle_ack_auth_request(
 }
 
 // ---------------------------------------------------------------------------
-// MLS / DHT-RPC dialer wiring (§3.9)
+// MLS / DHT-RPC dialer wiring
 // ---------------------------------------------------------------------------
 
 /// Build the production [`RelayDhtClient`] from the current connection
@@ -625,9 +622,6 @@ fn build_relay_dht_client(
 /// One-shot Welcome poll on reconnect. Builds an `MlsContext` against
 /// fresh DB handles and the supplied dialer; runs
 /// [`crate::api::messaging::poll_welcomes`] once.
-///
-/// design-doc: `misc/specs/MLS.md` §6.1 (Welcome queue on reconnect),
-/// §11.3.
 async fn poll_welcomes_once(client: Arc<RelayDhtClient>) -> Result<()> {
     let provider = crate::mls::PromtuzMlsProvider::shared();
     let stash_db = stash_db_handle();
@@ -694,7 +688,6 @@ async fn run_scheduler_loop(
 /// Generic over [`crate::quic::dht_client::DhtClient`] so unit tests
 /// can drive it with the in-process `FakeDhtClient`.
 ///
-/// design-doc: `misc/specs/MLS.md` §5.5, §11.3.
 async fn run_scheduler_inner<C: crate::quic::dht_client::DhtClient>(
     provider: &crate::mls::PromtuzMlsProvider,
     stash: &crate::mls::KeyPackageStash,

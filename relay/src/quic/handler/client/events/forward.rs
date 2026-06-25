@@ -76,8 +76,7 @@ pub(super) async fn handle_forward(
     };
 
     // 3. Recipient online locally? Deliver-or-evict path. Online-locally
-    //    short-circuits the K-closest fan-out per
-    //    `STICKY_HOME_RELAY.md` §4.2 step 1.
+    //    short-circuits the K-closest fan-out.
     let recipient_conn = { ctx.relay.clients.read().get(&*recipient).cloned() };
 
     if let Some(conn) = recipient_conn {
@@ -101,7 +100,7 @@ pub(super) async fn handle_forward(
     //    enabled, route the dispatch to the K-closest "home" relays for
     //    durable queueing (or remote-online delivery). On any failure
     //    mode — DHT disabled, no homes known yet, < K_MIN successes —
-    //    we fall through to the local-queue safety net (§4.2 step 7).
+    //    we fall through to the local-queue safety net.
     if let Some(dht) = ctx.relay.dht.as_ref().cloned() {
         let now_ms = systime().as_millis() as u64;
         match forward_to_homes(dht, dispatch_for_dht, now_ms).await {
@@ -124,9 +123,9 @@ pub(super) async fn handle_forward(
         }
     }
 
-    // 5. Local-queue safety net (§4.2 step 7). This is the
-    //    pre-sticky-home behaviour preserved as a fallback so a
-    //    transient DHT/network hiccup doesn't lose messages.
+    // 5. Local-queue safety net. Pre-sticky-home behaviour preserved
+    //    as a fallback so a transient DHT/network hiccup doesn't lose
+    //    messages.
     let dispatch = store_in_rocks(&ctx, recipient, delivery)?;
     SRelayPacket::DispatchAck(dispatch).send(tx).await?;
 
@@ -134,8 +133,7 @@ pub(super) async fn handle_forward(
 }
 
 /// Translate a successful [`ForwardSummary`] into the [`DispatchAckP`]
-/// variant the originating client expects per `STICKY_HOME_RELAY.md`
-/// §4.2 step 6:
+/// variant the originating client expects:
 ///
 /// - Any home returned `Delivered` → [`DispatchAckP::Delivered`].
 /// - Otherwise (≥ K_MIN homes returned `Stored`) →
@@ -273,8 +271,7 @@ mod tests {
     }
 
     /// `any_delivered = true` always wins, even when there are also
-    /// `stored_at` entries — `Delivered` is the strictly stronger
-    /// promise per `STICKY_HOME_RELAY.md` §4.2 step 6.
+    /// `stored_at` entries — `Delivered` is the strictly stronger promise.
     #[test]
     fn ack_for_summary_promotes_to_delivered_when_any_home_delivered() {
         let mut s = ForwardSummary::default();

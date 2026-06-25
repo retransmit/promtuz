@@ -13,7 +13,7 @@
 //!
 //! ## Why a separate CF (vs. piggybacking on `cf_dht_queue`)?
 //!
-//! Per `misc/specs/MLS.md` §2.5 / §6.1, welcome envelopes have:
+//! Welcome envelopes have:
 //! - a longer retention window ([`WELCOME_LIFETIME_MS = 30 d`]) than
 //!   regular application messages — a user added to a group while
 //!   offline for 25 days must still receive the invitation on
@@ -23,8 +23,8 @@
 //!   so we can afford to keep more pending without blowing the queue.
 //!
 //! Splitting CFs lets the per-CF eviction policies diverge cleanly
-//! and preserves the §6.2 spec ordering ("Welcomes-first on drain")
-//! without interleaving them with application traffic.
+//! and preserves the "Welcomes-first on drain" ordering without
+//! interleaving them with application traffic.
 //!
 //! ## Storage layout
 //!
@@ -56,9 +56,9 @@
 //!   inviter's IPK. A relay forwarding cannot forge.
 //! - **Fetch**: the user-layer `user_sig` covers `(user_ipk,
 //!   requester_relay_id, timestamp)`; the home additionally verifies
-//!   `requester_relay_id == authenticated_peer_id` from `DhtHello`.
-//!   This is the §13.9 cross-relay-replay defence pattern (mirror of
-//!   `QueueFetch`'s requester-binding check).
+//!   `requester_relay_id == authenticated_peer_id` from `DhtHello`
+//!   (cross-relay-replay defence, mirrors `QueueFetch`'s
+//!   requester-binding check).
 //! - **Ack**: same shape as Fetch, distinct domain string so a
 //!   captured fetch sig can't be replayed as an ack.
 //!
@@ -68,8 +68,6 @@
 //! hold no `parking_lot` guards in the hot path. The per-relay rate
 //! limiter is `governor`-backed (lock-free DashMap state).
 //!
-//! design-doc: `misc/specs/MLS.md` §2.5 / §6.1 (welcome queue),
-//! §3.3 (envelope signing), §13.9 (binding `to_ipk`).
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -111,8 +109,6 @@ use rust_rocksdb::WriteOptions;
 use super::Dht;
 
 /// Column-family name for the welcome queue CF.
-///
-/// design-doc: `misc/specs/MLS.md` §2.5 (`cf_dht_welcome`).
 pub const CF_DHT_WELCOME: &str = "dht_welcome";
 
 /// Length of the BLAKE3 stash-prefix, in bytes (matches the CF's
@@ -134,11 +130,10 @@ const MAX_WELCOME_RPC_PER_HOUR: u32 = 240;
 
 /// Compute the 32-byte stash prefix for a recipient `ipk`.
 ///
-/// Per `MLS.md` §6.1: `BLAKE3("welcome:" || ipk)`.
-/// The literal eight-byte `"welcome:"` prefix differentiates welcome
-/// routing from KP-stash routing (`"kp:"`) and presence routing
-/// (bare `ipk`). All three live in the same DHT keyspace; the prefix
-/// disambiguation ensures stash CFs don't share a hash.
+/// `BLAKE3("welcome:" || ipk)`. The literal eight-byte `"welcome:"`
+/// prefix differentiates welcome routing from KP-stash routing
+/// (`"kp:"`) and presence routing (bare `ipk`). All three live in the
+/// same DHT keyspace; the prefix ensures stash CFs don't share a hash.
 ///
 /// One-line wrapper that defers to the canonical
 /// [`super::key_helpers::stash_prefix`] helper.
@@ -463,8 +458,8 @@ pub(crate) fn handle_welcome_publish(
 /// Home-side handler for [`super::DhtRequest::WelcomeFetch`].
 ///
 /// Validation ladder:
-/// 1. `req.requester_relay_id == authenticated_peer_id` — the §13.9
-///    cross-relay-replay defence (mirrors `QueueFetch`).
+/// 1. `req.requester_relay_id == authenticated_peer_id` — cross-relay
+///    replay defence (mirrors `QueueFetch`).
 /// 2. Skew check on `req.timestamp`.
 /// 3. Per-relay welcome-RPC rate limit.
 /// 4. Self is in K-closest for `stash_prefix(user_ipk)`.

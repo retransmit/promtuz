@@ -3,8 +3,8 @@
 //!
 //! # Why a separate signer
 //!
-//! Per `misc/specs/MLS.md` §5.2, the **leaf signing key** is distinct
-//! from the long-term IPK. Two reasons:
+//! The **leaf signing key** is distinct from the long-term IPK. Two
+//! reasons:
 //!
 //! 1. MLS specifies that leaf signing keys can rotate (via Update
 //!    commits) — IPK cannot.
@@ -45,8 +45,6 @@
 //! the basic-credential crate's internal layout (which serialises
 //! as bytes and stores both halves verbatim).
 //!
-//! design-doc: `misc/specs/MLS.md` §5.2 (leaf signing key separation),
-//! §3.2 / §3.3 (envelope signing under IPK).
 
 // Public surface here is consumed by `messaging.rs`; the cdylib
 // compiler can't see across the JNI boundary so flags it as dead.

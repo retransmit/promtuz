@@ -1,13 +1,11 @@
 //! `(user_ipk → relay_descriptor)` lookup cache, lives on the *serving*
-//! relay (not on libcore). Memoizes a successful §4.4-quorum `FindValue`
-//! result so repeat dispatches to the same recipient skip the DHT walk.
+//! relay (not on libcore). Memoizes a successful quorum `FindValue` result
+//! so repeat dispatches to the same recipient skip the DHT walk.
 //!
 //! Bounded LRU with lazy TTL expiry, no external dependency: recency is a
 //! monotonic stamp per entry; a full insert evicts the least-recently-used
 //! entry; expiry is checked on `get` (a stale entry is dropped, never
 //! returned).
-//!
-//! design-doc: §4.4 ("Cached answer for repeat recipients"), §9.1.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -15,8 +13,8 @@ use std::time::Instant;
 use super::config::LOOKUP_CACHE_CAP;
 
 /// Cached lookup answer: where a given user's presence record said its
-/// home relay is. TTL at insert time is `min(60s, not_after - 30s)` per
-/// §4.4; expiry is enforced by checking `expires_at` on every `get`.
+/// home relay is. Expiry is enforced by checking `expires_at` on every
+/// `get`.
 #[derive(Debug, Clone)]
 pub(crate) struct CachedAnswer {
     /// Owning relay's NodeId (full 32 bytes).

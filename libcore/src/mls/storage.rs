@@ -1,7 +1,7 @@
 //! `PromtuzStorageProvider`: a rusqlite-backed implementation of
 //! `openmls_traits::storage::StorageProvider<{CURRENT_VERSION}>`.
 //!
-//! Layout (see `misc/specs/MLS.md` §9.3 and `db::mls`):
+//! Layout (see `db::mls`):
 //!
 //! - One table `mls_storage(group_id, key_tag, sub_key, value)`.
 //! - `group_id` is the CBOR-encoded openmls `GroupId`. For entries that

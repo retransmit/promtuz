@@ -12,7 +12,7 @@
 //!    bisect on each mismatching slice via `MerkleDiff`, fetch the
 //!    diverging records via `FetchRecord`, and apply via
 //!    [`super::store::store_record`] / `store_tombstone` (with their
-//!    canonical §5.3 conflict-resolution rules).
+//!    canonical conflict-resolution rules).
 //!
 //! 2. **Eviction sweep** every [`EVICT_INTERVAL_MS`]: scan
 //!    `cf_dht_presence` for expired records and drop them. This is
@@ -28,8 +28,6 @@
 //! `cancel.cancelled().await`; the loop exits cleanly within one
 //! cadence-tick of the token firing.
 //!
-//! design-doc: §6 (replication & anti-entropy), §6.3 (sync RPC sequence),
-//! §7.2 (re-replication trigger — lazy / scheduled).
 
 pub(crate) mod merkle;
 pub(crate) mod rpc;
@@ -76,9 +74,8 @@ const EVICT_INTERVAL_MS: u64 = 60_000;
 
 /// Routing-table size below which we re-trigger bootstrap.
 ///
-/// Matches the `[Warming]` threshold in §3.5 — fewer than 8 known peers
-/// means we may be operating on a near-empty routing table and any
-/// lookup will likely fail.
+/// Fewer than 8 known peers means we may be operating on a near-empty
+/// routing table and any lookup will likely fail.
 const BOOTSTRAP_RETRY_THRESHOLD: usize = 8;
 
 /// Initial bootstrap-retry backoff. Doubles up to
@@ -90,8 +87,8 @@ const BOOTSTRAP_RETRY_MAX_BACKOFF_MS: u64 = 300_000;
 
 // `MAX_BISECT_DEPTH` lives in `rpc.rs` since the bisect driver is the
 // only consumer. The constant equals [`TREE_DEPTH`] (= 4); since the
-// wire-format `MerkleDiff::path` is also bounded at 4 nibbles per §2.6,
-// the brute-fallback-when-too-deep path is deliberately unreachable in
+// wire-format `MerkleDiff::path` is bounded at 4 nibbles, the
+// brute-fallback-when-too-deep path is deliberately unreachable in
 // v1 — bisect is exhaustive at this tree depth. Documented as a
 // follow-up if the tree depth is ever increased.
 
@@ -100,14 +97,12 @@ const BOOTSTRAP_RETRY_MAX_BACKOFF_MS: u64 = 300_000;
 // ---------------------------------------------------------------------------
 
 /// Per-relay anti-entropy state. Lives inside `Dht::merkle` (a
-/// `parking_lot::RwLock<MerkleState>` per §9.3) — write-heavy because
-/// every record write/delete updates the slice's leaf-to-root path.
+/// `parking_lot::RwLock<MerkleState>`) — write-heavy because every
+/// record write/delete updates the slice's leaf-to-root path.
 ///
 /// Storage shape: a `HashMap<u8, SliceTree>` keyed by slice_id. Most
-/// slices are empty in steady state; the map is kept small (§6.2 — `≈
-/// 1` slice per relay at 10k-relay scale).
-///
-/// design-doc: §6.1 (per-slice Merkle tree), §6.2 (slice boundaries).
+/// slices are empty in steady state; the map is kept small (≈ 1 slice
+/// per relay at 10k-relay scale).
 #[derive(Debug, Default)]
 pub(crate) struct MerkleState {
     /// Per-slice trees, lazily allocated.
@@ -277,9 +272,7 @@ pub(crate) fn is_slice_bit_set(bitset: &[u8; 32], slice_id: u8) -> bool {
     (bitset[byte] & (1 << bit)) != 0
 }
 
-/// All-ones bitset — "I'm interested in every slice." Used by the v1
-/// scheduler to learn about every slice; a future revision will narrow
-/// this to the relay's ownership window per §6.2.
+/// All-ones bitset — "I'm interested in every slice."
 pub(crate) fn all_slices_bitset() -> [u8; 32] {
     [0xFFu8; 32]
 }
@@ -292,9 +285,8 @@ pub(crate) fn all_slices_bitset() -> [u8; 32] {
 /// scratch. Called at relay-startup time before the scheduler comes up,
 /// so a freshly-launched binary's roots match the on-disk record set.
 ///
-/// Cost: O(records × TREE_DEPTH × MERKLE_FANOUT). At §6.4 scale (~300
-/// records, depth 4, fanout 16) this is < 20k hash ops — well under a
-/// millisecond on a modern CPU.
+/// Cost: O(records × TREE_DEPTH × MERKLE_FANOUT). At ~300 records,
+/// depth 4, fanout 16 this is < 20k hash ops — well under a millisecond.
 ///
 /// Tombstone entries (33-byte keys with [`super::store::TOMB_PREFIX`])
 /// are *not* re-added here: they cease to exist on the network once
@@ -302,8 +294,6 @@ pub(crate) fn all_slices_bitset() -> [u8; 32] {
 /// past restart would diverge replicas that GC'd theirs in the
 /// meantime. This may be revisited if tombstone-loss-on-restart proves
 /// problematic in practice.
-///
-/// design-doc: §6.4 (acceptable cost), §1.2 (Tombstones honour window).
 pub(crate) fn rebuild_from_records(dht: &Dht) -> usize {
     let Some(cf) = dht.rocks.cf_handle(CF_DHT_PRESENCE) else {
         return 0;
@@ -351,8 +341,6 @@ fn now_ms() -> u64 {
 /// cadence-tick. The function never returns an error: every individual
 /// task arm logs and continues so a transient failure (peer down,
 /// network blip, RocksDB error) doesn't kill the entire scheduler.
-///
-/// design-doc: §6.3, §7.2.
 pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
     use tokio::time::interval;
 
@@ -503,9 +491,6 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
 /// out before any `await` (the same project-wide rule
 /// `forward_to_homes` follows). The sweep itself doesn't hold any
 /// lock across awaits.
-///
-/// design-doc: `misc/specs/STICKY_HOME_RELAY.md` §4.4 (drift
-/// handling), §7.2 (lazy on `evict_expired` sweep).
 pub(crate) async fn run_drift_migration_sweep(dht: Arc<Dht>) {
     use tokio::task::JoinSet;
 

@@ -1,28 +1,26 @@
 //! DHT Relay-to-Relay Wire Protocol
 //!
 //! This module is the source of truth for the DHT relay-to-relay wire
-//! protocol described in `misc/specs/DHT.md` (§2). It carries:
+//! protocol. It carries:
 //!
-//! 1. The [`PresenceRecord`] data type (§1.1) and its dual-signature
-//!    transcripts (user_sig per §1.1.1 paragraph 1; relay_sig per §1.1.1
-//!    paragraph 2).
-//! 2. The full RPC catalogue from §2.4: `Ping`/`Pong`, `FindNode`/`Resp`,
+//! 1. The [`PresenceRecord`] data type and its dual-signature transcripts
+//!    (user_sig covering `(user_ipk, relay_id, generation)`;
+//!    relay_sig covering the full record).
+//! 2. The full RPC catalogue: `Ping`/`Pong`, `FindNode`/`Resp`,
 //!    `FindValue`/`Resp`, `Store`/`Resp`, `Tombstone`/`Resp`,
 //!    `MerkleSummary`/`Resp`, `MerkleDiff`/`Resp`, and
 //!    `FetchRecord`/`Resp`.
-//! 3. Length-bound constants per §2.6 that downstream handlers check at
+//! 3. Length-bound constants that downstream handlers check at
 //!    deserialization / construction time.
 //!
 //! ## Why a `DhtRequest` + `DhtResponse` split (not a single `DhtPacket`)
 //!
-//! §2.1 describes a generic `DhtPacket { Rpc(DhtRpc), Sync(DhtSync) }`
-//! shape, but does not pin a strict request/response layout — that is left
-//! to the implementer. We choose **separate request and response enums**
-//! plus a thin outer [`DhtPacket`] wrapper because:
+//! We choose **separate request and response enums** plus a thin outer
+//! [`DhtPacket`] wrapper because:
 //!
-//! - Per-RPC bi-streams (§2.2): one stream carries exactly one request and
-//!   one (possibly multi-frame) response, so the *direction* is implicit
-//!   in the stream side. Splitting the enums means the dispatcher on each
+//! - Per-RPC bi-streams: one stream carries exactly one request and one
+//!   (possibly multi-frame) response, so the *direction* is implicit in
+//!   the stream side. Splitting the enums means the dispatcher on each
 //!   side can match exhaustively against only the variants it ever
 //!   receives, instead of dynamic-checking "did the peer send a response
 //!   to a question I never asked".
@@ -45,9 +43,9 @@
 //! ```
 //!
 //! Each transcript has its own unique domain string so a captured
-//! signature for one packet kind cannot be replayed as another (§1.1.1
-//! paragraph 5). Both signing and verifying sides call the same helper —
-//! it is the contract between them.
+//! signature for one packet kind cannot be replayed as another. Both
+//! signing and verifying sides call the same helper — it is the contract
+//! between them.
 
 use std::cmp::Ordering;
 use std::net::SocketAddr;
@@ -65,20 +63,17 @@ use crate::types::bytes::Bytes;
 //===:===:===:===:==:  CONSTANTS  :==:===:===:===:===||
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
 
-/// Base domain-separation tag for every DHT signed transcript. Per
-/// `misc/specs/DHT.md` §0 (`DHT_DOMAIN_PREFIX`).
+/// Base domain-separation tag for every DHT signed transcript.
 pub const DHT_DOMAIN_PREFIX: &[u8] = b"promtuz-dht-v1";
 
-/// Domain-separation tag mixed into the *user-roam* signing input. Per
-/// §1.1.1 paragraph 1: U signs `DHT_DOMAIN_PREFIX || "-roam-v1" ||
-/// PROTOCOL_VERSION (BE u16) || user_ipk || relay_id || generation
-/// (BE u64)`.
+/// Domain-separation tag for the *user-roam* signing input. U signs
+/// `DHT_DOMAIN_PREFIX || "-roam-v1" || PROTOCOL_VERSION (BE u16)
+/// || user_ipk || relay_id || generation (BE u64)`.
 pub const DHT_USER_ROAM_SIG_DOMAIN: &[u8] = b"promtuz-dht-v1-roam-v1";
 
-/// Domain-separation tag mixed into the *relay-presence* counter-signing
-/// input. Per §1.1.1 paragraph 2: R signs every record field except
-/// `relay_sig` itself, prefixed by `DHT_DOMAIN_PREFIX || "-presence-v1"
-/// || PROTOCOL_VERSION (BE u16)`.
+/// Domain-separation tag for the *relay-presence* counter-signing input.
+/// R signs every record field except `relay_sig` itself, prefixed by
+/// `DHT_DOMAIN_PREFIX || "-presence-v1" || PROTOCOL_VERSION (BE u16)`.
 pub const DHT_PRESENCE_SIG_DOMAIN: &[u8] = b"promtuz-dht-v1-presence-v1";
 
 /// Domain-separation tag for the connection-level [`DhtHello`] handshake
@@ -103,31 +98,30 @@ pub const DHT_HELLO_SIG_DOMAIN: &[u8] = b"promtuz-dht-hello-v1";
 /// behaviour identical against either receiver.
 pub const MAX_DHT_HELLO_SKEW_MS: u64 = 60_000;
 
-/// Replication factor `k` (§0). Bounds [`FindNodeResp::closer`] and the
+/// Replication factor `k`. Bounds [`FindNodeResp::closer`] and the
 /// `Closer` arm of [`FindValueOutcome`].
 pub const DHT_K: usize = 3;
 
 /// Future-skew tolerance applied to [`PresenceRecord::not_before`] in
-/// milliseconds (§0, `PRESENCE_MAX_FUTURE_SKEW_MS`). A record is rejected
-/// with [`PresenceVerifyError::NotYetValid`] when `not_before > now +
+/// milliseconds. A record is rejected with
+/// [`PresenceVerifyError::NotYetValid`] when `not_before > now +
 /// PRESENCE_MAX_FUTURE_SKEW_MS`.
 pub const PRESENCE_MAX_FUTURE_SKEW_MS: u64 = 60_000;
 
-/// Maximum length of [`MerkleDiff::path`] (§2.6). Equals tree depth: 16-bit
+/// Maximum length of [`MerkleDiff::path`]. Equals tree depth: 16-bit
 /// leaf address space at 4 bits per level = 4 levels.
 pub const MAX_MERKLE_DIFF_PATH: usize = 4;
 
-/// Branching factor of the per-slice radix-16 trie (§0, `MERKLE_FANOUT`)
-/// — also the bound on
-/// [`MerkleDiffResp::Children::hashes`] length per §2.6.
+/// Branching factor of the per-slice radix-16 trie — also the bound on
+/// [`MerkleDiffResp::Children::hashes`] length.
 pub const MERKLE_FANOUT: usize = 16;
 
-/// Bound on [`MerkleDiffResp::Leaves::entries`] per RPC (§2.6). Larger
-/// result sets split across multiple sequential `MerkleDiff` calls.
+/// Bound on [`MerkleDiffResp::Leaves::entries`] per RPC. Larger result
+/// sets split across multiple sequential `MerkleDiff` calls.
 pub const MAX_MERKLE_DIFF_LEAVES: usize = 64;
 
 /// Bound on [`FetchRecord::user_ipks`] and matching
-/// [`FetchRecordResp::records`] per RPC (§2.6).
+/// [`FetchRecordResp::records`] per RPC.
 pub const MAX_FETCH_RECORD_LEAVES: usize = 64;
 
 /// Alias for `MAX_FETCH_RECORD_LEAVES`, exported under the name the
@@ -136,11 +130,11 @@ pub const MAX_FETCH_RECORD_LEAVES: usize = 64;
 pub const MAX_FETCH_RECORD_BATCH: usize = MAX_FETCH_RECORD_LEAVES;
 
 /// Bound on [`FindNodeResp::closer`] / [`FindValueOutcome::Closer`] entry
-/// counts per §2.6. Equal to the replication factor `k`.
+/// counts. Equal to the replication factor `k`.
 pub const MAX_FIND_NODE_RESULTS: usize = DHT_K;
 
-/// Bytes of the slice bitset in [`MerkleSummary::slices`] (§2.4.6 / §2.6
-/// "256 bits = fixed bitset"). 256 slices over the keyspace = 32 bytes.
+/// Bytes of the slice bitset in [`MerkleSummary::slices`]. 256 slices
+/// over the keyspace = 32 bytes.
 pub const MERKLE_SUMMARY_SLICE_BITS: usize = 256;
 
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
@@ -185,8 +179,6 @@ pub const MERKLE_SUMMARY_SLICE_BITS: usize = 256;
 ///   || node_id (32) || pubkey (32) || timestamp (BE u64)
 /// ```
 ///
-/// design-doc: `misc/specs/DHT.md` §2.3 (relay-to-relay handshake), §2.5
-/// (close-reason codes), §8.1-8.2 (Sybil/eclipse rationale).
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DhtHello {
@@ -252,19 +244,17 @@ pub fn dht_hello_signing_input(
 /// User-presence record asserting "I, relay R, host an authenticated
 /// session for user U, valid until T."
 ///
-/// Wire/storage layout per `misc/specs/DHT.md` §1.1, postcard-encoded.
-/// **Field declaration order is load-bearing** — both the relay-side
-/// signing transcript (§1.1.1 paragraph 2) and the postcard wire
-/// representation visit fields in declaration order, so re-ordering them
-/// silently breaks every replica's signature check.
+/// Postcard-encoded. **Field declaration order is load-bearing** — both
+/// the relay-side signing transcript and the postcard wire representation
+/// visit fields in declaration order, so re-ordering them silently breaks
+/// every replica's signature check.
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PresenceRecord {
     /// User U's Ed25519 identity public key (also the DHT key for this
     /// record). 32 bytes.
     pub user_ipk: Bytes<32>,
-    /// `BLAKE3(R's NodeKey)` — the relay's full-width NodeId (§9.6 widened
-    /// from 10 to 32 bytes).
+    /// `BLAKE3(R's NodeKey)` — the relay's full-width NodeId.
     pub relay_id: RelayId,
     /// R's full Ed25519 identity public key. Carried so verifiers do not
     /// need a side channel to recover the verification key from
@@ -276,11 +266,11 @@ pub struct PresenceRecord {
     /// transcript so a misbehaving R cannot disclaim its timestamp.
     pub not_before: u64,
     /// `not_after = not_before + PRESENCE_TTL_MS`. Replicas reject the
-    /// record once the current wall-clock passes `not_after` (§1.1.2).
+    /// record once the current wall-clock passes `not_after`.
     pub not_after: u64,
     /// User-controlled monotonic counter. Primary tiebreaker for
-    /// multi-writer conflict resolution (§5.3); also the only field that
-    /// stops a replayed `user_sig` from outliving a roam (§1.1.2).
+    /// multi-writer conflict resolution; also the only field that stops
+    /// a replayed `user_sig` from outliving a roam.
     pub generation: u64,
     /// Bitset for future capability negotiation. v1 = `0`. Carried in the
     /// relay signing transcript so a future capability flip cannot be
@@ -293,15 +283,15 @@ pub struct PresenceRecord {
     /// Relay's Ed25519 signature over
     /// [`presence_record_relay_signing_input`]. Binds the *whole* record
     /// — including the timestamps — to R's identity, so a replica can
-    /// attribute timestamp drift to the specific R that signed it (§8).
+    /// attribute timestamp drift to the specific R that signed it.
     pub relay_sig: Bytes<64>,
 }
 
 /// Tombstone payload used by [`DhtRequest::Tombstone`].
 ///
-/// Per §1.2: a tombstone entry holds `(generation, deleted_at)` plus a
-/// relay signature so a replica can attribute the deletion to the relay
-/// that issued it. Tombstones are honoured by replicas for `2 ×
+/// A tombstone entry holds `(generation, deleted_at)` plus a relay
+/// signature so a replica can attribute the deletion to the relay that
+/// issued it. Tombstones are honoured by replicas for `2 ×
 /// PRESENCE_TTL_MS` after `deleted_at`, then garbage-collected.
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,7 +307,7 @@ pub struct TombstoneRecord {
     pub relay_pubkey: Bytes<32>,
     /// Generation of the record being tombstoned. A tombstone with
     /// `generation` strictly less than the locally-held record's
-    /// generation is ignored (§5.3 ordering applies in reverse).
+    /// generation is ignored.
     pub generation: u64,
     /// Wall-clock at which R observed the disconnect, in ms since epoch.
     pub deleted_at: u64,
@@ -332,16 +322,15 @@ pub struct TombstoneRecord {
 
 /// Build the canonical user-roam signing transcript.
 ///
-/// Layout per §1.1.1 paragraph 1:
+/// Layout:
 /// ```text
 ///   DHT_DOMAIN_PREFIX || b"-roam-v1" || PROTOCOL_VERSION (BE u16)
 ///     || user_ipk (32) || relay_id (32) || generation (BE u64)
 /// ```
 ///
-/// Both U (signing) and the relay-side verifier (during
-/// [`PresenceRecord::verify`] in `crypto`-enabled crates) call this
-/// helper, which makes it the byte-for-byte contract between the two
-/// sides — there is no second implementation to keep in sync.
+/// Both U (signing) and the relay-side verifier call this helper, which
+/// makes it the byte-for-byte contract between the two sides — there is
+/// no second implementation to keep in sync.
 pub fn presence_record_user_signing_input(
     user_ipk: &[u8; 32], relay_id: &RelayId, generation: u64,
 ) -> Vec<u8> {
@@ -357,8 +346,8 @@ pub fn presence_record_user_signing_input(
 
 /// Build the canonical relay-presence countersigning transcript.
 ///
-/// Per §1.1.1 paragraph 2 the relay signs over the wire-canonical bytes
-/// of every other field, in declaration order, prefixed with
+/// The relay signs over the wire-canonical bytes of every other field,
+/// in declaration order, prefixed with
 /// `DHT_DOMAIN_PREFIX || b"-presence-v1" || PROTOCOL_VERSION (BE u16)`.
 /// The order below mirrors [`PresenceRecord`] field order *exactly* —
 /// reorder one and the signature stops verifying.
@@ -427,9 +416,8 @@ pub fn tombstone_signing_input(
 /// Reasons a [`PresenceRecord`] can fail validation.
 ///
 /// Maps onto the close-reason codes defined in
-/// [`crate::quic::CloseReason`] (§2.5): a `BadUserSig`/`BadRelaySig`
-/// becomes `DhtBadSignature`, and `Expired`/`NotYetValid` become
-/// `DhtClockSkew`.
+/// [`crate::quic::CloseReason`]: a `BadUserSig`/`BadRelaySig` becomes
+/// `DhtBadSignature`, and `Expired`/`NotYetValid` become `DhtClockSkew`.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PresenceVerifyError {
     /// `user_sig` did not validate under `user_ipk`.
@@ -471,7 +459,6 @@ pub enum PresenceVerifyError {
 ///   shape — caller's choice).
 /// - [`Self::ClockSkew`] → `DhtClockSkew`.
 ///
-/// design-doc: §2.5.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DhtHelloVerifyError {
     /// `node_id != BLAKE3(pubkey)` — the dialer is presenting a pubkey
@@ -496,7 +483,7 @@ pub enum DhtHelloVerifyError {
 }
 
 impl PresenceRecord {
-    /// Multi-writer conflict resolution per `misc/specs/DHT.md` §5.3.
+    /// Multi-writer conflict resolution.
     ///
     /// Returns [`Ordering::Greater`] when `self` is the canonical winner
     /// (replicas should keep `self` and reject `other` as `Stale`),
@@ -507,8 +494,6 @@ impl PresenceRecord {
     /// Order: `generation` desc, then `not_before` desc, then `relay_id`
     /// lex desc — i.e. the higher-generation / fresher-timestamp /
     /// later-lex record wins.
-    ///
-    /// design-doc: §5.3
     pub fn compare(&self, other: &Self) -> Ordering {
         // Higher generation wins.
         match self.generation.cmp(&other.generation) {
@@ -626,9 +611,8 @@ mod verify_impl {
         ///    transcripts but is not the identity behind the claimed
         ///    `relay_id`.
         /// 3. Time window: `not_before <= now +
-        ///    PRESENCE_MAX_FUTURE_SKEW_MS` and `not_after > now`.
-        ///    Per §1.1.2 / §1.1.3 — bounds usefulness of a captured
-        ///    record to ~10 minutes.
+        ///    PRESENCE_MAX_FUTURE_SKEW_MS` and `not_after > now` —
+        ///    bounds usefulness of a captured record to ~10 minutes.
         /// 4. `user_sig` verifies under the embedded `user_ipk` over
         ///    [`presence_record_user_signing_input`].
         /// 5. `relay_sig` verifies under `relay_pubkey` over
@@ -651,7 +635,7 @@ mod verify_impl {
                 return Err(PresenceVerifyError::RelayIdMismatch);
             }
 
-            // 3. Time window (per §1.1.2).
+            // 3. Time window.
             if self.not_before > now_ms.saturating_add(PRESENCE_MAX_FUTURE_SKEW_MS) {
                 return Err(PresenceVerifyError::NotYetValid);
             }
@@ -877,14 +861,14 @@ mod verify_impl {
 //===:===:===:===:==: NODE DESCRIPTOR :==:===:===:===||
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
 
-/// Descriptor returned in [`FindNodeResp`] / [`FindValueOutcome::Closer`]
-/// per §2.4.2. Carries everything a requester needs to make a first
-/// contact with a previously-unknown peer (id, address, full pubkey for
-/// cert-chain verification on first connect).
+/// Descriptor returned in [`FindNodeResp`] / [`FindValueOutcome::Closer`].
+/// Carries everything a requester needs to make a first contact with a
+/// previously-unknown peer (id, address, full pubkey for cert-chain
+/// verification on first connect).
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeDescriptor {
-    /// Peer's NodeId — full 32 bytes (§9.6 widening).
+    /// Peer's NodeId — full 32 bytes.
     pub id:     RelayId,
     /// Peer's QUIC endpoint. `serde_with::DisplayFromStr` matches the
     /// existing convention in `client_res.rs::RelayDescriptor`.
@@ -900,10 +884,10 @@ pub struct NodeDescriptor {
 //===:===:===:===:==:  RPC PAYLOADS  :==:===:===:===:||
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
 
-// --- Ping / Pong (§2.4.1) ----------------------------------------------
+// --- Ping / Pong --------------------------------------------------------
 
 /// Liveness probe / RTT sample. **Unsigned** at the application layer:
-/// per §2.4.1, mTLS already binds the connection to a specific cert.
+/// mTLS already binds the connection to a specific cert.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ping {
     pub nonce:     Bytes<16>,
@@ -917,7 +901,7 @@ pub struct Pong {
     pub timestamp: u64,
 }
 
-// --- FindNode (§2.4.2) -------------------------------------------------
+// --- FindNode -----------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FindNode {
@@ -938,7 +922,7 @@ pub struct FindNodeResp {
     pub closer: Vec<NodeDescriptor>,
 }
 
-// --- FindValue (§2.4.3) ------------------------------------------------
+// --- FindValue ----------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FindValue {
@@ -946,7 +930,7 @@ pub struct FindValue {
     pub requester: RelayId,
 }
 
-/// Three response shapes per §2.4.3 / §4.2.
+/// Three response shapes for `FindValue`.
 //
 // `Found(PresenceRecord)` is ~250 B while `NotPresent` is zero-sized.
 // Boxing changes the postcard wire encoding (an extra layer of
@@ -958,10 +942,10 @@ pub enum FindValueOutcome {
     /// Responder is in the k owners and has the record.
     Found(PresenceRecord),
     /// Responder *is* in the k closest but has no record. Authoritative
-    /// "user is offline" — terminates the iterator early per §4.2.
+    /// "user is offline" — terminates the iterator early.
     NotPresent,
     /// Responder is not in the k closest; here are the closest peers it
-    /// knows. Length-bound `MAX_FIND_NODE_RESULTS` per §2.6.
+    /// knows. Length-bound `MAX_FIND_NODE_RESULTS`.
     Closer(Vec<NodeDescriptor>),
 }
 
@@ -970,7 +954,7 @@ pub struct FindValueResp {
     pub result: FindValueOutcome,
 }
 
-// --- Store (§2.4.4) ----------------------------------------------------
+// --- Store --------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Store {
@@ -980,16 +964,16 @@ pub struct Store {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StoreOutcome {
     Stored,
-    /// Responder already has a strictly-newer record per §5.3 ordering.
+    /// Responder already has a strictly-newer record.
     Stale,
     /// Responder is not in the k closest owners by its current routing
-    /// view; record dropped (see §5.4).
+    /// view; record dropped.
     NotOwner,
     /// Either user_sig or relay_sig failed to verify.
     BadSig,
     /// Record's TTL has already elapsed at the time of the STORE.
     TtlExpired,
-    /// Per-source rate limit tripped — see §8.4.
+    /// Per-source rate limit tripped.
     RateLimited,
 }
 
@@ -998,7 +982,7 @@ pub struct StoreResp {
     pub outcome: StoreOutcome,
 }
 
-// --- Tombstone (§2.4.5) ------------------------------------------------
+// --- Tombstone ----------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tombstone {
@@ -1023,14 +1007,14 @@ pub struct TombstoneResp {
     pub outcome: TombstoneOutcome,
 }
 
-// --- MerkleSummary (§2.4.6) -------------------------------------------
+// --- MerkleSummary ------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MerkleSummary {
     /// Bitset of which slices the requester wants roots for. 256 slices
-    /// total (§0); encoded as a fixed 32-byte array. Wrapped in
-    /// [`Bytes`] so postcard ships it as a length-elided byte string
-    /// rather than a length-prefixed `Vec`.
+    /// total; encoded as a fixed 32-byte array. Wrapped in [`Bytes`] so
+    /// postcard ships it as a length-elided byte string rather than a
+    /// length-prefixed `Vec`.
     pub slices: Bytes<32>,
 }
 
@@ -1042,64 +1026,62 @@ pub struct MerkleSummaryResp {
     pub roots: Vec<(u8, Bytes<32>)>,
 }
 
-// --- MerkleDiff (§2.4.7) ----------------------------------------------
+// --- MerkleDiff ---------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MerkleDiff {
     pub slice_id: u8,
     /// Path of nibble indices from the slice root (e.g. `[3, 11, 7]` =
     /// `root.children[3].children[11].children[7]`). Bounded by
-    /// [`MAX_MERKLE_DIFF_PATH`] per §2.6 (= tree depth).
+    /// [`MAX_MERKLE_DIFF_PATH`] (= tree depth).
     pub path:     Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MerkleDiffResp {
     /// Path resolved to an internal node — return its child hashes.
-    /// Length is exactly [`MERKLE_FANOUT`] (= 16) per §2.6.
+    /// Length is exactly [`MERKLE_FANOUT`] (= 16).
     Children { hashes: Vec<Bytes<32>> },
     /// Path resolved to a leaf — return covered (user_ipk, record-hash)
-    /// pairs. Bounded by [`MAX_MERKLE_DIFF_LEAVES`] per §2.6.
+    /// pairs. Bounded by [`MAX_MERKLE_DIFF_LEAVES`].
     Leaves { entries: Vec<(Bytes<32>, Bytes<32>)> },
 }
 
-// --- FetchRecord (§2.4.8) ---------------------------------------------
+// --- FetchRecord --------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FetchRecord {
-    /// Bounded by [`MAX_FETCH_RECORD_BATCH`] per §2.6.
+    /// Bounded by [`MAX_FETCH_RECORD_BATCH`].
     pub user_ipks: Vec<Bytes<32>>,
 }
 
 /// Reply to a [`FetchRecord`] request.
 ///
-/// Carries **both** live records and tombstones so anti-entropy
-/// converges on deletions, not only insertions (§6.3 — "Tombstones
-/// converge the same way"). The combined length
+/// Carries **both** live records and tombstones so anti-entropy converges
+/// on deletions, not only insertions. The combined length
 /// `records.len() + tombstones.len()` is bounded by
-/// [`MAX_FETCH_RECORD_BATCH`] per §2.6; a single IPK never appears in
-/// both lists (the responder returns the tombstone if present, else the
-/// record, never both — tombstones supersede live records at store time
-/// per §5.3, but anti-entropy still has to ship the chosen one).
+/// [`MAX_FETCH_RECORD_BATCH`]; a single IPK never appears in both lists
+/// (the responder returns the tombstone if present, else the record, never
+/// both — tombstones supersede live records at store time, but
+/// anti-entropy still has to ship the chosen one).
 ///
 /// **Wire-format compatibility note:** prior to this widening,
 /// `FetchRecordResp` was a single `records` vec. The shape change is
-/// implicit-versioned by `PROTOCOL_VERSION = 2` (declared in
-/// `common::PROTOCOL_VERSION`); peers running the older shape are
-/// gated by ALPN and refuse to interop. There is no separate version
-/// flag because the reply payload is *not* signed.
+/// implicit-versioned by `PROTOCOL_VERSION` (declared in
+/// `common::PROTOCOL_VERSION`); peers running the older shape are gated
+/// by ALPN and refuse to interop. There is no separate version flag
+/// because the reply payload is *not* signed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FetchRecordResp {
     /// Live records the responder holds for the requested IPKs.
     /// Bounded — combined with [`Self::tombstones`] — by
-    /// [`MAX_FETCH_RECORD_BATCH`] per §2.6.
+    /// [`MAX_FETCH_RECORD_BATCH`].
     pub records:    Vec<PresenceRecord>,
     /// Tombstones the responder holds for the requested IPKs. A
-    /// tombstone supersedes any local live record (per §5.3 conflict
-    /// rules applied at store time), so anti-entropy carrying
-    /// tombstones makes deletions converge across replicas. Bounded —
-    /// combined with [`Self::records`] — by [`MAX_FETCH_RECORD_BATCH`]
-    /// per §2.6.
+    /// tombstone supersedes any local live record (conflict rules applied
+    /// at store time), so anti-entropy carrying tombstones makes deletions
+    /// converge across replicas. Bounded — combined with [`Self::records`]
+    /// — by [`MAX_FETCH_RECORD_BATCH`].
     pub tombstones: Vec<TombstoneRecord>,
 }
 
@@ -1108,17 +1090,16 @@ pub struct FetchRecordResp {
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
 //
 // The next three RPC pairs implement the wire-format contract for the
-// sticky-home-relay model defined in `misc/specs/STICKY_HOME_RELAY.md`:
-// the wire types, signing-input helpers, and per-packet `verify` methods.
-// Sender, recipient, and home flow logic read these types and call these
-// `verify` methods without re-implementing them.
+// sticky-home-relay model: the wire types, signing-input helpers, and
+// per-packet `verify` methods. Sender, recipient, and home flow logic read
+// these types and call these `verify` methods without re-implementing them.
 //
 // Skew window: every transcript here is bound to wall-clock time the same
 // way as `DhtHello` (±[`MAX_DHT_HELLO_SKEW_MS`]). Reusing the constant
 // keeps a relay's per-packet skew tolerance identical no matter which
 // signed packet kind we're inspecting.
 
-// --- Forward (sender_relay → home_relay, §5.1 of sticky-home plan) ----
+// --- Forward (sender_relay → home_relay) --------------------------------
 
 /// Domain-separation tag for the sender-relay signature on a [`Forward`]
 /// RPC. Distinct suffix (`-forward-v1`) so a captured `Forward` signature
@@ -1128,8 +1109,7 @@ pub struct FetchRecordResp {
 pub const DHT_FORWARD_SIG_DOMAIN: &[u8] = b"promtuz-dht-forward-v1";
 
 /// Sender-relay → home-relay request: please deliver-or-queue this
-/// dispatch on behalf of the sending relay. Per
-/// `misc/specs/STICKY_HOME_RELAY.md` §5.1.
+/// dispatch on behalf of the sending relay.
 ///
 /// **Two-layer signing model:**
 /// - `dispatch.sig` is the *sender user's* signature over the dispatch
@@ -1153,8 +1133,8 @@ pub struct Forward {
     /// rewriting the payload — preserving the end-to-end signature chain.
     pub dispatch: crate::proto::client_rel::DispatchP,
     /// Issuing relay's `BLAKE3(NodeKey)` identity. The home relay uses
-    /// this for per-peer rate-limit attribution (§6.2 of the plan) and to
-    /// look up the routing-table entry that holds the verifying pubkey.
+    /// this for per-peer rate-limit attribution and to look up the
+    /// routing-table entry that holds the verifying pubkey.
     pub sender_relay_id: crate::quic::id::NodeId,
     /// Sender-relay-local Unix time in milliseconds at the moment of
     /// signing. Bound into the transcript for ±[`MAX_DHT_HELLO_SKEW_MS`]
@@ -1203,7 +1183,7 @@ pub fn forward_signing_input(
 }
 
 /// Outcome a home relay reports back for a [`Forward`] RPC. Mirrors the
-/// shape of [`StoreOutcome`] / [`TombstoneOutcome`] for §2.5 close-reason
+/// shape of [`StoreOutcome`] / [`TombstoneOutcome`] for close-reason
 /// mapping consistency.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ForwardOutcome {
@@ -1223,8 +1203,8 @@ pub enum ForwardOutcome {
     /// Either the embedded `dispatch.sig` (user-layer) or the outer `sig`
     /// (sender-relay-layer) failed verification.
     BadSig,
-    /// Per-peer rate-limit class (`RpcClass::Expensive`, §6.2 of the
-    /// plan) tripped at the home relay. Sender retries after backoff.
+    /// Per-peer rate-limit class tripped at the home relay. Sender retries
+    /// after backoff.
     RateLimited,
 }
 
@@ -1234,7 +1214,7 @@ pub struct ForwardResp {
     pub outcome: ForwardOutcome,
 }
 
-// --- QueueFetch (recipient_relay → home_relay, §5.2 of sticky-home plan)
+// --- QueueFetch (recipient_relay → home_relay) --------------------------
 
 /// Domain-separation tag for the recipient-user signature on a
 /// [`QueueFetch`] RPC. Distinct suffix (`-queue-fetch-v1`) keeps a
@@ -1242,8 +1222,7 @@ pub struct ForwardResp {
 pub const DHT_QUEUE_FETCH_SIG_DOMAIN: &[u8] = b"promtuz-dht-queue-fetch-v1";
 
 /// Recipient-relay → home-relay request: please ship the queued
-/// dispatches you hold for `user_ipk` so I can deliver them. Per
-/// `misc/specs/STICKY_HOME_RELAY.md` §5.2.
+/// dispatches you hold for `user_ipk` so I can deliver them.
 ///
 /// The transcript is signed by the **user's** IPK (not the requesting
 /// relay's identity) so the home relay only ships queued dispatches when
@@ -1319,7 +1298,7 @@ pub struct QueueFetchResp {
     pub exhausted: bool,
 }
 
-// --- QueueFetchAck (recipient_relay → home_relay, §5.2 of sticky-home plan)
+// --- QueueFetchAck (recipient_relay → home_relay) -----------------------
 
 /// Domain-separation tag for the user signature on a [`QueueFetchAck`]
 /// RPC. Distinct suffix (`-queue-fetch-ack-v1`) keeps a captured ack
@@ -1337,7 +1316,6 @@ pub const DHT_QUEUE_FETCH_ACK_SIG_DOMAIN: &[u8] = b"promtuz-dht-queue-fetch-ack-
 
 /// Recipient-relay → home-relay request: I successfully delivered these
 /// dispatch IDs to the user; please delete them from `cf_dht_queue`.
-/// Per `misc/specs/STICKY_HOME_RELAY.md` §5.2.
 ///
 /// **Why the user signs (not the relay)**: a malicious relay that simply
 /// signed its own ack could force every home relay to drop a user's
@@ -1352,8 +1330,8 @@ pub const DHT_QUEUE_FETCH_ACK_SIG_DOMAIN: &[u8] = b"promtuz-dht-queue-fetch-ack-
 /// to OTHER K-closest homes (which it learned via DHT lookup) and force
 /// them to delete the listed dispatch IDs even though those dispatches may
 /// not have been delivered to the user. To close this, the binding mirrors
-/// [`QueueFetch::requester_relay_id`] (§5.1): the requester relay id is
-/// part of the signed transcript, and the home additionally checks
+/// [`QueueFetch::requester_relay_id`]: the requester relay id is part of
+/// the signed transcript, and the home additionally checks
 /// `req.requester_relay_id == authenticated_peer_id` in its handler. A
 /// captured ack can no longer be redirected to a different home outside
 /// the user's chosen drainer.
@@ -1549,10 +1527,10 @@ pub enum QueueFetchAckVerifyError {
 //===:===:===:==:  REQUEST / RESPONSE  :==:===:===:===||
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
 
-/// All inbound DHT request payloads. One variant per RPC in §2.4.
+/// All inbound DHT request payloads.
 ///
 /// The acceptor side dispatches on the variant and replies with the
-/// matching [`DhtResponse`] variant via the same bi-stream (§2.2).
+/// matching [`DhtResponse`] variant via the same bi-stream.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DhtRequest {
     Ping(Ping),
@@ -1563,46 +1541,41 @@ pub enum DhtRequest {
     MerkleSummary(MerkleSummary),
     MerkleDiff(MerkleDiff),
     FetchRecord(FetchRecord),
-    /// Sticky-home (§5.1 of `STICKY_HOME_RELAY.md`):
-    /// sender-relay → home-relay deliver-or-queue. Handled in
-    /// `relay/src/dht/handler.rs`.
+    /// Sticky-home: sender-relay → home-relay deliver-or-queue. Handled
+    /// in `relay/src/dht/handler.rs`.
     Forward(Forward),
-    /// Sticky-home (§5.2): recipient-relay → home-relay drain
-    /// request.
+    /// Sticky-home: recipient-relay → home-relay drain request.
     QueueFetch(QueueFetch),
-    /// Sticky-home (§5.2): recipient-relay → home-relay
-    /// post-delivery GC of dispatch ids.
+    /// Sticky-home: recipient-relay → home-relay post-delivery GC of
+    /// dispatch ids.
     QueueFetchAck(QueueFetchAck),
 
-    /// MLS (§3.4 of `MLS.md`): owner → home-relay full-batch
-    /// KeyPackage publish. Adds new records to the recipient's stash;
-    /// pre-existing records survive the publish (additive semantics
-    /// per §5.6 anti-pinning rotation). Handled in
+    /// MLS: owner → home-relay full-batch KeyPackage publish. Adds new
+    /// records to the recipient's stash; pre-existing records survive the
+    /// publish (additive / anti-pinning semantics). Handled in
     /// `relay/src/dht/mls_kp.rs`.
     KeyPackagePublish(crate::proto::mls_wire::KeyPackagePublishReq),
-    /// MLS (§3.5 of `MLS.md`): sender-relay → home-relay
-    /// pop-one KeyPackage from the target's stash. Strict one-shot
-    /// per fetch (`KP_PER_FETCH = 1`).
+    /// MLS: sender-relay → home-relay pop-one KeyPackage from the
+    /// target's stash. Strict one-shot per fetch (`KP_PER_FETCH = 1`).
     KeyPackageFetch(crate::proto::mls_wire::KeyPackageFetchReq),
-    /// MLS (§3.6 of `MLS.md`): owner → home-relay incremental
-    /// stash top-up. Distinct from `KeyPackagePublish` only via
-    /// signing-input domain (so a captured Refill sig cannot be
-    /// replayed as a Publish — the two have different replacement
-    /// semantics in the wider design, although both append at the
-    /// relay side per §5.6).
+    /// MLS: owner → home-relay incremental stash top-up. Distinct from
+    /// `KeyPackagePublish` only via signing-input domain (so a captured
+    /// Refill sig cannot be replayed as a Publish — the two have different
+    /// replacement semantics in the wider design, although both append at
+    /// the relay side).
     KeyPackageRefill(crate::proto::mls_wire::KeyPackageRefillReq),
 
-    /// MLS (Component B): sender-relay → home-relay
-    /// deliver-or-queue for a Welcome envelope. The home stores it in
-    /// `cf_dht_welcome` until the recipient drains via [`Self::WelcomeFetch`].
+    /// MLS: sender-relay → home-relay deliver-or-queue for a Welcome
+    /// envelope. The home stores it in `cf_dht_welcome` until the
+    /// recipient drains via [`Self::WelcomeFetch`].
     WelcomePublish(crate::proto::mls_wire::WelcomePublishReq),
-    /// MLS: recipient-relay → home-relay drain request for
-    /// the recipient's queued welcomes. Authentication mirrors
-    /// `QueueFetch` (user-sig + `requester_relay_id` binding).
+    /// MLS: recipient-relay → home-relay drain request for the
+    /// recipient's queued welcomes. Authentication mirrors `QueueFetch`
+    /// (user-sig + `requester_relay_id` binding).
     WelcomeFetch(crate::proto::mls_wire::WelcomeFetchReq),
-    /// MLS: recipient-relay → home-relay deletion of
-    /// processed welcomes. Domain-separated from `WelcomeFetch` so a
-    /// captured fetch sig can't be replayed as an ack.
+    /// MLS: recipient-relay → home-relay deletion of processed welcomes.
+    /// Domain-separated from `WelcomeFetch` so a captured fetch sig
+    /// can't be replayed as an ack.
     WelcomeAck(crate::proto::mls_wire::WelcomeAckReq),
 }
 
@@ -1649,11 +1622,10 @@ pub enum DhtResponse {
     WelcomeAck(crate::proto::mls_wire::WelcomeAckResp),
 }
 
-/// Outer DHT framing wrapper. Per §2.1, the wire grammar is open to
-/// non-RPC traffic in the future (gossip, capability bits) — keeping the
-/// `Request` / `Response` discriminator at the *outer* level lets new
-/// non-RPC variants slot in without breaking the existing per-variant
-/// payload codecs.
+/// Outer DHT framing wrapper. The wire grammar is open to non-RPC traffic
+/// in the future (gossip, capability bits) — keeping the `Request` /
+/// `Response` discriminator at the *outer* level lets new non-RPC variants
+/// slot in without breaking the existing per-variant payload codecs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DhtPacket {
     Request(DhtRequest),
@@ -1844,7 +1816,7 @@ mod tests {
         let r_low = build_record(&user, &relay, /* gen */ 1, now, 600_000);
         let r_high = build_record(&user, &relay, /* gen */ 2, now, 600_000);
 
-        // Higher generation wins per §5.3.
+        // Higher generation wins.
         assert_eq!(r_high.compare(&r_low), Ordering::Greater);
         assert_eq!(r_low.compare(&r_high), Ordering::Less);
     }
@@ -2472,7 +2444,7 @@ mod tests {
         let off = off + 32;
         // requester_relay_id binds the transcript to the requesting
         // relay so a captured ack can't be redirected to a different
-        // home (mirrors `queue_fetch_signing_input` §5.1).
+        // home (mirrors `queue_fetch_signing_input` layout).
         assert_eq!(&buf[off..off + 32], node_id.as_bytes());
         let off = off + 32;
         assert_eq!(&buf[off..off + 4], &(ids.len() as u32).to_be_bytes());

@@ -1,4 +1,4 @@
-//! MLS (RFC 9420) layer — see `misc/specs/MLS.md`.
+//! MLS (RFC 9420) layer.
 //!
 //! Cipher suite: `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`
 //! (suite ID `0x0003`).
@@ -53,7 +53,7 @@ pub use welcome::{make_welcome_envelope, process_welcome};
 
 /// Per-`group_id` ceiling on cumulative `mls_storage.value` bytes,
 /// before a write is rejected with
-/// [`PromtuzMlsStorageError::BudgetExceeded`]. Spec §0, §9.3.
+/// [`PromtuzMlsStorageError::BudgetExceeded`].
 ///
 /// The cap protects against a malformed or runaway group (e.g. an
 /// Add chain crossing `MAX_GROUP_SIZE = 256`, which is capped
@@ -61,6 +61,5 @@ pub use welcome::{make_welcome_envelope, process_welcome};
 pub const MLS_GROUP_STATE_BUDGET_BYTES: u64 = 1024 * 1024;
 
 /// Per-group cap on application messages held for future epochs.
-/// Spec §0 (`MAX_EPOCH_AHEAD_BUFFER`), §7.3.
 #[allow(dead_code)] // messaging.rs caller.
 pub const MAX_EPOCH_AHEAD_BUFFER: usize = 512;

@@ -29,10 +29,9 @@
 //!    `MlsMessageOut`.
 //! 2. The bytes are wrapped into [`MlsApplicationEnvelopeP`] with an
 //!    outer [`envelope_signing_input`] sig under the sender's IPK
-//!    (the §13.9 hardening pins `to_ipk` so a malicious relay can't
-//!    redirect).
+//!    (outer sig binds `to_ipk` so a malicious relay can't redirect).
 //! 3. The envelope ships in `DispatchP::payload` over the existing
-//!    sticky-home queue (`misc/specs/STICKY_HOME_RELAY.md`).
+//!    sticky-home queue.
 //!
 //! # Receive path
 //!
@@ -62,8 +61,6 @@
 //!   envelopes; called from `quic/server.rs::handle_deliver`.
 //! - [`poll_welcomes`] — drain pending welcomes on reconnect.
 //!
-//! design-doc: `misc/specs/MLS.md` §3 (wire), §4 (group lifecycle),
-//! §6 (queue integration), §11 (migration).
 
 use anyhow::Result;
 use anyhow::anyhow;
@@ -142,8 +139,8 @@ use crate::state::RELAY;
 ///
 /// Two simultaneous first-sends to the same contact would otherwise
 /// each (a) fetch + burn a recipient KP, (b) create a duplicate
-/// orphan group, and (c) bypass the §5.6 anti-pinning quota by
-/// double-counting against the recipient's stash. The guard is
+/// orphan group, and (c) double-count against the recipient's KP stash.
+/// The guard is
 /// keyed on the recipient's IPK; the outer `parking_lot::Mutex`
 /// gates the keyed-map insert (no `await` held), and the inner
 /// `tokio::sync::Mutex` is what `lazy_create_group` actually
@@ -168,7 +165,7 @@ fn group_create_lock(recipient_ipk: &[u8; 32]) -> Arc<TokMutex<()>> {
 #[cfg(not(test))]
 const _: () = ();
 
-/// Mint a fresh 32-byte `group_id` per spec §4.1:
+/// Mint a fresh 32-byte `group_id`:
 /// `BLAKE3("promtuz-mls-v1 group-id" || creator_ipk || created_at_be_u64 || random_32B)`.
 ///
 /// Random suffix is from `OsRng` (via the same dalek-re-exported
@@ -217,8 +214,8 @@ fn decode_keypackage_bytes(kp_bytes: &[u8]) -> Result<KeyPackage, MlsGroupError>
 }
 
 /// Build a credential-with-key bundle for the founder's leaf, using a
-/// **fresh** Ed25519 leaf signing key (per spec §5.2: leaf signing key
-/// is distinct from the IPK so a leaf compromise can't recover IPK_priv).
+/// **fresh** Ed25519 leaf signing key (distinct from the IPK so a leaf
+/// compromise can't recover IPK_priv).
 ///
 /// Returns `(SignatureKeyPair, CredentialWithKey)`. The caller persists
 /// the signing keypair in openmls's storage via `.store(provider.storage())`
@@ -309,11 +306,10 @@ pub struct MlsContext<'a, C: DhtClient> {
 /// 6. Wrap welcome in `WelcomeEnvelopeP`; publish via `DhtClient`.
 /// 7. Merge our pending commit; persist the group_id on the contact.
 ///
-/// Exposed as `pub` so the e2e integration harness in
-/// `relay/tests/e2e_phase5b.rs` can drive the production lazy-create
-/// flow without going through `send_message_inner` (which depends on
-/// global `Identity::get()` / `RELAY` / `Contact` state). Production
-/// callers continue to invoke it via `send_message_inner`; the
+/// Exposed as `pub` so the e2e integration harness can drive the
+/// production lazy-create flow without going through `send_message_inner`
+/// (which depends on global `Identity::get()` / `RELAY` / `Contact` state).
+/// Production callers continue to invoke it via `send_message_inner`; the
 /// visibility has no behavioural impact.
 pub async fn lazy_create_group<C: DhtClient>(
     ctx: &MlsContext<'_, C>, our_ipk: &[u8; 32], ipk_signer: &SigningKey, to: &[u8; 32],
@@ -438,8 +434,7 @@ pub async fn lazy_create_group<C: DhtClient>(
 }
 
 /// Encrypt `plaintext` for `group`, then wrap into a
-/// [`MlsApplicationEnvelopeP`] signed under the sender's IPK with the
-/// §13.9 hardening (binds `to_ipk`).
+/// [`MlsApplicationEnvelopeP`] signed under the sender's IPK (binds `to_ipk`).
 ///
 /// Returns the postcard-encoded envelope bytes ready to drop into
 /// `DispatchP::payload`. Caller signs the outer DispatchP separately.
@@ -773,12 +768,11 @@ fn process_welcome_inbound<C: DhtClient>(
     }
 
     // Defensive check that the envelope is addressed to *us*. The
-    // outer `sender_sig` transcript already binds `recipient_ipk` per
-    // §13.9, so a malicious sender cannot
-    // address-spoof another recipient. But a delivery-layer bug
-    // could deliver an envelope intended for a different device to
-    // this one; surface that as a typed error instead of silently
-    // activating a group we don't belong to.
+    // outer `sender_sig` transcript already binds `recipient_ipk`,
+    // so a malicious sender cannot address-spoof another recipient.
+    // But a delivery-layer bug could deliver an envelope intended for
+    // a different device to this one; surface that as a typed error
+    // instead of silently activating a group we don't belong to.
     let our_ipk = Identity::get()
         .ok_or_else(|| anyhow!("identity not found"))?
         .ipk();
@@ -1329,8 +1323,8 @@ mod tests {
             other => panic!("expected Application, got {other:?}"),
         };
 
-        // Verify outer sig under alice's IPK with the §13.9-bound
-        // transcript (`to_ipk = bob.ipk`).
+        // Verify outer sig under alice's IPK (`to_ipk = bob.ipk` bound
+        // in the transcript).
         let transcript = envelope_signing_input(
             PROTOCOL_VERSION,
             &bob.ipk,
@@ -1361,8 +1355,7 @@ mod tests {
         }
     }
 
-    /// Epoch-ahead message gets buffered, then drained on commit-merge
-    /// — the in-process equivalent of the §6.3 replay loop.
+    /// Epoch-ahead message gets buffered, then drained on commit-merge.
     #[tokio::test(flavor = "current_thread")]
     async fn epoch_ahead_application_buffers_then_drains_after_commit_merge() {
         let alice = Node::new(0x77);

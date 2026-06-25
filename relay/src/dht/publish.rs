@@ -1,7 +1,7 @@
 //! Publish path: build a [`PresenceRecord`], find the k closest owners,
-//! issue parallel `Store` RPCs, drive the §5.2 outcome state machine.
+//! issue parallel `Store` RPCs, tally the outcome.
 //!
-//! Per design-doc §5.2, the published-by relay:
+//! The published-by relay:
 //!
 //! 1. Runs an iterative `FindNode(target = user_ipk)` walk to obtain the
 //!    K closest peers (`super::lookup::lookup_node`).
@@ -14,20 +14,16 @@
 //!
 //! ## Why `K_MIN < K`
 //!
-//! The design doc (§5.2 last bullet) calls for "majority(K)" as the
-//! success threshold. With K=3 that's 2 — the same number §4.4 mandates
-//! for cross-checked reads. Lower thresholds let publish make progress
-//! against a partially-degraded network without sacrificing the
-//! cross-check property on the reading side.
+//! The success threshold is "majority(K)". With K=3 that's 2 — the same
+//! number mandated for cross-checked reads. Lower thresholds let publish
+//! make progress against a partially-degraded network without sacrificing
+//! the cross-check property on the reading side.
 //!
 //! ## Lock contract
 //!
 //! `parking_lot` guards are never held across `await`. The lookup-walk
 //! is awaited *before* we take any guard; the publish parallelism is
 //! driven via `tokio::task::JoinSet` which doesn't require lock holding.
-//!
-//! design-doc: §5.2 (publish path), §5.3 (conflict resolution rules
-//! re-applied locally if we end up storing ourselves).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,11 +50,9 @@ use super::lookup::lookup_node;
 use super::store::store_record;
 
 /// Threshold of `Stored` outcomes required for a publish to be
-/// considered successful. With `K=3` we accept 2-of-3 — matches §4.4's
+/// considered successful. With `K=3` we accept 2-of-3 — matches the
 /// minimum quorum for the read side, so the two halves of the protocol
 /// agree on what counts as "the network has accepted this record".
-///
-/// design-doc: §5.2 ("if successes < majority(k): escalate").
 pub const K_MIN: usize = 2;
 
 // ---------------------------------------------------------------------------
@@ -107,7 +101,7 @@ pub enum PublishError {
     LookupFailed(#[source] LookupError),
 
     /// We reached K candidates but fewer than `K_MIN` accepted the
-    /// record. Caller may schedule a fast retry (§5.2 last bullet).
+    /// record. Caller may schedule a fast retry.
     #[error("publish: insufficient replicas (wanted {wanted}, got {got})")]
     InsufficientReplicas {
         wanted: usize,
@@ -119,11 +113,11 @@ pub enum PublishError {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Run the §5.2 publish workflow for a freshly-built `PresenceRecord`.
+/// Run the publish workflow for a freshly-built `PresenceRecord`.
 ///
 /// Caller is expected to have:
 /// - obtained a fresh `user_sig` from the user inside the authenticated
-///   handshake (§1.1.1),
+///   handshake,
 /// - constructed the record with `not_before = now`,
 ///   `not_after = now + PRESENCE_TTL_MS`,
 /// - signed `relay_sig` with [`Dht::signing_key`].
@@ -131,8 +125,8 @@ pub(crate) async fn publish(
     dht: Arc<Dht>, record: PresenceRecord, now_ms: u64,
 ) -> Result<PublishOutcome, PublishError> {
     // 1. Find the K closest peers to the record's user_ipk. We use
-    //    `lookup_node` because §5.2 explicitly calls out FIND_NODE
-    //    (not FIND_VALUE) — we want destinations, not records.
+    //    `lookup_node` (FIND_NODE, not FIND_VALUE) — we want
+    //    destinations, not records.
     //
     //    `lookup_node` returns peer descriptors only (it excludes self
     //    from its iteration); the "is self in the top-K?" decision is
@@ -173,9 +167,7 @@ pub(crate) async fn publish(
 
     // Remote stores in parallel against the descriptors we got. If
     // self_should_store and we have K descriptors, this still issues K
-    // RPCs — that's K+1 total replicas. The §5.2 doc accepts this:
-    // "[the publisher] also stores the record in its own dht_presence
-    // CF if it is itself in the k closest". Better over-replicated than
+    // RPCs — that's K+1 total replicas. Better over-replicated than
     // under.
     let results = remote_store_parallel(&dht, &descriptors, &record).await;
     for r in results {
@@ -201,8 +193,7 @@ pub(crate) async fn publish(
 
 /// Issue `Store` RPCs against every descriptor in `peers` in parallel,
 /// bounded by `LOOKUP_RPC_TIMEOUT_MS` total wall-clock. Each RPC opens
-/// its own bi-stream (per §2.2), so no peer can head-of-line-block any
-/// other.
+/// its own bi-stream so no peer can head-of-line-block any other.
 async fn remote_store_parallel(
     dht: &Arc<Dht>, peers: &[NodeDescriptor], record: &PresenceRecord,
 ) -> Vec<ReplicaResult> {

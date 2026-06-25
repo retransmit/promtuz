@@ -50,12 +50,12 @@ async fn main() -> Result<()> {
     let resolver_handle = resolver_link.client_handle();
     let resolver_attach_handle = resolver_link.attach();
 
-    // DHT bootstrap (design-doc §3.5) — feature-gated on
-    // `cfg.dht.enabled` (§11.8 default false). Spawned as a detached
-    // task so a slow/unavailable resolver does not delay QUIC accept.
-    // Failures are logged and swallowed; the relay keeps serving
-    // client traffic with an empty routing table until a future
-    // bootstrap attempt succeeds (the scheduler retries periodically).
+    // DHT bootstrap — feature-gated on `cfg.dht.enabled`. Spawned as
+    // a detached task so a slow/unavailable resolver does not delay
+    // QUIC accept. Failures are logged and swallowed; the relay keeps
+    // serving client traffic with an empty routing table until a
+    // future bootstrap attempt succeeds (the scheduler retries
+    // periodically).
     if let Some(dht) = relay.dht.clone()
         && dht.cfg.enabled {
             // Stash the resolver handle on `Dht` so the scheduler's

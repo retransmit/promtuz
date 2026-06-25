@@ -2,9 +2,9 @@
 //!
 //! Centralises the small primitives that are otherwise re-implemented
 //! across `mls_kp` / `mls_welcome` / future stash-flavoured handlers.
-//! All of these compose into the unified 32-byte `NodeId` keyspace
-//! (`misc/specs/DHT.md` §0) so the DHT routing layer doesn't need
-//! to know which sub-namespace it's serving.
+//! All of these compose into the unified 32-byte `NodeId` keyspace so
+//! the DHT routing layer doesn't need to know which sub-namespace it's
+//! serving.
 
 use common::quic::id::NodeId;
 

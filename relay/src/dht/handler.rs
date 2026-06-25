@@ -33,9 +33,9 @@
 //!
 //! ## Per-stream dispatch
 //!
-//! Per design-doc §2.2, every DHT RPC is one bi-stream: open_bi → write
-//! request → finish() send → read response → done. The acceptor side
-//! mirrors that: accept_bi → read request → write response → finish.
+//! Every DHT RPC is one bi-stream: open_bi → write request → finish()
+//! send → read response → done. The acceptor side mirrors that:
+//! accept_bi → read request → write response → finish.
 //!
 //! ## Concurrency cap
 //!
@@ -64,10 +64,6 @@
 //! Tripping the limiter closes the whole connection with
 //! `CloseReason::DhtFlood` (and bumps `metrics.rate_limit_rejections`).
 //!
-//! design-doc: §2.3 (ALPN reuse: `peer/1` = relay-to-relay), §2.4 (RPC
-//! catalogue), §2.5 (close-reason codes), §3.4 (peer learning from
-//! inbound RPCs), §8.1-8.2 (Sybil/eclipse rationale for identity
-//! binding).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -108,10 +104,7 @@ use super::tls_extract;
 /// 16 matches the existing per-client limiter at
 /// `relay/src/quic/handler/client/mod.rs:77`. Past this, additional
 /// streams are dropped at `try_acquire_owned` rather than queued — the
-/// peer is misbehaving (DHT RPCs are bounded by §2.6 length limits and
-/// shouldn't pile up).
-///
-/// design-doc: §8.7 (DoS / floods).
+/// peer is misbehaving (DHT RPCs have bounded sizes and shouldn't pile up).
 const MAX_CONCURRENT_STREAMS_PER_PEER: usize = 16;
 
 /// Maximum time the receiver waits for the dialer's first uni-stream
@@ -156,8 +149,6 @@ const HELLO_RECV_TIMEOUT: Duration = Duration::from_secs(5);
 ///    the routing-table entry only if it still points at this exact
 ///    `Connection` — same race-guard as `remove_client_if_same` at
 ///    `relay/src/quic/handler/client/mod.rs:43-52`.
-///
-/// design-doc: §2.3, §2.5, §3.4, §7.1, §8.7 (per-peer rate limiting).
 ///
 /// Bumped from `pub(crate)` to `pub` so the e2e integration harness in
 /// `libcore/tests/e2e_phase5b.rs` can consume it directly (the
@@ -336,8 +327,7 @@ impl AuthenticatedPeer {
 /// Read the dialer's first uni-stream, decode as [`DhtHello`], verify,
 /// and on success return the authenticated `(node_id, pubkey)` pair.
 ///
-/// Failure modes are exhaustively mapped to `CloseReason::Dht*`
-/// variants per design-doc §2.5:
+/// Failure modes are exhaustively mapped to `CloseReason::Dht*` variants:
 ///
 /// | Cause | CloseReason |
 /// |---|---|
@@ -566,11 +556,10 @@ pub async fn handle_dht_request(
             let result = if let Some(record) = store::lookup_record(dht, &user_ipk, now_ms()) {
                 WireFindValueOutcome::Found(record)
             } else {
-                // No record. Per §4.2, we return `Closer` only if we are
-                // *not* in the k closest; otherwise we return
-                // `NotPresent` so the iterator can terminate. The check
-                // is the same one `store_record` uses to decide
-                // ownership.
+                // No record. Return `Closer` only if we are *not* in the
+                // k closest; otherwise return `NotPresent` so the
+                // iterator can terminate. Same check `store_record` uses
+                // to decide ownership.
                 let target_id = NodeId::from_bytes(user_ipk);
                 if self_in_top_k(dht, &target_id) {
                     WireFindValueOutcome::NotPresent

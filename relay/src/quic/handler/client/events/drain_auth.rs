@@ -2,16 +2,15 @@
 //!
 //! When a user reconnects to a relay R_r that is *not* in the user's
 //! K-closest set, R_r must impersonate the user when issuing
-//! `QueueFetch` to the K homes per `STICKY_HOME_RELAY.md` §4.3 step 3.
-//! The user signs a transcript binding `(self_ipk, current_relay_id,
-//! timestamp)` once on connect; R_r buffers `(timestamp, sig)` and
-//! reuses the same pair across all K home dials.
+//! `QueueFetch` to the K homes. The user signs a transcript binding
+//! `(self_ipk, current_relay_id, timestamp)` once on connect; R_r
+//! buffers `(timestamp, sig)` and reuses the same pair across all K
+//! home dials.
 //!
 //! The transcript domain is `DHT_QUEUE_FETCH_SIG_DOMAIN`. It does not
 //! bind the home being addressed, so a single signature is
 //! valid for every home in the recipient's K-closest set — libcore
-//! signs once per reconnect, not once per home (the §4.3 design
-//! discussion settled on this).
+//! signs once per reconnect, not once per home.
 //!
 //! ## Verification flow
 //!

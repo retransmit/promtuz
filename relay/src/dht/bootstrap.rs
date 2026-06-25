@@ -1,13 +1,12 @@
 //! Cold-start bootstrap: ask the resolver for seed peers, seed the
 //! routing table, then run a self-`FindNode` for forced convergence.
 //!
-//! Three steps (design-doc §3.5): **A** query the resolver's
-//! `GetBootstrapPeers`; **B** insert the returned descriptors into the
-//! routing table; **C** run an iterative `FindNode` on our own id so every
-//! peer the walk touches learns to route back to us (the resolver's seed
-//! set only tells *us* about *them*, not the reverse). The scheduler in
-//! `dht/sync` re-runs the whole sequence on a backoff while the routing
-//! table is sparse.
+//! Three steps: **A** query the resolver's `GetBootstrapPeers`; **B**
+//! insert the returned descriptors into the routing table; **C** run an
+//! iterative `FindNode` on our own id so every peer the walk touches learns
+//! to route back to us (the resolver's seed set only tells *us* about
+//! *them*, not the reverse). The scheduler in `dht/sync` re-runs the whole
+//! sequence on a backoff while the routing table is sparse.
 //!
 //! ## Failure semantics
 //!
@@ -15,7 +14,7 @@
 //! traffic even with an empty routing table — DHT RPCs simply have no
 //! peers to forward to until the next bootstrap attempt succeeds. The
 //! caller is expected to log [`BootstrapError`] and either retry on a
-//! schedule (phase 1g) or accept the empty-routing-table state.
+//! schedule or accept the empty-routing-table state.
 //!
 //! ## Concurrency
 //!
@@ -24,9 +23,6 @@
 //! `tokio::spawn` task. `parking_lot` guards on `dht.routing` are
 //! never held across an `await`: we batch the inserts into a single
 //! write-guard scope after the resolver round-trip has fully completed.
-//!
-//! design-doc: §3.5 (fresh-relay bootstrap state machine), §9.4
-//! (resolver `GetBootstrapPeers` RPC).
 
 use std::sync::Arc;
 
@@ -40,8 +36,8 @@ use super::Dht;
 use super::routing::InsertOutcome;
 use crate::quic::resolver_link::ResolverLinkHandle;
 
-/// Phases of the bootstrap state machine. Mirrors §3.5 verbatim so the
-/// implementation can be a `match`-driven step machine.
+/// Phases of the bootstrap state machine. The implementation is a
+/// `match`-driven step machine.
 ///
 /// The variant is threaded through return values rather than stored on
 /// [`Dht`]; the scheduler that re-runs bootstrap reads the outcome, not a
@@ -65,12 +61,10 @@ pub(crate) enum BootstrapState {
     Ready,
 }
 
-/// Counts asked of the resolver in the §3.5 phase-A query. Pulled out
-/// as constants so a follow-up can adjust them without code changes:
-/// the design doc suggests "6 XOR-near + 6 RTT-low" (line 412); we use
-/// 8 + 4 to weight the routing-table-shape signal slightly above the
-/// liveness-recency signal, which the resolver only tracks as a proxy
-/// (see design-doc §11.3).
+/// Counts asked of the resolver in the phase-A query. Pulled out as
+/// constants so a follow-up can adjust them without code changes. We use
+/// 8 XOR-near + 4 RTT-near to weight the routing-table-shape signal
+/// slightly above the liveness-recency signal.
 const BOOTSTRAP_COUNT_XOR_NEAR: u8 = 8;
 const BOOTSTRAP_COUNT_RTT_NEAR: u8 = 4;
 
@@ -111,9 +105,9 @@ pub enum BootstrapError {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Run the §3.5 bootstrap state machine end-to-end: phase A (resolver
-/// query), phase B (routing-table insert), and phase C (self-FindNode
-/// convergence). The scheduler in `dht/sync` adds the periodic retry loop.
+/// Run the bootstrap state machine end-to-end: phase A (resolver query),
+/// phase B (routing-table insert), and phase C (self-FindNode convergence).
+/// The scheduler in `dht/sync` adds the periodic retry loop.
 ///
 /// This function never panics. Errors are returned for the caller to
 /// log; the relay is expected to keep running either way.
@@ -124,7 +118,7 @@ pub enum BootstrapError {
 pub async fn bootstrap(
     dht: Arc<Dht>, resolver: ResolverLinkHandle,
 ) -> Result<BootstrapState, BootstrapError> {
-    // ---- Phase A: resolver query (§3.5 [Cold] -> [Warming]) ---------
+    // ---- Phase A: resolver query ([Cold] -> [Warming]) ---------------
     info!(
         "DHT bootstrap: querying resolver for {} XOR-near + {} RTT-near peers",
         BOOTSTRAP_COUNT_XOR_NEAR, BOOTSTRAP_COUNT_RTT_NEAR
@@ -140,12 +134,11 @@ pub async fn bootstrap(
         // Brand-new network with no peers to seed from. Not fatal — the
         // relay simply can't forward DHT lookups until something else
         // populates the routing table (e.g. an incoming peer learns of
-        // us via a separate path and we record them in §3.4 paragraph
-        // "From received RPCs").
+        // us via a separate path).
         return Err(BootstrapError::EmptyRegistry);
     }
 
-    // ---- Phase B: insert into routing table (§3.5 [Warming]) --------
+    // ---- Phase B: insert into routing table ([Warming]) --------------
     //
     // De-duplicate by `id` across the two lists *before* taking the
     // routing-table write lock — the resolver intentionally doesn't
@@ -189,24 +182,24 @@ pub async fn bootstrap(
         rtt_near.len()
     );
 
-    // ---- Phase C: self-FindNode lookup (§3.5 [Walking]) -------------
+    // ---- Phase C: self-FindNode lookup ([Walking]) -------------------
     // Force convergence with an iterative `FindNode` on our own id. Each
     // peer the walk dials receives our signed `DhtHello` and records us in
     // its routing table — this is the *only* way the rest of the network
     // learns to reach us, since the resolver's near-set seeds our table
     // but not theirs. It also pulls in any peers the resolver didn't vend.
     //
-    // Best-effort: per §3.5 "Ready is non-strict", a relay may answer RPCs
-    // with imperfect routing (α=3 hedging compensates), so a failed walk
-    // — e.g. the very first cold call before the dialer endpoint is
-    // attached — logs and proceeds. The scheduler re-runs it on a backoff,
-    // and cached peer connections make the repeats cheap.
+    // Best-effort: a relay may answer RPCs with imperfect routing (α=3
+    // hedging compensates), so a failed walk — e.g. the very first cold
+    // call before the dialer endpoint is attached — logs and proceeds. The
+    // scheduler re-runs it on a backoff, and cached peer connections make
+    // the repeats cheap.
     match crate::dht::lookup::lookup_node(dht.clone(), dht.node_id).await {
         Ok(peers) => info!("DHT bootstrap: self-FindNode converged on {} peer(s)", peers.len()),
         Err(e) => warn!("DHT bootstrap: self-FindNode walk failed: {e}; proceeding with seeded routing"),
     }
 
-    // ---- Phase D: mark ready (§3.5 [Ready]) -------------------------
+    // ---- Phase D: mark ready ([Ready]) -------------------------------
     info!("DHT bootstrap: complete (resolver seed + self-FindNode convergence)");
     Ok(BootstrapState::Ready)
 }
@@ -238,12 +231,10 @@ fn classify_handle_error(err: anyhow::Error) -> BootstrapError {
 /// Convert the resolver's [`RelayDescriptor`] into a
 /// [`NodeDescriptor`] suitable for [`super::routing::RoutingTable::insert`].
 ///
-/// The two types carry the same information but live in different
-/// proto modules — `RelayDescriptor` is the resolver-facing shape (used
-/// in `client_res.rs`), `NodeDescriptor` is the relay-to-relay DHT
-/// shape (used in `dht_p2p.rs`). The fields are point-by-point
-/// equivalent thanks to the §9.6 NodeId widening + the new
-/// `RelayDescriptor::pubkey` field.
+/// The two types carry the same information but live in different proto
+/// modules — `RelayDescriptor` is the resolver-facing shape (used in
+/// `client_res.rs`), `NodeDescriptor` is the relay-to-relay DHT shape
+/// (used in `dht_p2p.rs`). The fields are point-by-point equivalent.
 fn node_descriptor_from(rd: &RelayDescriptor) -> NodeDescriptor {
     NodeDescriptor { id: rd.id, addr: rd.addr, pubkey: rd.pubkey }
 }

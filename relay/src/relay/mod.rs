@@ -77,10 +77,9 @@ pub struct Relay {
 
     pub rocks: Arc<RocksDB>,
 
-    /// Shared DHT runtime state. `None` when `cfg.dht.enabled = false`
-    /// (the default per §11.8); every code path that would touch the
-    /// DHT checks the option first and falls through to the pre-DHT
-    /// behaviour.
+    /// Shared DHT runtime state. `None` when `cfg.dht.enabled = false`;
+    /// every code path that would touch the DHT checks the option first
+    /// and falls through to the pre-DHT behaviour.
     pub dht: Option<Arc<Dht>>,
 
     /// Connected + authenticated clients, keyed by IPK.
@@ -145,7 +144,7 @@ impl Relay {
 
         // Single shared `Arc<DB>` so the DHT replica and the message
         // queue point at the same on-disk store but live in separate
-        // column families (§1.2).
+        // column families.
         let rocks = Arc::new(graceful!(rocksdb(), "failed to setup rocksdb"));
         // `clients` is `Arc<RwLock<...>>` (not a bare `RwLock`) so the
         // inner map can be cloned-by-Arc into `Dht.clients` for the
@@ -154,7 +153,7 @@ impl Relay {
 
         // DHT construction is gated on `cfg.dht.enabled`. When disabled,
         // the field stays `None` and every consumer falls through to
-        // the legacy code path (§10, §11.8 default).
+        // the legacy code path.
         let dht = if cfg.dht.enabled {
             let node_id = key.id();
             match Dht::new(node_id, keys.signing.clone(), cfg.dht.clone(), rocks.clone()) {

@@ -2,11 +2,10 @@
 //!
 //! When a user reconnects to a relay R_r that is **not** in the user's
 //! K-closest set by XOR distance, R_r cannot serve the queue locally
-//! — the homes hold the queued offline messages. Per
-//! `misc/specs/STICKY_HOME_RELAY.md` §4.3 step 3, R_r dials the K
-//! homes over `peer/1`, issues `QueueFetch` against each, pages
-//! through the response stream, and aggregates the dispatches before
-//! handing them to the regular client-drain protocol in
+//! — the homes hold the queued offline messages. R_r dials the K homes
+//! over `peer/1`, issues `QueueFetch` against each, pages through the
+//! response stream, and aggregates the dispatches before handing them to
+//! the regular client-drain protocol in
 //! `quic/handler/client/events/drain.rs`.
 //!
 //! This module is the sister to [`super::forward::forward_to_homes`]
@@ -36,10 +35,6 @@
 //! `parking_lot::RwLock<RoutingTable>` is read once to compute the
 //! K-closest descriptors; we clone descriptors out of the guard
 //! before any `await` (project-wide rule, cf. `forward.rs:59`).
-//!
-//! design-doc: `misc/specs/STICKY_HOME_RELAY.md` §4.3 (recipient-side
-//! flow), §6.1 (`cf_dht_queue` shape — but we only *consume* it
-//! through the wire `QueueFetch` against each home).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -100,8 +95,8 @@ pub(crate) enum QueueDrainError {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Run the §4.3 step-3 recipient-side fan-out for a `user_ipk` whose
-/// K-closest set does **not** contain `self_relay_id`.
+/// Run the recipient-side fan-out for a `user_ipk` whose K-closest set
+/// does **not** contain `self_relay_id`.
 ///
 /// **Behaviour**:
 ///
@@ -173,7 +168,6 @@ pub(crate) async fn fetch_remote_queues(
 /// is the home's job, the requesting relay just ships the union and
 /// lets each home GC what it owns.
 ///
-/// design-doc: `STICKY_HOME_RELAY.md` §5.2 (`QueueFetchAck` shape).
 pub(crate) async fn fetch_remote_queues_with_homes(
     dht: Arc<Dht>, user_ipk: &[u8; 32], drain_auth: &DrainAuth,
     self_relay_id: NodeId,
@@ -411,7 +405,6 @@ async fn remote_fetch_one(
 /// 2. `QueueFetch::verify(req, now_ms)` — user_sig + skew.
 /// 3. `self_is_in_k_closest_qd` — defensive K-set check.
 ///
-/// design-doc: `STICKY_HOME_RELAY.md` §5.2 (`QueueFetch` shape).
 pub(crate) async fn handle_queue_fetch_rpc(
     dht: &Arc<Dht>, req: QueueFetch, authenticated_peer_id: NodeId, now_ms: u64,
 ) -> QueueFetchResp {
@@ -485,7 +478,6 @@ pub(crate) async fn handle_queue_fetch_rpc(
 /// "one request, one response", so the soft reject is the only path
 /// available.
 ///
-/// design-doc: `STICKY_HOME_RELAY.md` §5.2 (`QueueFetchAck` shape).
 pub(crate) async fn handle_queue_fetch_ack_rpc(
     dht: &Arc<Dht>, req: QueueFetchAck, authenticated_peer_id: NodeId, now_ms: u64,
 ) -> QueueFetchAckResp {
@@ -743,8 +735,8 @@ mod tests {
     }
 
     /// Pure-function test for the `Vec<Vec<_>>` → dedupe-by-id reduce
-    /// step. Covers the §4.3 cross-home dedupe contract: two homes
-    /// returning the same dispatch produce one entry in the output.
+    /// step. Two homes returning the same dispatch must produce one entry
+    /// in the output.
     #[test]
     fn fetch_remote_queues_dedupe_collapses_replicated_messages() {
         // Synthesise the post-fan-out shape directly. Each home's

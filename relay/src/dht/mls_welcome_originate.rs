@@ -1,4 +1,4 @@
-//! Tier-2 OUTBOUND fan-out for Welcome publish / fetch / ack (§3.9).
+//! Tier-2 OUTBOUND fan-out for Welcome publish / fetch / ack.
 //! The relay-side analogue of `forward.rs::forward_to_homes`,
 //! specialised to the MLS Welcome queue RPCs.
 //!

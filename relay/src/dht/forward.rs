@@ -1,12 +1,10 @@
 //! Sender-side K-closest dispatch fan-out (sticky-home).
 //!
 //! When a relay receives a `Dispatch` from a connected client and the
-//! recipient is **not** online locally, the spec
-//! (`misc/specs/STICKY_HOME_RELAY.md` §4.2) routes the dispatch to the K
-//! "home" relays: the K relays whose NodeIds are closest by XOR to the
-//! recipient's `user_ipk`. Each home either delivers locally (recipient
-//! online there) or queues the dispatch in `cf_dht_queue` for later
-//! pickup.
+//! recipient is **not** online locally, this module routes the dispatch to
+//! the K "home" relays: the K relays whose NodeIds are closest by XOR to
+//! the recipient's `user_ipk`. Each home either delivers locally (recipient
+//! online there) or queues the dispatch in `cf_dht_queue` for later pickup.
 //!
 //! This module implements that fan-out from the *sender* side. It is the
 //! sister to [`super::publish::publish`] and deliberately mirrors its
@@ -29,7 +27,7 @@
 //!   on the originating client's ack.
 //! - `publish` carries an Ed25519-signed presence record; `Forward`
 //!   carries an unmodified `DispatchP` plus an *additional* outer
-//!   sender-relay signature (the two-layer signing model in §5.1).
+//!   sender-relay signature (two-layer signing).
 //!
 //! Sharing the dispatch-parallel idiom with a generic helper would have
 //! cost more in indirection than the ~40 lines of duplicated `JoinSet`
@@ -41,10 +39,6 @@
 //! across `await`. `dht.routing.read().find_closest(...)` is the only
 //! routing-table read; we clone descriptors out and release the lock
 //! before any I/O.
-//!
-//! design-doc: `misc/specs/STICKY_HOME_RELAY.md` §4.2 (sender-side flow),
-//! §5.1 (`Forward` wire shape), §6.1 (`cf_dht_queue`), §7 question 1
-//! (`K_MIN = 2`), §7 question 4 (sender-relay-is-K-closest shortcut).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -119,7 +113,7 @@ impl ForwardSummary {
 
     /// True iff at least one home returned `Delivered`. The sender
     /// promotes its client-side ack from `Forwarded` to `Delivered` in
-    /// this case (§4.2 step 6).
+    /// this case.
     pub fn any_delivered(&self) -> bool {
         !self.delivered_at.is_empty()
     }
@@ -155,15 +149,15 @@ pub(crate) enum ForwardError {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Run the §4.2 sender-side fan-out for a `dispatch` whose recipient is
-/// not online on the sending relay.
+/// Run the sender-side fan-out for a `dispatch` whose recipient is not
+/// online on the sending relay.
 ///
 /// 1. Compute the K-closest homes by XOR distance to the recipient's
 ///    `user_ipk` (raw 32 bytes — same key derivation as `lookup_value`).
 /// 2. If `self_id` is among the K-closest, locally enqueue the dispatch
 ///    via [`super::store::enqueue_for_home`] and treat the outcome as
-///    one of the K acks (mirrors the §7 question 4 shortcut and the
-///    publish-path's `self_should_store` path).
+///    one of the K acks (mirrors the publish-path's `self_should_store`
+///    path).
 /// 3. For every remote home, dispatch a `Forward` RPC over `peer/1` in
 ///    parallel, collecting outcomes via `tokio::task::JoinSet`.
 /// 4. Wait up to [`FORWARD_TIMEOUT_MS`] total wall-clock for replies.
@@ -175,10 +169,9 @@ pub(crate) enum ForwardError {
 ///
 /// - Verifies the embedded `dispatch.sig` *before* calling here (the
 ///   sender-relay must not forward an unsigned dispatch). The wire-level
-///   `Forward::verify` deliberately does not re-check `dispatch.sig`
-///   (§5.1 contract); the home relay re-checks at delivery time.
-/// - On `Err(_)` falls back to the local `cf_messages` queue safety net
-///   (§4.2 step 7).
+///   `Forward::verify` deliberately does not re-check `dispatch.sig`;
+///   the home relay re-checks at delivery time.
+/// - On `Err(_)` falls back to the local `cf_messages` queue safety net.
 ///
 /// **Self-Forward never wraps in a wire `Forward`.** The sender-relay's
 /// own `forward_to_homes` shortcuts straight to
@@ -193,9 +186,8 @@ pub(crate) async fn forward_to_homes(
     dht.metrics.inc_forwards_sent();
 
     // 1. Compute the K-closest homes. The user's IPK is the DHT key
-    //    directly (§1 of `DHT.md` — "users' DHT keys are their raw
-    //    IPK", *not* `BLAKE3(IPK)`); same derivation `lookup_value`
-    //    uses for `FindValue`.
+    //    directly (raw 32 bytes, *not* `BLAKE3(IPK)`); same derivation
+    //    `lookup_value` uses for `FindValue`.
     let user_ipk_bytes: [u8; 32] = dispatch.to.0;
     let target_id = NodeId::from_bytes(user_ipk_bytes);
 
@@ -209,9 +201,9 @@ pub(crate) async fn forward_to_homes(
     // so we need a separate self-vs-Kth-distance check.
     let self_id = dht.node_id;
     let self_is_in_k = if descriptors.len() < K {
-        // Sparse routing table — be permissive (self is "trivially"
-        // in the K-closest because there aren't K others). Mirrors
-        // the same permissiveness in `store::self_is_owner` and
+        // Sparse routing table — be permissive (self is "trivially" in
+        // the K-closest because there aren't K others). Mirrors the same
+        // permissiveness in `store::self_is_owner` and
         // `publish::self_should_store`.
         true
     } else {
@@ -229,16 +221,15 @@ pub(crate) async fn forward_to_homes(
         return Err(ForwardError::NoHomes);
     }
     if descriptors.is_empty() && self_is_in_k {
-        // Lone-relay edge case: the §4.5 "Cold network (1 relay)" row.
-        // We're our own K. Self-store, treat as 1-of-K success even
-        // though K_MIN=2 means we still fall back to local queue —
-        // consistency with the K_MIN contract. The caller's local-
-        // queue safety net catches this.
+        // Lone-relay edge case: we're our own K. Self-store, treat as
+        // 1-of-K success even though K_MIN=2 means we still fall back
+        // to local queue — consistency with the K_MIN contract. The
+        // caller's local-queue safety net catches this.
     }
 
-    // 2. Self-store short-circuit (§7 question 4). If self is in the
-    //    K-closest, we add a self-record to the summary without dialing
-    //    ourselves over the network.
+    // 2. Self-store short-circuit. If self is in the K-closest, we add a
+    //    self-record to the summary without dialing ourselves over the
+    //    network.
     let mut summary = ForwardSummary::default();
     let mut homes_tried: Vec<NodeId> = Vec::with_capacity(K + 1);
 
@@ -297,13 +288,9 @@ pub(crate) async fn forward_to_homes(
 }
 
 /// Construct a fully-signed [`Forward`] for `dispatch` using `dht.signing_key`
-/// — the relay's identity key, **not** the TLS sub-key (per §4.2 sig domain
-/// notes; the identity key is what the home relay's `Forward::verify`
-/// pulls from the routing-table entry for `sender_relay_id`).
-///
-/// Mirrors the resolver-link signing pattern in
-/// `relay/src/quic/resolver_link.rs::send_heartbeat` — same
-/// `signing_key.sign(&signing_input).to_bytes()` shape.
+/// — the relay's identity key, **not** the TLS sub-key. The identity key is
+/// what the home relay's `Forward::verify` pulls from the routing-table
+/// entry for `sender_relay_id`.
 fn build_signed_forward(dht: &Dht, dispatch: DispatchP, timestamp: u64) -> Forward {
     let sender_relay_id = dht.node_id;
     let msg = forward_signing_input(&dispatch.id.0, &sender_relay_id, timestamp);
@@ -410,13 +397,12 @@ async fn remote_forward_one(
 // Home-side `Forward` handler (sticky-home)
 // ---------------------------------------------------------------------------
 
-/// Home-side handler for `DhtRequest::Forward`. Mirror of
-/// the sender-side [`forward_to_homes`] fan-out: receives a `Forward`,
-/// verifies the outer sender-relay signature plus the embedded
-/// dispatch signature, then either delivers to the recipient locally
-/// (online) or queues into `cf_dht_queue` (offline).
+/// Home-side handler for `DhtRequest::Forward`. Receives a `Forward`,
+/// verifies the outer sender-relay signature plus the embedded dispatch
+/// signature, then either delivers to the recipient locally (online) or
+/// queues into `cf_dht_queue` (offline).
 ///
-/// **Verification ladder** (per `STICKY_HOME_RELAY.md` §5.1):
+/// **Verification ladder**:
 ///
 /// 1. Look up the sender-relay's verifying pubkey from the routing
 ///    table entry for `fwd.sender_relay_id`. The DhtHello handshake
@@ -427,9 +413,9 @@ async fn remote_forward_one(
 ///    sig + skew check.
 /// 3. Confirm we *are* in the recipient's K-closest. The sender
 ///    shouldn't have routed to us if we're not, but K-set drift races
-///    are real (§4.4); return `NotOwner` so the sender re-fans-out.
+///    are real; return `NotOwner` so the sender re-fans-out.
 /// 4. Verify the embedded `dispatch.sig` (user-layer) — `Forward::verify`
-///    deliberately doesn't, per §5.1's two-layer signing contract.
+///    deliberately doesn't (two-layer signing contract).
 /// 5. Online recipient short-circuit: if the recipient is currently
 ///    authenticated on this relay, deliver via the same `try_deliver`
 ///    path the sender-side `handle_forward` uses. Return `Delivered`
@@ -443,11 +429,10 @@ async fn remote_forward_one(
 /// close the connection (only the wire-validator's hard-protocol
 /// failures do). The `CloseReason::DhtForwardRejected` is reserved for
 /// outer-validator failures; this handler returns soft-rejects in the
-/// response body so the sender can attribute failures to specific
-/// homes.
+/// response body so the sender can attribute failures to specific homes.
 ///
-/// **Lock contract**: routing-table read is scoped + cloned out
-/// before any `await`; the connected-clients read is the same.
+/// **Lock contract**: routing-table read is scoped + cloned out before
+/// any `await`; the connected-clients read is the same.
 pub(crate) async fn handle_forward_rpc(
     dht: &Arc<Dht>, fwd: Forward, now_ms: u64,
 ) -> ForwardResp {
@@ -552,7 +537,7 @@ fn resolve_sender_pubkey(dht: &Dht, sender_relay_id: &NodeId) -> Option<[u8; 32]
 /// Verify the user-layer `dispatch.sig` against `dispatch.from` and
 /// the canonical [`dispatch_sig_message`] transcript. This is the
 /// *embedded* signature `Forward::verify` deliberately does not check
-/// (§5.1 contract).
+/// (two-layer signing contract).
 fn verify_dispatch_user_sig(dispatch: &DispatchP) -> bool {
     let Ok(vk) = VerifyingKey::from_bytes(&dispatch.from.0) else {
         return false;
@@ -751,12 +736,12 @@ mod tests {
     // -------------------------------------------------------------------
 
     /// `forward_to_homes` against an empty routing table on a fresh DHT
-    /// must succeed via the self-store short-circuit (§4.5 "cold
-    /// network" + §7 question 4: self counts as 1-of-K) — but with
-    /// only 1 success and `K_MIN = 2`, the tally fails and we return
+    /// must succeed via the self-store short-circuit (self counts as
+    /// 1-of-K on a cold network) — but with only 1 success and
+    /// `K_MIN = 2`, the tally fails and we return
     /// `InsufficientReplicas`. This is the canonical lone-relay
-    /// fallback signal: the caller (handle_forward) sees it and
-    /// stores in the local-queue safety net.
+    /// fallback signal: the caller (handle_forward) sees it and stores
+    /// in the local-queue safety net.
     #[tokio::test(flavor = "current_thread")]
     async fn forward_to_homes_lone_relay_returns_insufficient_replicas_with_self_stored() {
         let mut self_seed = [0u8; 32];

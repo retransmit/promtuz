@@ -19,8 +19,7 @@ pub struct AppConfig {
     pub resolver: NodeConfig,
 
     /// Optional DHT block. Absent / `enabled = false` keeps the relay on
-    /// the pre-DHT code path — see `relay/src/dht/config.rs` and §10/§11.8
-    /// of `misc/specs/DHT.md`. The default is **disabled**.
+    /// the pre-DHT code path. The default is **disabled**.
     #[serde(default)]
     pub dht: DhtConfig,
 }

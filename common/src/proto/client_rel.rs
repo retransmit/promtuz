@@ -40,7 +40,7 @@ pub fn dispatch_sig_message(
 pub enum ServerHandshakeResultP {
     Accept {
         timestamp: u64,
-        /// §3.9 — this relay's DHT NodeId (`BLAKE3(NodeKey)`),
+        /// This relay's DHT NodeId (`BLAKE3(NodeKey)`),
         /// or `None` when the relay has DHT disabled. The phone binds it
         /// as `requester_relay_id` when signing the
         /// `FetchWelcomes` / `AckWelcomes` wrappers (the inner Tier-2
@@ -153,11 +153,9 @@ pub enum DispatchAckP {
     /// dispatch is held by a deterministic K-relay set keyed off the
     /// recipient's IPK rather than only on the originating relay.
     ///
-    /// Semantics per `misc/specs/STICKY_HOME_RELAY.md` §4.2 step 5: the
-    /// dispatch is queued at K_MIN homes; eventual delivery depends on
+    /// The dispatch is queued at K_MIN homes; eventual delivery depends on
     /// the recipient draining one of those homes on reconnect. Sender
-    /// has no further proof of delivery — read receipts are out of
-    /// scope (§9 of the same spec).
+    /// has no further proof of delivery — read receipts are out of scope.
     Forwarded,
     Error { reason: String },
 }
@@ -192,10 +190,9 @@ pub enum CRelayPacket {
     ///
     /// The relay R_r the user just authenticated to is *not always* in
     /// the user's K-closest set; in that case R_r must impersonate the
-    /// user when issuing `QueueFetch` against the K homes per
-    /// `STICKY_HOME_RELAY.md` §4.3 step 3. The home relay only ships
-    /// queued dispatches when the user has signed the request — `sig`
-    /// is that user signature, sized so a single sign-on serves all K
+    /// user when issuing `QueueFetch` against the K homes. The home relay
+    /// only ships queued dispatches when the user has signed the request —
+    /// `sig` is that user signature, sized so a single sign-on serves all K
     /// homes in the recipient's set (the transcript binds the user, the
     /// requesting relay, and a freshness timestamp; it does **not**
     /// bind the home being addressed, so one signature works for every
@@ -206,13 +203,12 @@ pub enum CRelayPacket {
     /// `(timestamp, sig)` on its `ClientContext` and presents them as
     /// `QueueFetch.user_sig` when fanning out to homes.
     ///
-    /// **Flow placement (§4.3)**: this packet is sent at the *fetch*
-    /// end of the recipient flow. The companion `QueueFetchAck`
-    /// deletion path (proving the user received specific dispatch ids)
-    /// is handled separately by [`Self::AckAuth`] — a transcript over
-    /// `delivered_ids` requires the relay to know the id list before it
-    /// can ask libcore to sign, which is impossible before fetching has
-    /// happened.
+    /// This packet is sent at the *fetch* end of the recipient flow.
+    /// The companion `QueueFetchAck` deletion path (proving the user
+    /// received specific dispatch ids) is handled separately by
+    /// [`Self::AckAuth`] — a transcript over `delivered_ids` requires
+    /// the relay to know the id list before it can ask libcore to sign,
+    /// which is impossible before fetching has happened.
     DrainAuth { timestamp: u64, sig: Bytes<64> },
 
     /// Sticky-home — user-signed authorisation for the K
@@ -241,10 +237,9 @@ pub enum CRelayPacket {
     /// for the fetch direction.
     AckAuth { sig: Bytes<64>, timestamp: u64 },
 
-    /// §3.9 — libcore wrapper around §3.4 `KeyPackagePublish`
-    /// (when `mode = Publish`) or §3.6 `KeyPackageRefill` (when
-    /// `mode = Refill`). **User-signed RPC**: `sig` is the phone's
-    /// signature over the *inner* Tier-2 transcript
+    /// Libcore wrapper around `KeyPackagePublish` (when `mode = Publish`)
+    /// or `KeyPackageRefill` (when `mode = Refill`). **User-signed RPC**:
+    /// `sig` is the phone's signature over the *inner* Tier-2 transcript
     /// ([`crate::proto::mls_wire::kp_publish_signing_input`] /
     /// [`crate::proto::mls_wire::kp_refill_signing_input`], selected by
     /// `mode`), bound to `(ipk, records-digest, timestamp)`. The home
@@ -261,10 +256,10 @@ pub enum CRelayPacket {
         sig:       Bytes<64>,
     },
 
-    /// §3.9 — libcore wrapper around §3.5 `KeyPackageFetch`.
-    /// **Gate-only RPC**: the inner `KeyPackageFetchReq` carries no user
-    /// sig (it's DhtHello-authenticated relay-to-relay), so `sig` is a
-    /// wrapper-gate signature over
+    /// Libcore wrapper around `KeyPackageFetch`. **Gate-only RPC**: the
+    /// inner `KeyPackageFetchReq` carries no user sig (it's
+    /// DhtHello-authenticated relay-to-relay), so `sig` is a wrapper-gate
+    /// signature over
     /// [`crate::proto::mls_wire::kp_fetch_wrap_signing_input`] that the
     /// home verifies locally for freshness + attribution and does not
     /// propagate. Reply: [`SRelayPacket::KeyPackageFetched`] or
@@ -275,10 +270,10 @@ pub enum CRelayPacket {
         sig:        Bytes<64>,
     },
 
-    /// §3.9 — libcore wrapper around §6.1 Welcome publish to
-    /// the recipient's K=3 homes. **Gate-only RPC**: the user
-    /// authorization rides inside `envelope.sender_sig` (forwarded
-    /// intact); `sig` is a wrapper-gate signature over
+    /// Libcore wrapper around Welcome publish to the recipient's K=3
+    /// homes. **Gate-only RPC**: the user authorization rides inside
+    /// `envelope.sender_sig` (forwarded intact); `sig` is a wrapper-gate
+    /// signature over
     /// [`crate::proto::mls_wire::welcome_publish_wrap_signing_input`]
     /// proving this authenticated phone asked to publish now. Reply:
     /// [`SRelayPacket::WelcomePublished`] or
@@ -289,9 +284,9 @@ pub enum CRelayPacket {
         sig:       Bytes<64>,
     },
 
-    /// §3.9 — libcore wrapper around §6.1 Welcome drain of the
-    /// *calling IPK's own* queue from its K=3 homes. **User-signed
-    /// RPC**: `sig` is the phone's signature over the inner
+    /// Libcore wrapper around Welcome drain of the *calling IPK's own*
+    /// queue from its K=3 homes. **User-signed RPC**: `sig` is the
+    /// phone's signature over the inner
     /// [`crate::proto::mls_wire::welcome_fetch_signing_input`], bound to
     /// `(user_ipk, requester_relay_id = home NodeId, timestamp)` — the
     /// phone learns its home's NodeId from the client/0 handshake. The
@@ -304,9 +299,9 @@ pub enum CRelayPacket {
         sig:       Bytes<64>,
     },
 
-    /// §3.9 — libcore wrapper around §6.1 Welcome ack; the K
-    /// homes GC the listed `welcome_ids`. **User-signed RPC**: `sig` is
-    /// the phone's signature over the inner
+    /// Libcore wrapper around Welcome ack; the K homes GC the listed
+    /// `welcome_ids`. **User-signed RPC**: `sig` is the phone's signature
+    /// over the inner
     /// [`crate::proto::mls_wire::welcome_ack_signing_input`], bound to
     /// `(user_ipk, requester_relay_id = home NodeId, welcome_ids,
     /// timestamp)`, forwarded by the home to the K homes. Reply:
@@ -370,7 +365,7 @@ pub enum SRelayPacket {
         suggested_timestamp: u64,
     },
 
-    /// §3.9 — reply to [`CRelayPacket::PublishKeyPackage`].
+    /// Reply to [`CRelayPacket::PublishKeyPackage`].
     /// `homes_succeeded` is the count of K=3 DHT homes that returned a
     /// success outcome (Stored for Publish, Appended for Refill).
     /// `quorum_met` ⇔ `homes_succeeded ≥ K_MIN` (= 2).
@@ -379,10 +374,10 @@ pub enum SRelayPacket {
         quorum_met:      bool,
     },
 
-    /// §3.9 — reply to [`CRelayPacket::FetchKeyPackage`].
+    /// Reply to [`CRelayPacket::FetchKeyPackage`].
     /// `record = None` collapses the Tier-2 `NoStash` and `NotOwner`
     /// outcomes (libcore can't act on the distinction). `static_hash`
-    /// is the cross-replica hash from §3.5's `KeyPackageFetchFound`
+    /// is the cross-replica hash from `KeyPackageFetchFound`
     /// (zeros if `record = None`).
     KeyPackageFetched {
         record:      Option<crate::proto::mls_wire::KeyPackageRecord>,
@@ -390,29 +385,28 @@ pub enum SRelayPacket {
         static_hash: Bytes<32>,
     },
 
-    /// §3.9 — reply to [`CRelayPacket::PublishWelcome`].
+    /// Reply to [`CRelayPacket::PublishWelcome`].
     /// `quorum_met = true` ⇔ ≥ K_MIN of the recipient's K=3 homes
     /// stored the envelope.
     WelcomePublished {
         quorum_met: bool,
     },
 
-    /// §3.9 — reply to [`CRelayPacket::FetchWelcomes`]. The
-    /// home merges welcomes from the K=3 home replicas, deduplicates
-    /// by `(group_id, kp_ref_used)`, and returns the union.
+    /// Reply to [`CRelayPacket::FetchWelcomes`]. The home merges
+    /// welcomes from the K=3 home replicas, deduplicates by
+    /// `(group_id, kp_ref_used)`, and returns the union.
     WelcomesFetched {
         entries: Vec<crate::proto::mls_wire::WelcomeEntry>,
     },
 
-    /// §3.9 — reply to [`CRelayPacket::AckWelcomes`].
+    /// Reply to [`CRelayPacket::AckWelcomes`].
     WelcomesAcked,
 
-    /// §3.9 — generic "your home's DHT is disabled" reply,
-    /// returned for any of the five wrapper RPCs when
-    /// `relay.dht.is_none()`. Libcore surfaces this as a clean per-RPC
-    /// error rather than retrying — operator must enable DHT on the
-    /// home (`relay/config.toml [dht] enabled = true`) for MLS to
-    /// function.
+    /// Generic "your home's DHT is disabled" reply, returned for any of
+    /// the five wrapper RPCs when `relay.dht.is_none()`. Libcore surfaces
+    /// this as a clean per-RPC error rather than retrying — operator must
+    /// enable DHT on the home (`relay/config.toml [dht] enabled = true`)
+    /// for MLS to function.
     DhtUnavailable,
 }
 

@@ -47,10 +47,10 @@ pub(super) async fn handle_packet(
             Ok(())
         },
 
-        // §3.9 — Tier-1 MLS DHT-RPC wrappers. Each handler
-        // verifies the wrapper sig + skew, originates the peer/1
-        // fan-out, and replies with the matching SRelayPacket (or
-        // DhtUnavailable when this relay has DHT disabled).
+        // Tier-1 MLS DHT-RPC wrappers. Each handler verifies the
+        // wrapper sig + skew, originates the peer/1 fan-out, and
+        // replies with the matching SRelayPacket (or DhtUnavailable
+        // when this relay has DHT disabled).
         PublishKeyPackage { records, timestamp, mode, sig } => {
             mls_relay::handle_publish_keypackage(
                 ctx.clone(), records, timestamp, mode, sig.0, tx,

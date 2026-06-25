@@ -1,23 +1,23 @@
 //! Iterative `FindNode` / `FindValue` walks with α=3 parallelism and
 //! per-hop hedging.
 //!
-//! ## Algorithm (§4.1)
+//! ## Algorithm
 //!
-//! Per design-doc §4.1, we maintain three logical sets:
+//! We maintain three logical sets:
 //!
-//! - **`pending`**: the candidate shortlist of peers we *might* query, sorted
-//!   by XOR distance to `target`.
+//! - **`pending`**: the candidate shortlist of peers we *might* query,
+//!   sorted by XOR distance to `target`.
 //! - **`in_flight`**: the peers we've sent a request to and are still
 //!   waiting for. Bounded at `α = 3`.
 //! - **`queried`**: peers that have already responded (or been hedged-out).
 //!
-//! Termination per §4.3:
+//! Termination:
 //! 1. We've contacted the K strictly-closest peers in `pending` and none
 //!    returns a closer-than-current peer, OR
 //! 2. `LOOKUP_MAX_HOPS` exceeded, OR
 //! 3. `LOOKUP_RPC_TIMEOUT_MS` total wall-clock elapsed.
 //!
-//! ## Hedging (§4.1, second paragraph)
+//! ## Hedging
 //!
 //! When a request hasn't returned within `LOOKUP_HEDGE_MS`, we *don't*
 //! cancel it — instead we fire a duplicate to the next-best candidate.
@@ -30,10 +30,6 @@
 //! `await`. The `routing.read().find_closest(...)` call is the only
 //! routing-table read; we clone the descriptors out and release the
 //! lock before any I/O.
-//!
-//! design-doc: §4 (lookup protocol), §4.1 (FindNode iterative algorithm),
-//! §4.2 (FindValue), §4.3 (termination), §4.4 (Sybil cross-check),
-//! §4.5 (why clients don't iterate).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -75,9 +71,6 @@ use super::config::LOOKUP_RPC_TIMEOUT_MS;
 // ---------------------------------------------------------------------------
 
 /// Outcome of an iterative `FindValue` walk.
-///
-/// design-doc: §4.2 (Found / NotPresent / Closer collapsed into a
-/// caller-friendly trichotomy).
 //
 // Variant size: `Found(PresenceRecord)` is ~250 B while `NotPresent` is
 // zero-sized. Boxing `PresenceRecord` would shrink the enum but every
@@ -87,11 +80,11 @@ use super::config::LOOKUP_RPC_TIMEOUT_MS;
 #[derive(Debug)]
 pub enum FindValueOutcome {
     /// We collected at least one `Found(record)` reply. The returned
-    /// record is the highest-priority winner under §5.3 ordering.
+    /// record is the highest-priority winner under the canonical ordering.
     Found(PresenceRecord),
 
-    /// All reachable closest peers reported `NotPresent`. Authoritative
-    /// "user is offline" per §4.2.
+    /// All reachable closest peers reported `NotPresent` — authoritative
+    /// "user is offline".
     NotPresent,
 }
 
@@ -313,7 +306,7 @@ fn now_ms() -> u64 {
 
 /// Send one DHT request over a fresh bi-stream and read the response.
 ///
-/// Per §2.2, a DHT RPC is one bi-stream: open_bi → write request →
+/// Send one DHT request over a fresh bi-stream: open_bi → write request →
 /// finish() the send side → read length-prefixed response → done.
 ///
 /// Wraps the entire round-trip in a `LOOKUP_RPC_TIMEOUT_MS` deadline so
@@ -342,13 +335,11 @@ async fn rpc_one(conn: &Connection, req: DhtRequest) -> anyhow::Result<DhtRespon
 /// Iterative `FindNode` walk to discover the k closest peers to `target`.
 ///
 /// Used by:
-/// - bootstrap's "self-FindNode" forced-convergence step (§3.5),
-/// - the publish path to find STORE recipients (§5.2),
-/// - bucket-refresh to re-discover stale ranges (§3.2).
+/// - bootstrap's "self-FindNode" forced-convergence step,
+/// - the publish path to find STORE recipients,
+/// - bucket-refresh to re-discover stale ranges.
 ///
 /// Returns the top-k peers by XOR distance the walk converged on.
-///
-/// design-doc: §4.1.
 pub(crate) async fn lookup_node(
     dht: Arc<Dht>, target: NodeId,
 ) -> Result<Vec<NodeDescriptor>, LookupError> {
@@ -420,9 +411,9 @@ pub(crate) async fn lookup_node(
 /// Iterative `FindValue` walk for `user_ipk`.
 ///
 /// Same structure as `lookup_node` but each hop sends `FindValue` and
-/// honours `Found` / `NotPresent` / `Closer` per §4.2.
+/// honours `Found` / `NotPresent` / `Closer`.
 ///
-/// **Quorum behaviour (§4.4 sybil/eclipse mitigation):**
+/// **Quorum behaviour (Sybil/eclipse mitigation):**
 ///
 /// - Continue iterating even after a `Found` reply arrives — collect
 ///   replies from all K-closest peers (or as many as respond before
@@ -435,19 +426,15 @@ pub(crate) async fn lookup_node(
 ///   attempt rather than trusted blindly.
 /// - Among the `Found` replies that exceed quorum, the highest
 ///   `(generation, not_before, relay_id)` wins per the canonical
-///   ordering on `PresenceRecord::compare` (§5.3).
+///   ordering on `PresenceRecord::compare`.
 ///
-/// **Tradeoff:** a record JUST published — and therefore stored only
-/// on its first replica so far, before anti-entropy has propagated —
-/// triggers the lone-hit path and returns `NotPresent` for up to one
-/// `ANTI_ENTROPY_INTERVAL_MS` window (§0 = 30 s). The publishing
-/// relay is the canonical home and any follow-up Dispatch into it
-/// succeeds via the local-first short-circuit; lookups from other
-/// relays see `NotPresent` until anti-entropy spreads the record.
-/// Future telemetry (§11.4) will determine whether this window
-/// causes user-visible delivery delays in practice.
-///
-/// design-doc: §4.2, §4.4.
+/// **Tradeoff:** a record just published — stored only on its first
+/// replica so far, before anti-entropy has propagated — triggers the
+/// lone-hit path and returns `NotPresent` for up to one
+/// `ANTI_ENTROPY_INTERVAL_MS` window (30 s). The publishing relay is
+/// the canonical home and any follow-up Dispatch into it succeeds via
+/// the local-first short-circuit; lookups from other relays see
+/// `NotPresent` until anti-entropy spreads the record.
 pub(crate) async fn lookup_value(
     dht: Arc<Dht>, user_ipk: [u8; 32],
 ) -> Result<FindValueOutcome, LookupError> {
@@ -484,7 +471,7 @@ pub(crate) async fn lookup_value(
 
     // Collected replies for the quorum decision. We accumulate here
     // (rather than aborting on the first Found, like `lookup_node`)
-    // so the §4.4 cross-check can run on a complete picture.
+    // so the cross-check can run on a complete picture.
     let mut value_replies: Vec<ValueReply> = Vec::new();
 
     let res = run_iterative_loop_value(
@@ -534,7 +521,7 @@ enum IterError {
 /// Drive the α-parallel iterative loop with hedging. Used by
 /// `lookup_node`. The value-lookup variant (`lookup_value`) uses
 /// [`run_iterative_loop_value`] which accumulates `Found` replies for
-/// the §4.4 quorum decision.
+/// the quorum decision.
 ///
 /// Returns `Ok(())` when the walk converged peacefully
 /// (`closest_so_far` is now populated), `Err(IterError::Lookup(_))` for
@@ -650,12 +637,12 @@ async fn run_iterative_loop(
 }
 
 // ---------------------------------------------------------------------------
-// Value-lookup driver (§4.4 quorum)
+// Value-lookup driver (quorum)
 // ---------------------------------------------------------------------------
 
 /// One peer's reply to a `FindValue` issued during the iterative walk.
 /// The collection of these is fed into [`decide_lookup_outcome`] for
-/// the §4.4 sybil/eclipse-mitigation quorum decision.
+/// the quorum decision.
 //
 // Same shape as the wire `FindValueOutcome`; we keep the
 // `Found(PresenceRecord)` inline for the same reason — the
@@ -673,9 +660,9 @@ pub(crate) enum ValueReply {
 
 /// Drive the α-parallel iterative loop for `lookup_value`, accumulating
 /// `Found`/`NotPresent` replies in `replies` for the eventual quorum
-/// decision. Termination matches the standard Kademlia rule (§4.3) but
-/// **does not short-circuit on a `Found`** — every peer that responds
-/// before the deadline contributes to the decision.
+/// decision. Termination matches the standard Kademlia rule but **does
+/// not short-circuit on a `Found`** — every peer that responds before the
+/// deadline contributes to the decision.
 //
 // Same eight-arg shape as `run_iterative_loop`; same rationale —
 // a `LookupCtx` struct would fight the disjoint-mutable-borrow
@@ -779,29 +766,27 @@ async fn run_iterative_loop_value(
     }
 }
 
-/// Pure §4.4 quorum decision. Extracted from `lookup_value` so it can
-/// be unit-tested without a network stack.
+/// Pure quorum decision (Sybil/eclipse mitigation). Extracted from
+/// `lookup_value` so it can be unit-tested without a network stack.
 ///
 /// Decision rules:
 /// 1. Group `Found` replies by `(generation, relay_id)`. Among groups
 ///    of size `>= LOOKUP_QUORUM`, pick the one whose record wins the
-///    canonical §5.3 ordering (`PresenceRecord::compare`).
+///    canonical ordering (`PresenceRecord::compare`).
 /// 2. If no group reaches quorum, return `NotPresent` — even if a
 ///    single peer claimed `Found`. The lone-hit scenario is the
-///    eclipse threat described in §4.4.
-///
-/// design-doc: §4.4 (Sybil/eclipse mitigation).
+///    eclipse threat.
 pub(crate) fn decide_lookup_outcome(replies: Vec<ValueReply>) -> FindValueOutcome {
     if replies.is_empty() {
         return FindValueOutcome::NotPresent;
     }
 
     // Group `Found` replies by their (generation, relay_id) pair —
-    // the §4.4 "agreement" definition. We keep the *highest* record
-    // (by §5.3 compare) within each group so two peers with the same
-    // generation but slightly different `not_before` republish times
-    // still cluster together (the higher `not_before` wins inside
-    // the group, which converges to the same canonical answer).
+    // the quorum "agreement" definition. We keep the *highest* record
+    // within each group so two peers with the same generation but
+    // slightly different `not_before` republish times still cluster
+    // together (the higher `not_before` wins inside the group, which
+    // converges to the same canonical answer).
     use std::collections::HashMap;
     let mut groups: HashMap<(u64, common::proto::RelayId), Vec<PresenceRecord>> = HashMap::new();
     let mut not_present_count = 0usize;
@@ -815,11 +800,10 @@ pub(crate) fn decide_lookup_outcome(replies: Vec<ValueReply>) -> FindValueOutcom
         }
     }
 
-    // Pick the largest group that reaches quorum. Ties between groups
-    // of equal size break by the §5.3 ordering on the group's
-    // canonical record, so two relays that disagree on the exact
-    // record produce the same deterministic winner across all
-    // observers.
+    // Pick the largest group that reaches quorum. Ties between groups of
+    // equal size break by the canonical ordering on the group's canonical
+    // record, so two relays that disagree on the exact record produce the
+    // same deterministic winner across all observers.
     let mut quorum_winner: Option<PresenceRecord> = None;
     let mut winner_group_size: usize = 0;
     for (_key, recs) in groups.into_iter() {
@@ -828,7 +812,7 @@ pub(crate) fn decide_lookup_outcome(replies: Vec<ValueReply>) -> FindValueOutcom
             continue;
         }
         // Pick the canonical winner inside the group via
-        // `PresenceRecord::compare` (§5.3).
+        // `PresenceRecord::compare`.
         let mut best = recs[0].clone();
         for r in &recs[1..] {
             if r.compare(&best) == std::cmp::Ordering::Greater {
@@ -1017,7 +1001,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // §4.4 quorum decision tests
+    // Quorum decision tests
     // -----------------------------------------------------------------
 
     use common::proto::dht_p2p::PresenceRecord;
@@ -1072,8 +1056,8 @@ mod tests {
 
     #[test]
     fn decide_lookup_outcome_lone_found_with_two_not_present_returns_not_present() {
-        // The §4.4 eclipse case: 2 NotPresent + 1 Found from the
-        // K-closest. Strict quorum (= 2) requires 2 *Found* to agree;
+        // Eclipse case: 2 NotPresent + 1 Found from the K-closest.
+        // Strict quorum (= 2) requires 2 *Found* to agree;
         // 1 alone is insufficient → NotPresent.
         let user = fresh_signing_key();
         let relay = fresh_signing_key();
@@ -1095,8 +1079,7 @@ mod tests {
     #[test]
     fn decide_lookup_outcome_two_agreeing_found_passes_quorum() {
         // 2 Found + 1 NotPresent: the two `Found` replies agree on
-        // `(generation, relay_id)` because they're produced from the
-        // same fixture — quorum reached, return that record.
+        // `(generation, relay_id)` — quorum reached, return that record.
         let user = fresh_signing_key();
         let relay = fresh_signing_key();
         let rec = record_for(5, &relay, &user);
@@ -1118,7 +1101,7 @@ mod tests {
     #[test]
     fn decide_lookup_outcome_picks_higher_generation_when_two_groups_quorum() {
         // 2 Found(rec_v5) + 2 Found(rec_v7) — both groups reach quorum.
-        // The §5.3 ordering picks the higher generation.
+        // The canonical ordering picks the higher generation.
         let user = fresh_signing_key();
         let relay_a = fresh_signing_key();
         let relay_b = fresh_signing_key();

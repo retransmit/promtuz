@@ -1,7 +1,7 @@
 //! `PromtuzMlsProvider`: the `OpenMlsProvider` implementation used by
 //! every libcore-side openmls call site.
 //!
-//! Composition (see `misc/specs/MLS.md` §9):
+//! Composition:
 //!
 //! - **Crypto**: `openmls_rust_crypto::RustCrypto` (stock). All low-level
 //!   primitives (Ed25519, X25519, AEAD, hash, HKDF) are exactly the

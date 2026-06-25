@@ -1,7 +1,7 @@
 //! Client-side KeyPackage stash management.
 //!
 //! Mints, persists, and tracks the client's pool of one-time
-//! KeyPackages (RFC 9420 §5; promtuz spec `MLS.md` §5).
+//! KeyPackages (RFC 9420 §5).
 //!
 //! # Roles in the data model
 //!
@@ -16,8 +16,7 @@
 //!   `SHA-256("MLS 1.0 KeyPackage Reference" ‖ tls_encode(kp))` for
 //!   our cipher suite (suite `0x0003` mandates SHA-256). We do **not**
 //!   compute a separate BLAKE3 ref — the codebase otherwise prefers
-//!   BLAKE3, but `kp_ref` is RFC-mandated SHA-256 (§13.1 ack'd in the
-//!   spec).
+//!   BLAKE3, but `kp_ref` is RFC-mandated SHA-256.
 //! - **`kp_bytes`** — the TLS-encoded `KeyPackage` itself, opaque to
 //!   promtuz; verifies as a KP only after a fetcher decodes it back
 //!   through openmls.
@@ -68,8 +67,7 @@
 //! A thin convenience wrapper that pulls the IPK secret through
 //! `IdentitySigner` and forwards to this module is planned.
 //!
-//! design-doc: `misc/specs/MLS.md` §5 (KeyPackage distribution),
-//! §13.1 (SHA-256 vs BLAKE3 for KP_ref).
+
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -98,10 +96,9 @@ use rusqlite::Connection;
 use rusqlite::params;
 use thiserror::Error;
 
-// `PROMTUZ_CIPHERSUITE` is the single cipher suite we use across
-// promtuz, pinned per spec §0 and `MLS.md`. Defined once in
-// `mls::group` and re-exported from `mls::mod`; we import it here
-// to keep this module independent of the rest of `group.rs`.
+// `PROMTUZ_CIPHERSUITE` is the single cipher suite used across promtuz.
+// Defined once in `mls::group` and re-exported from `mls::mod`; we
+// import it here to keep this module independent of the rest of `group.rs`.
 use super::group::PROMTUZ_CIPHERSUITE;
 use super::provider::PromtuzMlsProvider;
 use super::types::PromtuzMlsStorageError;
@@ -185,7 +182,7 @@ impl KeyPackageStash {
 
     /// Produce a single fresh KeyPackage and persist it.
     ///
-    /// Steps (mirrors spec `MLS.md` §5.2):
+    /// Steps:
     /// 1. Build a `BasicCredential` carrying the IPK bytes.
     /// 2. Generate a fresh `SignatureKeyPair` (the leaf signing key —
     ///    distinct from IPK, see `signer.rs` doc-comment). Persist it
@@ -356,12 +353,11 @@ impl KeyPackageStash {
     /// surviving unconsumed KP was generated more than
     /// [`KP_SCHEDULED_ROTATION_MS`] ago.
     ///
-    /// `MLS.md` §5.6 mitigation 3 — even with no consumption, we
-    /// rotate the stash periodically so a malicious peer that hoarded
-    /// fetches can use them only within the rotation window. After
-    /// rotation, the old (in-lifetime) KPs remain consumable until
-    /// natural expiry — what changes is that *new* fetches return
-    /// fresher KPs.
+    /// Even with no consumption, we rotate the stash periodically so a
+    /// malicious peer that hoarded fetches can use them only within the
+    /// rotation window. After rotation, the old (in-lifetime) KPs remain
+    /// consumable until natural expiry — what changes is that *new*
+    /// fetches return fresher KPs.
     ///
     /// Returns `false` on an empty stash (nothing to rotate).
     pub fn should_rotate(&self, now_ms: u64) -> bool {
@@ -383,7 +379,7 @@ impl KeyPackageStash {
         }
     }
 
-    /// Periodic anti-pinning rotation hook (spec §5.6 mitigation 3).
+    /// Periodic anti-pinning rotation hook.
     ///
     /// If [`Self::should_rotate`] returns `true`, mints
     /// [`KP_STASH_TARGET`] fresh KeyPackages. The freshly-minted
@@ -428,7 +424,7 @@ impl KeyPackageStash {
     // -----------------------------------------------------------------
 
     /// Stub — the wire-side fan-out to `K=3` homes via the
-    /// `KeyPackagePublish` RPC (`MLS.md` §3.4).
+    /// `KeyPackagePublish` RPC.
     ///
     /// This ships **only the surface and contract**: the actual
     /// relay-dial path is owned by libcore's QUIC client
@@ -638,7 +634,7 @@ mod tests {
         assert!(vk.verify(&bad_msg2, &sig).is_err());
 
         // Tampered kp_bytes → verify fails (the `BLAKE3(kp_bytes)`
-        // binding closes the §13.3 gap).
+        // binding prevents kp_bytes substitution).
         let mut tampered_bytes = rec.kp_bytes.0.clone();
         tampered_bytes[0] ^= 0xFF;
         let bad_msg3 = kp_record_signing_input(

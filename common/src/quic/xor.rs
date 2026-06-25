@@ -7,8 +7,7 @@
 //!
 //! The result is byte-array-comparable: a lex compare on the output
 //! is equivalent to an unsigned big-endian compare on the 256-bit
-//! distance, which is what the design doc means by "XOR distance"
-//! (`misc/specs/DHT.md` §3.1).
+//! distance (Kademlia XOR distance).
 //!
 //! Per-byte iteration (`std::array::from_fn`) compiles to the same
 //! inlined SIMD shape as a hand-rolled loop and keeps the indices

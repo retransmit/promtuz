@@ -6,7 +6,7 @@
 //! pubkey before any DHT RPC is honoured against it.
 //! The relay's TLS certs are CA-signed (per `common/src/bin/certgen.rs`),
 //! and the leaf cert SPKI is the relay's identity Ed25519 pubkey, with
-//! `BLAKE3(spki) == NodeId` (per design-doc §0).
+//! `BLAKE3(spki) == NodeId`.
 //!
 //! The post-handshake check here is **defense-in-depth**: rustls has
 //! already validated the cert chain against the configured root CA
@@ -53,8 +53,6 @@
 //! handshake-level CA chain validation has already authenticated the
 //! cert, so we only need to extract the SPKI.
 //!
-//! design-doc: §2.3 (relay-to-relay handshake binding), §8.1
-//! (cert-pinned NodeIds as the Sybil defence).
 
 use thiserror::Error;
 use x509_parser::der_parser::Oid;

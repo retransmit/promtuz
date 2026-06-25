@@ -52,7 +52,7 @@ pub struct ClientContext {
     /// transcript signature plus the ±60s freshness window. Read by
     /// `events::drain::handle_drain_queue` when this relay is *not* in
     /// the user's K-closest set and therefore must dial the home relays
-    /// to fetch the queue (`STICKY_HOME_RELAY.md` §4.3 step 3).
+    /// to fetch the queue.
     ///
     /// Replace-on-set semantics: a second valid `DrainAuth` overwrites
     /// the first. Because the transcript carries a freshness timestamp,

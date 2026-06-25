@@ -19,9 +19,9 @@
 //!
 //! ## Sticky-home remote-fetch integration
 //!
-//! Per `STICKY_HOME_RELAY.md` §4.3, when this relay R_r is **not**
-//! in the user's K-closest set, R_r dials the K homes and pulls
-//! their queues. The user's `DrainAuth` (a per-reconnect signed
+//! When this relay R_r is **not** in the user's K-closest set, R_r
+//! dials the K homes and pulls their queues. The user's `DrainAuth`
+//! (a per-reconnect signed
 //! authorisation, see `events::drain_auth`) authenticates the fetch.
 //! Without `DrainAuth`, the remote-fetch path is skipped and only
 //! the local CFs are drained — graceful degradation for clients that
@@ -128,8 +128,7 @@ pub(crate) async fn handle_drain_queue_with(
     //      correct: the local cf_messages drain is exactly what a
     //      pre-DHT relay does).
     //    - Routing table holds < K peers → `i_am_home = true`
-    //      (sparse-network permissive: same policy as
-    //      `forward.rs::self_is_in_k`).
+    //      (sparse-network permissive: same policy as `forward.rs::self_is_in_k`).
     //    - Otherwise: `i_am_home = self ∈ find_closest(user_ipk, K)`.
     let i_am_home = match ctx.relay.dht.as_ref() {
         Some(dht) => self_is_in_k_closest(dht, &recipient_arr),
@@ -154,8 +153,8 @@ pub(crate) async fn handle_drain_queue_with(
     //    prefix. The two CFs share the same `MessageKey` shape and
     //    the prefix-extractor is identical (`store::dht_cf_descriptors`).
     //    A self-as-home relay's `cf_dht_queue` can hold dispatches
-    //    that arrived via either the §4.2 sender fan-out or the
-    //    inbound `Forward` handler.
+    //    that arrived via either the sender fan-out or the inbound
+    //    `Forward` handler.
     if i_am_home && let Some(dht) = ctx.relay.dht.as_ref().cloned() {
         iterate_cf_dht_queue(&dht, &recipient_arr, &mut deliver_queue);
     }
@@ -247,8 +246,8 @@ pub(crate) async fn handle_drain_queue_with(
 ///    TTL expiry.
 ///
 /// **Why best-effort**: the homes' `cf_dht_queue` keys lasting until
-/// TTL is the soft fallback the design plan §4.5 explicitly accepts.
-/// The user-visible drain has already succeeded at this point — the
+/// TTL is the soft fallback. The user-visible drain has already
+/// succeeded at this point — the
 /// client got its messages and durably stored them. Failing the ack
 /// flow would not change that; it would just leak duplicate
 /// deliveries on the next reconnect.

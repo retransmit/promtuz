@@ -1,7 +1,6 @@
-//! Tier-2 OUTBOUND fan-out for KeyPackage publish / refill / fetch
-//! (§3.9). The relay-side analogue of
-//! `forward.rs::forward_to_homes`, specialised to the MLS KeyPackage
-//! RPCs.
+//! Tier-2 OUTBOUND fan-out for KeyPackage publish / refill / fetch.
+//! The relay-side analogue of `forward.rs::forward_to_homes`,
+//! specialised to the MLS KeyPackage RPCs.
 //!
 //! A phone delegates a KP operation to its home relay over the
 //! `client/0` wrappers; the home originates the real `peer/1` fan-out to

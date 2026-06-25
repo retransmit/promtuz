@@ -1,6 +1,6 @@
 //! SQLite database for the MLS storage provider.
 //!
-//! Schema (see `misc/specs/MLS.md` §9.3):
+//! Schema:
 //!
 //! ```sql
 //! CREATE TABLE mls_storage (
@@ -48,7 +48,7 @@ const MIGRATION_ARRAY: &[M] = &[
         CREATE INDEX idx_mls_storage_group ON mls_storage(group_id);
     "#,
     ),
-    // Out-of-order epoch buffer (spec §6.3, §7).
+    // Out-of-order epoch buffer.
     //
     // Stores buffered MLS messages received ahead of the current group
     // epoch (e.g. an Application at epoch=N+1 arriving before its
@@ -56,10 +56,9 @@ const MIGRATION_ARRAY: &[M] = &[
     // epoch, [`mls::epoch_catchup::EpochCatchupBuffer::drain_when_ready`]
     // re-scans this table for newly-processable rows.
     //
-    // Bounded by `MAX_EPOCH_AHEAD_BUFFER` (spec §0 = 512) entries per
-    // `group_id`. On overflow we drop the **newest** entry (spec §7.3:
-    // older entries are closer to the current epoch and more likely to
-    // be the load-bearing commit).
+    // Bounded by `MAX_EPOCH_AHEAD_BUFFER` (512) entries per `group_id`.
+    // On overflow we drop the **newest** entry (older entries are closer
+    // to the current epoch and more likely to be the load-bearing commit).
     //
     // PK is `(group_id, dispatch_id)` so a duplicate insert (replayed
     // dispatch) is a no-op.
@@ -79,7 +78,7 @@ const MIGRATION_ARRAY: &[M] = &[
             ON mls_epoch_ahead(group_id, received_at_ms);
     "#,
     ),
-    // KeyPackage stash bookkeeping (spec §5.3).
+    // KeyPackage stash bookkeeping.
     //
     // Tracks promtuz's view of which `kp_ref`s the client has minted
     // and not yet seen consumed (via a Welcome). The actual KP

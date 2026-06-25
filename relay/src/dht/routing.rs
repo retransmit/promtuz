@@ -1,11 +1,11 @@
 //! Kademlia-style 256-bucket routing table over the unified
 //! `NodeId`/`IPK` keyspace.
 //!
-//! This module implements the in-memory routing-table state pinned in
-//! design-doc §1.3 and the §3 routing-table policies (bucket geometry,
-//! refresh, eviction, learning). The lookup loop in `super::lookup`,
-//! the publish path in `super::publish`, and the bootstrap state machine
-//! in `super::bootstrap` all read/write through these methods.
+//! This module implements the in-memory routing-table state: bucket
+//! geometry, refresh, eviction, and learning. The lookup loop in
+//! `super::lookup`, the publish path in `super::publish`, and the
+//! bootstrap state machine in `super::bootstrap` all read/write through
+//! these methods.
 //!
 //! ## Lock contract
 //!
@@ -22,9 +22,6 @@
 //! handler-side ping path) inspects the outcome and bumps the relevant
 //! counter — keeps the routing table free of side-channel dependencies
 //! and trivially unit-testable.
-//!
-//! design-doc: §1.3 (in-memory routing-table state), §3 (routing-table
-//! layout), §3.5 (bootstrap state machine).
 
 use std::cmp::Ordering;
 use std::net::SocketAddr;
@@ -48,36 +45,32 @@ use super::config::K;
 /// bucket and (if any) the head of `candidates` is promoted into its
 /// slot.
 ///
-/// design-doc: §1.3 ("if dead → evict") plus §3.3 (eviction). The doc
-/// uses a single PING; we accept the standard Kademlia robustness
-/// extension of *three consecutive* timeouts before declaring a peer
-/// dead, which absorbs transient network glitches without changing the
-/// observable behaviour for stably-up peers.
+/// We accept the standard Kademlia robustness extension of *three
+/// consecutive* timeouts before declaring a peer dead, which absorbs
+/// transient network glitches without changing the observable behaviour
+/// for stably-up peers.
 pub(crate) const PING_FAILURES_BEFORE_EVICTION: u8 = 3;
 
 /// Smoothing factor for the RTT exponentially-weighted moving average:
 /// new_ema = (old_ema * (DENOM-1) + sample) / DENOM, i.e. 1/8 weight on
 /// the most recent sample.
 ///
-/// design-doc: §11.2 ("RTT-EMA chosen for v1; Vivaldi is future work").
 /// 1/8 is the same smoothing factor TCP-RTO uses for its SRTT, a
 /// well-tested default with bounded sensitivity to single-sample spikes.
+/// Vivaldi is future work.
 const RTT_EMA_DENOM: u32 = 8;
 
 // ---------------------------------------------------------------------------
 // RoutingEntry
 // ---------------------------------------------------------------------------
 
-/// Single peer entry stored in a [`Bucket`]. Mirrors the design-doc
-/// `RoutingEntry` shape exactly (§1.3).
+/// Single peer entry stored in a [`Bucket`].
 ///
 /// `conn` is a `std::sync::Weak` reference so that `Bucket`-walking code
 /// can attempt to reuse an open relay-to-relay connection without holding
 /// the lock that owns the strong handle. If the connection has been
 /// dropped (peer died, idle-timeout fired) the upgrade returns `None` and
 /// the dialer-path opens a fresh QUIC handshake.
-///
-/// design-doc: §1.3 (`RoutingEntry`), §3.4 (peer learning).
 #[derive(Debug, Clone)]
 pub struct RoutingEntry {
     /// Peer NodeId — full 32 bytes.
@@ -89,8 +82,7 @@ pub struct RoutingEntry {
 
     /// Verified Ed25519 pubkey from the cert chain. The peer's TLS leaf
     /// cert is signed by `relay_ca` / tier{1,2}_relay_ca; the SPKI is the
-    /// Ed25519 pubkey, and `BLAKE3(spki) == id` is checked on first
-    /// contact (design-doc §2.3).
+    /// Ed25519 pubkey, and `BLAKE3(spki) == id` is checked on first contact.
     pub pubkey: [u8; 32],
 
     /// Last point in time this peer was observed alive (any inbound RPC
@@ -103,7 +95,6 @@ pub struct RoutingEntry {
     /// `None` means "never measured" (e.g. just learned from a peer's
     /// `FindNodeResp` and we haven't issued our speculative `PING` yet).
     ///
-    /// design-doc: §11.2 — RTT-EMA chosen for v1; Vivaldi is future work.
     pub rtt_ema_ms: Option<u32>,
 
     /// Consecutive failed-`PING` counter. Reset on a successful PING or
@@ -111,8 +102,7 @@ pub struct RoutingEntry {
     /// [`PING_FAILURES_BEFORE_EVICTION`] triggers eviction and (if any)
     /// promotion of the head of `Bucket::candidates`.
     ///
-    /// design-doc: §3.3 (eviction). `u8` is plenty — anything past 3 is
-    /// noise.
+    /// `u8` is plenty — anything past 3 is noise.
     pub failed_pings: u8,
 
     /// Hot connection if available. `Weak<Connection>` so the routing
@@ -166,8 +156,6 @@ impl RoutingEntry {
 /// - `entries[len-1]` is the most-recently-seen peer.
 /// - `candidates.len() <= BUCKET_SIZE`; same ordering convention.
 ///
-/// design-doc: §1.3 (`Bucket`), §3.3 (eviction policy with replacement
-/// cache).
 #[derive(Debug)]
 pub struct Bucket {
     /// Active peers, head = LRU.
@@ -182,12 +170,11 @@ pub struct Bucket {
     /// the refresh job to decide which buckets to re-discover via
     /// `FindNode` against a random key in their range.
     ///
-    /// design-doc: §3.2 (refresh policy).
     pub refresh_at: Instant,
 
     /// Replacement cache — would-be inserts that arrived while the bucket
     /// was full. Promoted to `entries` when an active entry fails its
-    /// liveness probe (§3.3).
+    /// liveness probe.
     ///
     /// Capped at `BUCKET_SIZE`: an unbounded `candidates` vec would let
     /// an attacker force unbounded memory growth by spraying fresh
@@ -212,10 +199,8 @@ impl Bucket {
 
 /// Caller-observable result of a [`RoutingTable::insert`] call.
 ///
-/// Drives the §3.4 learning-peers state machine: each variant tells the
-/// caller exactly what (if anything) it should do next on the network.
-///
-/// design-doc: §3.3, §3.4.
+/// Each variant tells the caller exactly what (if anything) it should do
+/// next on the network.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InsertOutcome {
     /// The descriptor's id matched [`RoutingTable::self_id`]; we never
@@ -258,7 +243,6 @@ pub enum InsertOutcome {
 /// `Metrics::bucket_evictions` on the [`Evicted`] /
 /// [`EvictedAndPromoted`] arms.
 ///
-/// design-doc: §3.3.
 ///
 /// [`Evicted`]: PingFailedOutcome::Evicted
 /// [`EvictedAndPromoted`]: PingFailedOutcome::EvictedAndPromoted
@@ -290,7 +274,6 @@ pub(crate) enum PingFailedOutcome {
 /// out of the lock and drop the guard before any I/O (cf.
 /// `relay/src/quic/handler/client/events/forward.rs:59`).
 ///
-/// design-doc: §1.3, §3.1.
 #[derive(Debug)]
 pub struct RoutingTable {
     /// Self NodeId. Stored locally so distance computations don't need to
@@ -324,17 +307,13 @@ impl RoutingTable {
     /// Returns `None` only when `target == self_id` (zero distance — no
     /// bucket); otherwise `Some(i)` with `i < BUCKETS`.
     ///
-    /// design-doc: §3.1 (`bucket index = 255 - leading_zero_bits(...)`).
     pub(crate) fn bucket_index(&self, target: &NodeId) -> Option<usize> {
         bucket_for(&self.self_id, target)
     }
 
-    /// Insert (or refresh) a peer in the routing table per §3.4. The
-    /// returned [`InsertOutcome`] tells the caller what to do next on
-    /// the network; the routing-table state is fully updated by the time
-    /// this returns.
-    ///
-    /// design-doc: §3.3, §3.4.
+    /// Insert (or refresh) a peer in the routing table. The returned
+    /// [`InsertOutcome`] tells the caller what to do next on the network;
+    /// the routing-table state is fully updated by the time this returns.
     pub fn insert(&mut self, descriptor: NodeDescriptor) -> InsertOutcome {
         let Some(bucket_idx) = bucket_for(&self.self_id, &descriptor.id) else {
             return InsertOutcome::IsSelf;
@@ -350,9 +329,8 @@ impl RoutingTable {
             entry.last_seen = now;
             // Address may have shifted (peer roamed networks). Pubkey is
             // identity-bound so we deliberately do NOT update it here —
-            // a mismatched pubkey for the same id is a sybil signal that
-            // the cert-pinning check on first contact (§2.3) caught
-            // before this descriptor arrived.
+            // a mismatched pubkey for the same id is a sybil signal caught
+            // by the cert-pinning check on first contact.
             entry.addr = descriptor.addr;
             bucket.entries.push(entry);
             return InsertOutcome::Refreshed;
@@ -378,7 +356,7 @@ impl RoutingTable {
         }
 
         // Step 4 — both `entries` and `candidates` are full. Drop the
-        // newcomer rather than thrash the cache (§3.3 anti-shuffle).
+        // newcomer rather than thrash the cache (anti-shuffle).
         InsertOutcome::Discarded
     }
 
@@ -387,7 +365,6 @@ impl RoutingTable {
     /// [`PING_FAILURES_BEFORE_EVICTION`], evicts the entry and promotes
     /// the head of `candidates` if any.
     ///
-    /// design-doc: §3.3.
     pub(crate) fn ping_failed(&mut self, peer_id: &NodeId) -> PingFailedOutcome {
         let Some(bucket_idx) = bucket_for(&self.self_id, peer_id) else {
             return PingFailedOutcome::Unknown;
@@ -427,7 +404,6 @@ impl RoutingTable {
     /// Returns `true` if the peer was in the table (caller can use this
     /// to attribute pong-arrived-after-evict races); `false` if not.
     ///
-    /// design-doc: §11.2 (RTT-EMA), §3.3 (last_seen on inbound RPC).
     pub(crate) fn ping_succeeded(&mut self, peer_id: &NodeId, rtt_ms: u32) -> bool {
         let Some(bucket_idx) = bucket_for(&self.self_id, peer_id) else {
             return false;
@@ -470,7 +446,6 @@ impl RoutingTable {
     /// response construction) needs the wire form. Use
     /// [`Self::closest`] for the routing-internal full-entry variant.
     ///
-    /// design-doc: §4.1 (FIND_NODE — top-k closest by XOR distance).
     pub(crate) fn find_closest(&self, target: &NodeId, count: usize) -> Vec<NodeDescriptor> {
         self.closest(target, count).into_iter().map(|e| e.descriptor()).collect()
     }
@@ -503,7 +478,7 @@ impl RoutingTable {
     }
 
     /// Total active-entry count across all buckets. Used by the
-    /// bootstrap state machine's "warming" threshold (§3.5).
+    /// bootstrap state machine's "warming" threshold.
     pub(crate) fn total_known(&self) -> usize {
         self.buckets.iter().map(|b| b.entries.len()).sum()
     }
@@ -518,7 +493,6 @@ impl RoutingTable {
     /// refresh would otherwise loop forever, since the scheduler would
     /// see a fresh timestamp and skip the retry.
     ///
-    /// design-doc: §3.2.
     pub(crate) fn buckets_needing_refresh(&self, now: Instant) -> Vec<usize> {
         let threshold = std::time::Duration::from_millis(super::config::BUCKET_REFRESH_MS);
         let mut out = Vec::new();
@@ -541,7 +515,6 @@ impl RoutingTable {
     /// (no-op) — keeps the caller boilerplate-free even if a bucket
     /// disappeared from a future restructuring.
     ///
-    /// design-doc: §3.2.
     pub(crate) fn mark_refreshed(&mut self, bucket_idx: usize) {
         if let Some(bucket) = self.buckets.get_mut(bucket_idx) {
             bucket.refresh_at = Instant::now();
@@ -553,7 +526,7 @@ impl RoutingTable {
 // Free functions: distance / bucket math
 // ---------------------------------------------------------------------------
 
-/// Compute `bucket_for(self_id, peer_id)` per §3.1.
+/// Compute the bucket index for `(self_id, peer_id)`.
 ///
 /// Returns `None` when `self_id == peer_id` (zero distance — no bucket).
 /// Otherwise returns `Some(i)` where `i = 255 - leading_zero_bits(XOR)`
@@ -563,9 +536,6 @@ impl RoutingTable {
 /// - peers differing in the MSB → XOR has 0 leading zeros → bucket 255.
 /// - peers differing only in the LSB's last bit → XOR has 255 leading
 ///   zeros → bucket 0.
-///
-/// design-doc: §0 (`dist(a, b) = a ^ b interpreted as big-endian u256`),
-/// §3.1.
 pub(crate) fn bucket_for(self_id: &NodeId, peer_id: &NodeId) -> Option<usize> {
     let xor = xor_bytes(self_id.as_bytes(), peer_id.as_bytes());
 
@@ -633,8 +603,7 @@ fn _distance_cmp_keep_alive() {
 ///
 /// **Permissive sparse-table policy**: if the routing table holds
 /// fewer than `K` candidates we return `true` rather than `false`.
-/// Per `misc/specs/DHT.md` §3.5 ("Ready is non-strict"), a relay
-/// that just bootstrapped is allowed to accept stores/publishes
+/// A relay that just bootstrapped is allowed to accept stores/publishes
 /// before its routing table is dense — otherwise we couldn't seed
 /// a fresh network. Migration sweeps re-balance later.
 ///

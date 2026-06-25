@@ -16,23 +16,18 @@
 //!
 //! ## Conflict resolution
 //!
-//! Per §5.3, replicas keep the larger of `(self, incoming)` under the
-//! ordering `generation` desc → `not_before` desc → `relay_id` lex desc.
-//! That total order is implemented on
+//! Replicas keep the larger of `(self, incoming)` under the ordering
+//! `generation` desc → `not_before` desc → `relay_id` lex desc. That
+//! total order is implemented on
 //! [`PresenceRecord::compare`](common::proto::dht_p2p::PresenceRecord::compare)
 //! — we just call it.
 //!
 //! ## Tombstone keys
 //!
 //! Tombstones share the `dht_presence` CF but use a `tombstone_<ipk>`
-//! prefix (per §1.2 paragraph "Tombstones") so a single point-get with
-//! either prefix recovers the right record without a full scan. The
-//! prefix is one byte (`TOMB_PREFIX`) followed by the 32-byte IPK.
-//!
-//! design-doc: §1.1 (PresenceRecord), §1.2 (RocksDB column families),
-//! §1.1.2 (replay protection / clock skew window),
-//! §1.1.3 (TTL and republish semantics),
-//! §5.3 (multi-writer conflict resolution).
+//! prefix so a single point-get with either prefix recovers the right
+//! record without a full scan. The prefix is one byte (`TOMB_PREFIX`)
+//! followed by the 32-byte IPK.
 
 use common::proto::client_rel::DispatchP;
 use common::proto::dht_p2p::ForwardOutcome;
@@ -60,17 +55,13 @@ use crate::storage::MessageKey;
 
 /// Column-family name for the `(user_ipk → PresenceRecord)` map this relay
 /// holds as a replica. Also holds tombstones under a `TOMB_PREFIX`-prefixed
-/// key.
-///
-/// design-doc: §1.2 — keyed by `[u8; 32]` user IPK; values are
-/// postcard-encoded `PresenceRecord`. No prefix extractor (point lookups
-/// only).
+/// key. Keyed by `[u8; 32]` user IPK; values are postcard-encoded
+/// `PresenceRecord`. No prefix extractor (point lookups only).
 pub const CF_DHT_PRESENCE: &str = "dht_presence";
 
 /// Column-family name for cached internal Merkle-tree node hashes.
-///
-/// design-doc: §1.2 — keys are `merkle_key = slice_id(1) || level(1) ||
-/// index_within_level(1)`, values are 32-byte BLAKE3 hashes.
+/// Keys are `merkle_key = slice_id(1) || level(1) || index_within_level(1)`;
+/// values are 32-byte BLAKE3 hashes.
 pub const CF_DHT_MERKLE: &str = "dht_merkle";
 
 /// Column-family name for the per-recipient offline-message queue this
@@ -95,8 +86,6 @@ pub const CF_DHT_MERKLE: &str = "dht_merkle";
 /// (this CF: home-relay's k-closest queue; default CF: sender-relay's
 /// fallback safety net).
 ///
-/// design-doc: `misc/specs/STICKY_HOME_RELAY.md` §6.1 (cf_dht_queue);
-/// `misc/specs/DHT.md` §1.2 (CF taxonomy convention).
 pub const CF_DHT_QUEUE: &str = "dht_queue";
 
 /// Single-byte prefix that distinguishes tombstone entries from presence
@@ -191,9 +180,6 @@ enum TombstoneVerifyError {
 /// One-line wrapper that defers to the canonical
 /// [`super::routing::self_in_top_k`] helper — see that fn for the
 /// permissive-sparse-table policy and the `K + 1` query rationale.
-///
-/// design-doc: §5.1 (key→value, single relay per user) + §5.4 (ownership
-/// shifts handled lazily).
 fn self_is_owner(dht: &Dht, target: &[u8; 32]) -> bool {
     super::routing::self_in_top_k(dht, &NodeId::from_bytes(*target))
 }
@@ -203,14 +189,14 @@ fn self_is_owner(dht: &Dht, target: &[u8; 32]) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Persist an inbound `Store`'s `PresenceRecord` against any record this
-/// replica already holds, applying §5.3 conflict resolution.
+/// replica already holds, applying conflict resolution.
 ///
 /// Returns the `StoreOutcome` to ship back over the wire:
 ///
 /// - [`StoreOutcome::Stored`] — accepted (either fresh insert or strictly
 ///   newer than what we had).
 /// - [`StoreOutcome::Stale`] — we already hold a record that wins under
-///   §5.3; the new one is dropped, our local state is unchanged.
+///   conflict resolution; the new one is dropped.
 /// - [`StoreOutcome::NotOwner`] — `dht.self_id` is not in the k closest
 ///   to `record.user_ipk` per the current routing table.
 /// - [`StoreOutcome::BadSig`] — `record.verify(now)` failed on either the
@@ -221,9 +207,6 @@ fn self_is_owner(dht: &Dht, target: &[u8; 32]) -> bool {
 /// Durability: the put uses `WriteOptions::set_sync(true)` so the WAL
 /// fsyncs before we return — same pattern as the message queue's
 /// `store_in_rocks` (`relay/src/quic/handler/client/events/forward.rs`).
-///
-/// design-doc: §1.1.2 (replay protection), §5.3 (conflict resolution),
-/// §8.4 (`NotOwner` is the storage-flooding defence).
 pub(crate) fn store_record(dht: &Dht, record: PresenceRecord, now_ms: u64) -> StoreOutcome {
     dht.metrics.inc_stores_received();
 
@@ -234,9 +217,9 @@ pub(crate) fn store_record(dht: &Dht, record: PresenceRecord, now_ms: u64) -> St
                 StoreOutcome::TtlExpired
             }
             // Every other variant is "the record is structurally bad" —
-            // collapse onto BadSig per §2.4.4 wire semantics. The
-            // `NotYetValid`/`Expired` carve-out exists because §2.5
-            // names a separate close code (`DhtClockSkew`) for it.
+            // collapse onto BadSig. The `NotYetValid`/`Expired` carve-out
+            // exists because a separate close code (`DhtClockSkew`)
+            // applies to those.
             _ => StoreOutcome::BadSig,
         };
         dht.metrics.inc_stores_rejected();
@@ -301,17 +284,11 @@ pub(crate) fn store_record(dht: &Dht, record: PresenceRecord, now_ms: u64) -> St
         return StoreOutcome::BadSig;
     }
 
-    // 5. Update the Merkle anti-entropy state. This is in-process only
-    //    (the §6.1 design accepts that the Merkle CF is a cache of the
-    //    record CF — we rebuild on restart from `cf_dht_presence`).
-    //    Hold the merkle write lock briefly; never across an await
-    //    (this whole function is sync).
-    //
-    //    Reuse the bytes we just serialised for the put — saves a
-    //    second postcard pass.
-    //
-    //    design-doc: §6.1 (per-slice Merkle tree update on every accepted
-    //    record).
+    // 5. Update the Merkle anti-entropy state. In-process only — the
+    //    Merkle CF is a cache of the record CF, rebuilt on restart from
+    //    `cf_dht_presence`. Hold the write lock briefly; never across
+    //    an await (this whole function is sync).
+    //    Reuse the bytes we just serialised — saves a second postcard pass.
     let vh = super::sync::record_value_hash(&bytes);
     {
         let mut merkle = dht.merkle.write();
@@ -324,13 +301,11 @@ pub(crate) fn store_record(dht: &Dht, record: PresenceRecord, now_ms: u64) -> St
 
 /// Persist a tombstone, deleting any record it supersedes.
 ///
-/// Conflict rule (mirrors §5.3 in reverse): a tombstone with `generation
-/// >= existing.generation` supersedes the record. We delete the record
-/// from `cf_presence` and write the tombstone under
-/// [`tombstone_key`]. A tombstone with `generation < existing.generation`
-/// is rejected as `Stale`.
-///
-/// design-doc: §1.2 (Tombstones — honoured for `2 × PRESENCE_TTL_MS`).
+/// A tombstone with `generation >= existing.generation` supersedes the
+/// record. We delete the record from `cf_presence` and write the
+/// tombstone under [`tombstone_key`]. A tombstone with
+/// `generation < existing.generation` is rejected as `Stale`. Tombstones
+/// are honoured for `2 × PRESENCE_TTL_MS`.
 pub(crate) fn store_tombstone(
     dht: &Dht, tomb: TombstoneRecord, _now_ms: u64,
 ) -> TombstoneOutcome {
@@ -378,8 +353,8 @@ pub(crate) fn store_tombstone(
     //    doesn't expose a transaction handle on the bare `DB`, but in
     //    the non-transactional case we accept that a crash between the
     //    two operations leaves us with the (resurrected) record. The
-    //    next anti-entropy round (§6.3) re-converges by replaying the
-    //    same tombstone from a peer.
+    //    next anti-entropy round re-converges by replaying the same
+    //    tombstone from a peer.
     let _ = dht.rocks.delete_cf(&cf, record_key);
     if dht.rocks.put_cf_opt(&cf, tk, &bytes, &wopts).is_err() {
         return TombstoneOutcome::BadSig;
@@ -404,8 +379,6 @@ pub(crate) fn store_tombstone(
     //    explicitly so the leaf disappears from the bitset only after
     //    the honour window has expired and no peer can resurrect.
     //
-    //    design-doc: §1.2 (Tombstones honoured for `2 × PRESENCE_TTL_MS`),
-    //    §6.3 ("Tombstones converge the same way").
     let vh = super::sync::tombstone_value_hash(&bytes);
     {
         let mut merkle = dht.merkle.write();
@@ -425,7 +398,6 @@ pub(crate) fn store_tombstone(
 /// - The publish path (publish.rs) — when self is in the k closest,
 ///   we self-store via `store_record` and re-read here.
 ///
-/// design-doc: §4.2 (Found / NotPresent), §1.1.3 (TTL).
 pub(crate) fn lookup_record(
     dht: &Dht, user_ipk: &[u8; 32], now_ms: u64,
 ) -> Option<PresenceRecord> {
@@ -450,13 +422,13 @@ pub(crate) fn lookup_record(
 /// Periodic cleanup pass: scan `cf_presence` and delete:
 /// 1. Expired *records* (whose `not_after <= now_ms`), and
 /// 2. Expired *tombstones* (whose `deleted_at + 2 × PRESENCE_TTL_MS <
-///    now_ms` — the §1.1.3 / §1.2 honour window has fully elapsed).
+///    now_ms` — the honour window has fully elapsed).
 ///
-/// The 2× window for tombstones is deliberate: §1.1.3 says replicas
-/// honour a tombstone for that long *after* `deleted_at`. By the time
-/// 2× TTL has passed, no peer in the network can still hold a stale
-/// live record they could resurrect — they would have hit `not_after`
-/// long before. Dropping the tombstone after that is safe.
+/// The 2× window for tombstones is deliberate: replicas honour a
+/// tombstone for that long *after* `deleted_at`. By the time 2× TTL has
+/// passed, no peer in the network can still hold a stale live record
+/// they could resurrect — they would have hit `not_after` long before.
+/// Dropping the tombstone after that is safe.
 ///
 /// When a tombstone is deleted, its leaf is also removed from the
 /// in-memory Merkle tree. The leaf was advertised during the honour
@@ -470,11 +442,7 @@ pub(crate) fn lookup_record(
 /// **Caller responsibility:** this is meant to be called from a periodic
 /// scheduler (the anti-entropy task), not on a hot RPC path. A
 /// full CF scan is `O(records held)` which is small per relay (~300
-/// records at design-doc §6.4 scale) but still costs an iterator open.
-///
-/// design-doc: §1.1.2 (`now > not_after` rejection), §1.1.3 / §1.2
-/// (tombstone honour window = `2 × PRESENCE_TTL_MS`), §6.3 (anti-entropy
-/// of tombstones).
+/// records) but still costs an iterator open.
 pub fn evict_expired(dht: &Dht, now_ms: u64) -> usize {
     let Some(cf) = dht.rocks.cf_handle(CF_DHT_PRESENCE) else {
         return 0;
@@ -540,8 +508,7 @@ pub fn evict_expired(dht: &Dht, now_ms: u64) -> usize {
     evicted
 }
 
-/// Sync planning half of the K-set drift migration in `evict_expired`
-/// (`STICKY_HOME_RELAY.md` §4.4 / §7.2).
+/// Sync planning half of the K-set drift migration in `evict_expired`.
 ///
 /// Walks `cf_dht_queue` once and identifies up to `max` queue entries
 /// whose recipient `user_ipk` is no longer in this relay's K-closest
@@ -560,18 +527,14 @@ pub fn evict_expired(dht: &Dht, now_ms: u64) -> usize {
 /// → spawn a tokio task per candidate → on success the migrator deletes
 /// the local queue entry.
 ///
-/// **Per-message K-set check**: §7.2 says "lazy on `evict_expired`
-/// sweep" — meaning per-sweep, not per-message-write — so checking
-/// each queued message's K-set membership at sweep time is exactly
-/// what the spec calls for. The cost is one routing-table read per
-/// queued entry; bounded by `MAX_MIGRATE_PER_SWEEP` (256) so a
-/// pathologically full disk can't stall the sweep.
+/// **Per-message K-set check**: one routing-table read per queued entry,
+/// bounded by `MAX_MIGRATE_PER_SWEEP` (256) so a pathologically full
+/// disk can't stall the sweep.
 ///
 /// **Out of scope**: `cf_messages` (default CF) entries are *not*
-/// migrated — per `STICKY_HOME_RELAY.md` §6, that CF is the local-
-/// fallback safety net and the assumption is the sender's relay still
-/// owns it. Only `cf_dht_queue` (the home-replica queue) is subject
-/// to drift.
+/// migrated — that CF is the local-fallback safety net owned by the
+/// sender's relay. Only `cf_dht_queue` (the home-replica queue) is
+/// subject to drift.
 pub(crate) fn plan_drift_migrations(
     dht: &Dht, max: usize,
 ) -> Vec<(MessageKey, DispatchP)> {
@@ -612,12 +575,11 @@ pub(crate) fn plan_drift_migrations(
             None => {
                 let target_id = NodeId::from_bytes(user_ipk);
                 let candidates = dht.routing.read().find_closest(&target_id, K);
-                // §3.5 / §store.rs::self_is_owner permissive policy:
-                // sparse routing (< K candidates) means we *might* still
-                // be K-closest by virtue of nobody else being closer.
-                // Treat that as "not drifted" so a freshly-bootstrapped
-                // relay doesn't migrate every entry away on its first
-                // sweep.
+                // Permissive sparse-table policy: sparse routing (< K
+                // candidates) means we *might* still be K-closest by
+                // virtue of nobody else being closer. Treat that as "not
+                // drifted" so a freshly-bootstrapped relay doesn't migrate
+                // every entry away on its first sweep.
                 let drifted_now = if candidates.len() < K {
                     false
                 } else {
@@ -695,8 +657,6 @@ pub(crate) fn delete_migrated_entry(dht: &Dht, key: &MessageKey) -> bool {
 /// [`store_record`] and the legacy `store_in_rocks` in
 /// `relay/src/quic/handler/client/events/forward.rs`.
 ///
-/// design-doc: `misc/specs/STICKY_HOME_RELAY.md` §6.1 (`cf_dht_queue` key
-/// shape and per-recipient cap).
 pub(crate) fn enqueue_for_home(
     dht: &Dht, user_ipk: &[u8; 32], dispatch: &DispatchP, now_ms: u64,
 ) -> ForwardOutcome {
@@ -795,7 +755,6 @@ pub(crate) fn lookup_tombstone(dht: &Dht, user_ipk: &[u8; 32]) -> Option<Tombsto
 /// **Caller's contract**: `parking_lot` lock-discipline applies (no
 /// guards held across `await`); this function is sync and takes none.
 ///
-/// design-doc: `misc/specs/STICKY_HOME_RELAY.md` §6.1 (cf_dht_queue).
 pub(crate) fn lookup_queue_for_user(
     dht: &Dht, user_ipk: &[u8; 32], max: usize,
 ) -> Vec<(MessageKey, DispatchP)> {

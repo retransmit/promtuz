@@ -12,9 +12,9 @@ use quinn::Connection;
 /// `last_heartbeat_at` is the resolver's local-clock observation of the
 /// most recent authenticated `RelayHello`/`RelayHeartbeat` from this
 /// relay. It is used as the recency proxy for the `rtt_near` ranking in
-/// [`ClientRequest::GetBootstrapPeers`] (design-doc §9.4, §11.3): until
-/// the resolver tracks per-relay RTT directly (Vivaldi-or-similar, future
-/// work), most-recently-heard-from is the best signal of "this relay has
+/// [`ClientRequest::GetBootstrapPeers`]: until the resolver tracks
+/// per-relay RTT directly (Vivaldi-or-similar, future work),
+/// most-recently-heard-from is the best signal of "this relay has
 /// good network position towards us."
 ///
 /// Stored as `Instant` rather than ms-since-epoch so the recency

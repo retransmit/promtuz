@@ -34,11 +34,10 @@ impl HandleRPC for Resolver {
     }
 }
 
-/// Implementation of [`ClientRequest::GetBootstrapPeers`] (design-doc
-/// §3.5, §9.4).
+/// Implementation of [`ClientRequest::GetBootstrapPeers`].
 ///
-/// **Auth:** none. Per §9.4 this is a public query; the response is a
-/// strict subset of what `GetRelays` already exposes.
+/// **Auth:** none. This is a public query; the response is a strict
+/// subset of what `GetRelays` already exposes.
 ///
 /// **Strategy:** snapshot the registry once, then perform two separate
 /// rankings on the snapshot:
@@ -49,11 +48,11 @@ impl HandleRPC for Resolver {
 ///    already had a populated routing table.
 ///
 /// 2. `rtt_near`: descending by `last_heartbeat_at` (most-recently
-///    active first). Per §11.3, the resolver does not measure
-///    relay-to-relay RTT yet — recency-of-liveness is a documented
-///    proxy. A relay that just sent a heartbeat is by definition still
-///    healthy and routable from the resolver's vantage point, which is
-///    a useful seed for a fresh-joiner.
+///    active first). The resolver does not measure relay-to-relay RTT
+///    yet — recency-of-liveness is a documented proxy. A relay that
+///    just sent a heartbeat is by definition still healthy and routable
+///    from the resolver's vantage point, which is a useful seed for a
+///    fresh-joiner.
 ///
 /// **Bounds:** the *combined* count is capped by [`MAX_BOOTSTRAP_RESULTS`].
 /// Combined requests above the cap are rejected outright (returning an
@@ -123,8 +122,8 @@ fn handle_get_bootstrap_peers(
 ///
 /// The `id` already lives behind a `BaseId<32>` so its `as_bytes()`
 /// returns a `&[u8; 32]` — a direct lex compare on the per-byte XOR is
-/// equivalent to an unsigned big-endian compare on the 256-bit distance,
-/// which is what the design doc means by "XOR distance" (§3.1).
+/// equivalent to an unsigned big-endian compare on the 256-bit distance
+/// (Kademlia XOR metric).
 ///
 /// Delegates the per-byte XOR to the canonical [`common::quic::xor32`]
 /// so we share one implementation across resolver / relay; the array

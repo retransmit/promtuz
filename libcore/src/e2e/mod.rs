@@ -10,9 +10,8 @@
 //! [`RelayDhtClient`] (via its explicit-signer seam) over a live
 //! authenticated `client/0` connection to a real relay subprocess.
 //!
-//! This is the same shape the deleted `tests/e2e_phase5b.rs` used to drive
-//! `MlsContext` clients, swapped from the removed `Peer1DhtClient`/`peer/1`
-//! path to `RelayDhtClient`/`client/0`.
+//! Drives the same `MlsContext` client shape as the integration harness,
+//! over `RelayDhtClient`/`client/0` instead of the removed `peer/1` path.
 //!
 //! ## Control protocol (one command per stdin line; reply per stdout line)
 //!

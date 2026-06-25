@@ -18,18 +18,15 @@
 //! 3. Bisect: walk down with `MerkleDiff` calls until either we hit a
 //!    leaf and have `(ipk, peer_value_hash)` pairs, or we exceed
 //!    [`MAX_BISECT_DEPTH`] in which case we fall back to a brute
-//!    "fetch every leaf in the subtree" recovery (§6.3 cost-bound
-//!    behaviour).
+//!    "fetch every leaf in the subtree" recovery.
 //! 4. Fetch: for each diverging IPK, issue [`FetchRecord`] (capped at
 //!    [`MAX_FETCH_RECORD_BATCH`] per RPC) and apply the returned
-//!    records via [`super::super::store::store_record`] — the §5.3
+//!    records via [`super::super::store::store_record`] — the
 //!    conflict-resolution rules pick the canonical winner.
 //!
 //! Errors are logged and swallowed; one failed peer doesn't abort the
 //! tick. The next tick picks a different peer.
 //!
-//! design-doc: §2.4.6/§2.4.7/§2.4.8 (RPC types), §6.3 (sync sequence),
-//! §7.3 (cold-join `FetchRecord` rate limit).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -73,9 +70,8 @@ const MAX_BISECT_DEPTH: usize = TREE_DEPTH;
 // Server-side handlers
 // ---------------------------------------------------------------------------
 
-/// Handle an inbound `MerkleSummary` RPC. Per §2.4.6, returns the
-/// `(slice_id, root_hash)` pairs for slices the requester's bitset
-/// asked about.
+/// Handle an inbound `MerkleSummary` RPC. Returns the `(slice_id,
+/// root_hash)` pairs for slices the requester's bitset asked about.
 pub(crate) fn handle_merkle_summary(
     dht: &Arc<Dht>, req: MerkleSummary,
 ) -> MerkleSummaryResp {
@@ -85,8 +81,8 @@ pub(crate) fn handle_merkle_summary(
     MerkleSummaryResp { roots }
 }
 
-/// Handle an inbound `MerkleDiff` RPC. Per §2.4.7, returns either the
-/// 16 child hashes at the requested internal node, or the full
+/// Handle an inbound `MerkleDiff` RPC. Returns either the 16 child
+/// hashes at the requested internal node, or the full
 /// `(ipk, value_hash)` leaf entries.
 ///
 /// Path-length bound check: a path longer than [`TREE_DEPTH`] is
@@ -96,18 +92,16 @@ pub(crate) fn handle_merkle_summary(
 pub(crate) fn handle_merkle_diff(dht: &Arc<Dht>, req: MerkleDiff) -> MerkleDiffResp {
     dht.metrics.inc_merkle_diffs_received();
     if req.path.len() > TREE_DEPTH {
-        // Defensive: clamp to leaf depth. The wire bound is
-        // MERKLE_DIFF_PATH_MAX (= TREE_DEPTH) per §2.6, but if a
-        // misbehaving peer slips past their own bound check we don't
-        // panic.
+        // Defensive: clamp to leaf depth. If a misbehaving peer slips
+        // past their own bound check we don't panic.
         return MerkleDiffResp::Leaves { entries: Vec::new() };
     }
     dht.merkle.read().diff(req.slice_id, &req.path)
 }
 
-/// Handle an inbound `FetchRecord` RPC. Per §2.4.8: returns *both* live
-/// records and tombstones for each requested IPK that we currently
-/// hold, up to [`FETCH_RECORD_MAX`] entries combined.
+/// Handle an inbound `FetchRecord` RPC. Returns *both* live records
+/// and tombstones for each requested IPK that we currently hold, up
+/// to [`FETCH_RECORD_MAX`] entries combined.
 ///
 /// **Tombstone preference:** when both a record and a tombstone exist
 /// for the same IPK (which should not normally happen — `store_tombstone`
@@ -115,7 +109,6 @@ pub(crate) fn handle_merkle_diff(dht: &Arc<Dht>, req: MerkleDiff) -> MerkleDiffR
 /// tombstone wins. It's the authoritative deletion and the requester
 /// needs it to converge.
 ///
-/// design-doc: §6.3 (anti-entropy carries tombstones too).
 pub(crate) fn handle_fetch_record(dht: &Arc<Dht>, req: FetchRecord) -> FetchRecordResp {
     let now = now_ms();
     let mut records = Vec::new();
@@ -327,10 +320,10 @@ async fn bisect_slice(
 /// Cases handled:
 /// - Peer has an entry we don't → fetch.
 /// - Peer has an entry we do, but value hashes differ → fetch (the
-///   §5.3 conflict resolver in `store_record` picks the right one).
+///   conflict resolver in `store_record` picks the right one).
 /// - We have an entry the peer doesn't → no action here; the peer
 ///   will see our root differ on its own next sync round and pull from
-///   us. (Push-on-mismatch is explicitly out of v1 per §6.3.)
+///   us (push-on-mismatch is out of scope for v1).
 fn diff_leaves(
     dht: &Arc<Dht>, slice_id: u8, path: &[u8],
     peer_entries: &[(common::types::bytes::Bytes<32>, common::types::bytes::Bytes<32>)],
@@ -362,9 +355,8 @@ fn diff_leaves(
 /// [`MAX_FETCH_RECORD_BATCH`]; longer lists are split across multiple
 /// RPCs.
 ///
-/// design-doc: §6.3 — anti-entropy carries both records and tombstones,
-/// so deletions converge even when a peer's view of `(ipk → state)`
-/// differs only by record-vs-tombstone, not record-vs-record.
+/// Anti-entropy carries both records and tombstones so deletions
+/// converge even when peers diverge on record-vs-tombstone.
 async fn fetch_and_apply(
     dht: &Arc<Dht>, conn: &Connection, ipks: &[[u8; 32]],
 ) -> Result<(), anyhow::Error> {
@@ -786,8 +778,7 @@ mod tests {
 
     #[test]
     fn fetch_record_carries_tombstone_to_peer_with_record() {
-        // Anti-entropy convergence test. Simulate the §6.3 sequence
-        // directly:
+        // Anti-entropy convergence test:
         // - dht_a holds a tombstone for `(user, gen 1)`.
         // - dht_b holds the live record for same `(user, gen 1)`.
         // - dht_b would (in the real flow) call `handle_fetch_record`

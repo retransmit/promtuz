@@ -1,4 +1,4 @@
-//! Out-of-order epoch buffer (spec §6.3, §7).
+//! Out-of-order epoch buffer.
 //!
 //! # Problem
 //!
@@ -31,11 +31,11 @@
 //!
 //! `dispatch_id` is the outer `DispatchP::id` (UUIDv7) bytes — keeping
 //! the dedup boundary at the dispatch layer matches the rest of
-//! promtuz's idempotency discipline (spec §7.6).
+//! promtuz's idempotency discipline.
 //!
 //! # Bounded buffer
 //!
-//! Cap is `MAX_EPOCH_AHEAD_BUFFER = 512` per group (spec §0, §7.3).
+//! Cap is `MAX_EPOCH_AHEAD_BUFFER = 512` per group.
 //! On overflow we **drop the newest entry** (stack-style):
 //!
 //! > Reasoning: the oldest entries are most likely the load-bearing
@@ -43,8 +43,6 @@
 //! > blocks epoch advance. New application messages at a far-ahead
 //! > epoch are more likely to also be load-bearing-supplemented;
 //! > dropping them is preferable to dropping commits.
-//! >
-//! > — spec §7.3
 //!
 //! "Newest" is defined by `received_at_ms` (the wall-clock time at
 //! `push`); when a new push would exceed the cap, the *incoming*
@@ -67,11 +65,7 @@
 //! 4. Repeats until no more progress.
 //!
 //! The drain is **bounded** — at most `EPOCH_CATCHUP_LIMIT = 1024`
-//! commits per call (spec §0). Beyond that, we just stop draining.
-//!
-//! design-doc: `misc/specs/MLS.md` §6.3 (drain order), §7
-//! (out-of-order delivery formal), §0 (`MAX_EPOCH_AHEAD_BUFFER`,
-//! `EPOCH_CATCHUP_LIMIT`).
+//! commits per call. Beyond that, we just stop draining.
 
 // Public surface here is consumed by `messaging.rs`; the cdylib
 // compiler can't see across the JNI boundary so flags it as dead.
@@ -101,9 +95,9 @@ pub enum PushOutcome {
     /// the cap.
     Inserted,
     /// The incoming row was dropped because the buffer is at cap.
-    /// Per spec §7.3 we drop the *newest* — and since the incoming
-    /// is by definition newest, it doesn't get persisted. The caller
-    /// should log the discard.
+    /// We drop the *newest* — and since the incoming is by definition
+    /// newest, it doesn't get persisted. The caller should log the
+    /// discard.
     Discarded,
     /// A row with the same `(group_id, dispatch_id)` already exists.
     /// We treat this as idempotent; the existing row's `msg_blob` is
@@ -114,7 +108,7 @@ pub enum PushOutcome {
 
 /// Hard cap on commits processed per [`EpochCatchupBuffer::drain_when_ready`]
 /// call. Protects against pathological backlogs that would block the
-/// caller for >1s. Spec §0 (`EPOCH_CATCHUP_LIMIT`).
+/// caller for >1s.
 #[allow(dead_code)] // messaging.rs caller.
 pub const EPOCH_CATCHUP_LIMIT: usize = 1024;
 
@@ -167,12 +161,11 @@ impl EpochCatchupBuffer {
     /// envelope already). `dispatch_id` is the outer DispatchP id
     /// bytes.
     ///
-    /// Per spec §7.5: if `msg_epoch < group.epoch()`, the caller
-    /// should *feed directly* to the group (openmls may decrypt
-    /// from cached past-epoch material) rather than buffering.
-    /// We don't enforce this here; the buffer is happy to stash
-    /// any epoch — but in practice the caller filters before
-    /// pushing.
+    /// If `msg_epoch < group.epoch()`, the caller should *feed directly*
+    /// to the group (openmls may decrypt from cached past-epoch material)
+    /// rather than buffering. We don't enforce this here; the buffer is
+    /// happy to stash any epoch — but in practice the caller filters
+    /// before pushing.
     ///
     /// Returns:
     /// - [`PushOutcome::Inserted`] on a fresh row,
@@ -222,7 +215,7 @@ impl EpochCatchupBuffer {
             })?;
 
         if (count as usize) >= MAX_EPOCH_AHEAD_BUFFER {
-            // Spec §7.3 — drop newest (i.e. drop the incoming).
+            // Drop newest (i.e. drop the incoming).
             log::warn!(
                 "EpochCatchupBuffer: group_id={} buffer full ({} rows), dropping newest \
                  (this group may be stuck — consider RequestRejoin)",
@@ -249,7 +242,7 @@ impl EpochCatchupBuffer {
     /// Drain any newly-processable buffered messages after a
     /// commit-merge that advanced the group's epoch.
     ///
-    /// Pseudocode (spec §6.3):
+    /// Pseudocode:
     ///
     /// ```text
     /// loop:
@@ -291,7 +284,7 @@ impl EpochCatchupBuffer {
 
             // Find a candidate row to process: epoch <= current.
             // We pick the *oldest* (lowest received_at_ms) to give
-            // commits priority — spec §7.3 reasoning.
+            // commits priority — they're most likely to unblock epoch advance.
             let candidate: Option<(Vec<u8>, Vec<u8>, u64)> = {
                 let conn = self.conn.lock();
                 conn.query_row(

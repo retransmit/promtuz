@@ -1,10 +1,7 @@
 //! Per-relay DHT operation counters.
 //!
-//! Plain-and-obvious `AtomicU64`s, one per kind of event listed in §11.4 /
-//! the dispatch's required-counters list. No histograms — just counts. A
-//! later pass can wrap these in a Prometheus-style exporter.
-//!
-//! design-doc: §9.1 (`metrics.rs`), §11.4 (need-instrumentation).
+//! Plain `AtomicU64`s, one per kind of observable event. No histograms —
+//! just counts. A later pass can wrap these in a Prometheus-style exporter.
 
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -16,32 +13,32 @@ use std::sync::atomic::Ordering;
 /// is a single atomic op (no fence), trivial relative to any RPC.
 #[derive(Debug, Default)]
 pub struct Metrics {
-    // --- iterative lookups (§4) ---
+    // --- iterative lookups ---
     pub lookups_started:   AtomicU64,
     pub lookups_succeeded: AtomicU64,
     pub lookups_failed:    AtomicU64,
 
-    // --- store path (§5) ---
+    // --- store path ---
     pub stores_received: AtomicU64,
     pub stores_accepted: AtomicU64,
     pub stores_rejected: AtomicU64,
 
-    // --- inbound RPCs (§2.4) ---
+    // --- inbound RPCs ---
     pub find_node_rpcs:  AtomicU64,
     pub find_value_rpcs: AtomicU64,
     pub pings_sent:      AtomicU64,
     pub pings_received:  AtomicU64,
 
-    // --- anti-entropy (§6) ---
+    // --- anti-entropy ---
     pub merkle_summaries_sent:     AtomicU64,
     pub merkle_summaries_received: AtomicU64,
     pub merkle_diffs_sent:         AtomicU64,
     pub merkle_diffs_received:     AtomicU64,
 
-    // --- routing-table churn (§3.3) ---
+    // --- routing-table churn ---
     pub bucket_evictions: AtomicU64,
 
-    // --- peer connection lifecycle (§7.1) ---
+    // --- peer connection lifecycle ---
     pub peer_conns_opened: AtomicU64,
     pub peer_conns_closed: AtomicU64,
 
@@ -95,9 +92,9 @@ pub struct Metrics {
     pub forwards_stored: AtomicU64,
 
     /// Fewer than `FORWARD_K_MIN` homes accepted the `Forward`. Sender
-    /// fell back to the local queue safety net (§4.2 step 7) and
-    /// acked `DispatchAckP::Queued` (or `QueueFull` if the local cap
-    /// was hit too).
+    /// fell back to the local queue safety net and acked
+    /// `DispatchAckP::Queued` (or `QueueFull` if the local cap was hit
+    /// too).
     pub forward_fallbacks_to_local_queue: AtomicU64,
 
     /// `enqueue_for_home` writes to `cf_dht_queue` that succeeded —

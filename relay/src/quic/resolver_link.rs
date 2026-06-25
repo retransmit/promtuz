@@ -7,7 +7,7 @@
 //! for the original lifecycle traffic (`RelayHello` / heartbeats) which
 //! the link drives autonomously, but not for code that needs to *send a
 //! one-shot request* over the same connection — most notably the DHT
-//! bootstrap path (design-doc §3.5 / §9.4).
+//! bootstrap path.
 //!
 //! [`ResolverLinkHandle`] solves this with a small shared state shim:
 //! the link writes the current `Connection` into a `RwLock<Option<...>>`
@@ -78,13 +78,12 @@ impl BackoffConfig {
 
 /// Cloneable handle to the live resolver session, used by code outside
 /// the link task that wants to send one-shot requests over the same
-/// connection (currently: DHT bootstrap, design-doc §3.5 / §9.4).
+/// connection (currently: DHT bootstrap).
 ///
 /// The link writes the active `Connection` in at session start and
 /// clears it at session end. Holders observe `None` while the link is
 /// reconnecting; callers handle that by erroring out (bootstrap retries
-/// are scheduled separately, design-doc §3.5 phase A re-ask after 5s
-/// jitter).
+/// are scheduled separately).
 ///
 /// Cheap to clone: just the `Arc<RwLock<Option<Connection>>>` inside.
 #[derive(Clone, Debug)]

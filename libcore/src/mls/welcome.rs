@@ -1,5 +1,4 @@
-//! Welcome envelope construction and processing (spec §3.3, §4.2,
-//! §6.6, §12.7).
+//! Welcome envelope construction and processing.
 //!
 //! # Outbound (`make_welcome_envelope`)
 //!
@@ -8,7 +7,7 @@
 //! 1. TLS-serialise the openmls `Welcome` (carried inside the
 //!    returned `MlsMessageOut`).
 //! 2. Compute the outer signing transcript via
-//!    `welcome_envelope_signing_input` (spec §3.3).
+//!    `welcome_envelope_signing_input`.
 //! 3. Sign with the inviter's IPK long-term key.
 //! 4. Pack into [`WelcomeEnvelopeP`].
 //!
@@ -19,8 +18,7 @@
 //!
 //! # Inbound (`process_welcome`)
 //!
-//! 1. Verify outer sig under `sender_ipk`. Reject on failure (spec
-//!    §12.7).
+//! 1. Verify outer sig under `sender_ipk`. Reject on failure.
 //! 2. TLS-deserialise the inner `MlsMessageIn`, ensure it carries a
 //!    `Welcome` body.
 //! 3. Hand to `StagedWelcome::new_from_welcome` — openmls looks up
@@ -32,15 +30,12 @@
 //!
 //! # KeyPackage consumption marking
 //!
-//! Per spec §5.3, openmls itself deletes the consumed KP from its
-//! storage during `into_group` (the default is *not* a "last-resort"
-//! KP, so the storage trait's `delete_key_package` is invoked).
-//! That handles the openmls-internal side. For our stash tracking
-//! (which lives in a separate table), the caller invokes
-//! `KeyPackageStash::on_consumed` after `process_welcome` returns.
-//!
-//! design-doc: `misc/specs/MLS.md` §3.3 (signing transcript), §4.2
-//! step 8 (recipient flow), §12.7 (Welcome injection defence).
+//! Openmls itself deletes the consumed KP from its storage during
+//! `into_group` (the default is *not* a "last-resort" KP, so the
+//! storage trait's `delete_key_package` is invoked). That handles the
+//! openmls-internal side. For our stash tracking (which lives in a
+//! separate table), the caller invokes `KeyPackageStash::on_consumed`
+//! after `process_welcome` returns.
 
 // Public surface here (`make_welcome_envelope` / `process_welcome`)
 // is consumed by `messaging.rs`; the cdylib compiler can't see across
@@ -101,10 +96,9 @@ pub fn make_welcome_envelope(
     // (which carries `wire_format = welcome` plus the body). The
     // recipient TLS-deserialises as `MlsMessageIn` and pattern-
     // matches on `MlsMessageBodyIn::Welcome`. Functionally
-    // equivalent to "TLS-encoded Welcome" per spec §3.1; the only
-    // difference is the outer 1-byte `version` field that prefixes
-    // the message body. Documented in the [`process_welcome`] doc
-    // comment.
+    // equivalent to "TLS-encoded Welcome"; the only difference is the
+    // outer 1-byte `version` field that prefixes the message body.
+    // Documented in the [`process_welcome`] doc comment.
     let welcome_blob = welcome_msg
         .tls_serialize_detached()
         .map_err(MlsGroupError::from_codec)?;
@@ -117,7 +111,7 @@ pub fn make_welcome_envelope(
         )));
     }
 
-    // 2. Compute the signing transcript per spec §3.3.
+    // 2. Compute the signing transcript.
     let transcript = welcome_envelope_signing_input(
         MLS_WIRE_VERSION,
         &group_id,
@@ -147,19 +141,17 @@ pub fn make_welcome_envelope(
 /// success, or an [`MlsGroupError`] on:
 ///
 /// - `MlsGroupError::BadSignature` — outer envelope sig failed
-///   verification under `sender_ipk`. Spec §12.7.
+///   verification under `sender_ipk`.
 /// - `MlsGroupError::BadCipherSuite` — the embedded `Welcome`'s
-///   cipher suite is not `0x0003`. Spec §0.
+///   cipher suite is not `0x0003`.
 /// - `MlsGroupError::Codec` — the `welcome_blob` bytes don't
 ///   parse as a TLS-encoded `Welcome`.
 /// - `MlsGroupError::OpenMls(...)` — openmls rejected the welcome
 ///   (no matching KP, joiner secret invalid, …).
 ///
-/// **Out-of-band gating** (the "is sender_ipk a contact?" check
-/// from spec §3.3) is *not* in this function — it's the caller's
-/// responsibility to surface a UI prompt before invoking
-/// `process_welcome`. The anti-abuse / contact-first gating spec
-/// (HANDOFF priority 2) will plug in there.
+/// **Out-of-band gating** (the "is sender_ipk a contact?" check)
+/// is *not* in this function — it's the caller's responsibility to
+/// surface a UI prompt before invoking `process_welcome`.
 pub fn process_welcome(
     provider: &PromtuzMlsProvider, envelope: &WelcomeEnvelopeP,
 ) -> Result<MlsGroupHandle> {
@@ -190,15 +182,13 @@ pub fn process_welcome(
     // 2. Deserialise as `MlsMessageIn` (the openmls 0.8 outer
     //    framing) and extract the inner `Welcome` body.
     //
-    //    Per the spec §3.1 prose, the wire field is "TLS-encoded
-    //    `openmls::Welcome`". We diverge: the bytes here are the
-    //    full `MlsMessage` framing (`MlsMessageOut`/`MlsMessageIn`),
-    //    which prefixes the version byte to the body. This is
-    //    forced by openmls 0.8 gating `MlsMessageOut::into_welcome`
-    //    behind `#[cfg(any(test, feature = "test-utils"))]` —
-    //    production code cannot extract the naked Welcome at
-    //    encode time. Functionally identical for security purposes;
-    //    documented here so a future spec review can update §3.1.
+    //    The bytes here are the full `MlsMessage` framing
+    //    (`MlsMessageOut`/`MlsMessageIn`), which prefixes a version byte
+    //    to the Welcome body. This is forced by openmls 0.8 gating
+    //    `MlsMessageOut::into_welcome` behind
+    //    `#[cfg(any(test, feature = "test-utils"))]` — production code
+    //    cannot extract the naked Welcome at encode time. Functionally
+    //    identical for security purposes.
     // ---------------------------------------------------------
     let mls_msg = MlsMessageIn::tls_deserialize_exact(&envelope.welcome_blob.0)
         .map_err(MlsGroupError::from_codec)?;
@@ -240,7 +230,7 @@ pub fn process_welcome(
     // We require: at least one member's identity matches
     // `envelope.sender_ipk` AND at least one matches
     // `envelope.recipient_ipk`. We do NOT bound the total membership
-    // (multi-party Welcomes carry N>=2 members; spec §4.4).
+    // (multi-party Welcomes carry N>=2 members).
     //
     // Sender-/recipient-IPK address checks are done by the caller
     // (`process_welcome_inbound` in `api::messaging`) which knows the

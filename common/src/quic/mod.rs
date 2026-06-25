@@ -46,20 +46,20 @@ pub enum CloseReason {
     /// Returned at the acceptor before any per-connection state is created.
     RateLimited,
     /// DHT (`peer/1`): a record's `user_sig` or `relay_sig` failed to
-    /// verify. Per `misc/specs/DHT.md` §2.5.
+    /// verify.
     DhtBadSignature,
     /// DHT (`peer/1`): a record's `not_before` is more than
     /// `PRESENCE_MAX_FUTURE_SKEW_MS` in the future, or `not_after` has
-    /// already elapsed at the time of receipt. Per §2.5.
+    /// already elapsed at the time of receipt.
     DhtClockSkew,
     /// DHT (`peer/1`): peer asked us to STORE a record outside our
-    /// k-closest ownership window and we declined. Per §2.5 / §5.4.
+    /// k-closest ownership window and we declined.
     DhtNotOwner,
     /// DHT (`peer/1`): per-peer rate limit on `Store`/`FetchRecord`
-    /// tripped. Per §2.5 / §8.4.
+    /// tripped.
     DhtFlood,
     /// DHT (`peer/1`): a wire field violated its declared length bound
-    /// (see `dht_p2p`'s `MAX_*` consts). Per §2.5 / §2.6.
+    /// (see `dht_p2p`'s `MAX_*` consts).
     DhtMalformedKey,
     /// DHT (`peer/1`): sticky-home `Forward` / `QueueFetch` /
     /// `QueueFetchAck` RPC was rejected for a hard protocol violation
@@ -67,34 +67,32 @@ pub enum CloseReason {
     /// `Forward`, ack-id list overflow on `QueueFetchAck`). The
     /// soft-reject outcomes (`QueueFull`, `NotOwner`, `RateLimited`)
     /// are returned in the response body and do **not** close the
-    /// connection. Per `misc/specs/STICKY_HOME_RELAY.md` §5.3.
+    /// connection.
     DhtForwardRejected,
     /// MLS — `KeyPackagePublish` / `KeyPackageRefill` /
-    /// `KeyPackageFetch` RPC failed because some piece of the
-    /// payload was structurally malformed: the publisher's outer
-    /// `sig` did not verify, a per-record `owner_sig` did not verify,
-    /// the embedded openmls `KeyPackage` rejected validation, the
-    /// batch exceeded `KP_STASH_TARGET`, or a static-fields conflict
-    /// was detected (§13.3). Maps from
+    /// `KeyPackageFetch` RPC failed because some piece of the payload
+    /// was structurally malformed: the publisher's outer `sig` did not
+    /// verify, a per-record `owner_sig` did not verify, the embedded
+    /// openmls `KeyPackage` rejected validation, the batch exceeded
+    /// `KP_STASH_TARGET`, or a static-fields conflict was detected.
+    /// Maps from
     /// [`crate::proto::mls_wire::KeyPackagePublishOutcome::BadSig`] /
     /// `TooMany` / `StaticFieldsConflict` and the analogous Refill
-    /// variants. Per `misc/specs/MLS.md` §3.4 / §3.6 / §13.3.
+    /// variants.
     KeyPackageMalformed,
-    /// MLS — record's `expires_at_ms` had already elapsed at
-    /// store time, or the publisher's `timestamp` is outside the
+    /// MLS — record's `expires_at_ms` had already elapsed at store
+    /// time, or the publisher's `timestamp` is outside the
     /// ±`MAX_KP_SKEW_MS` skew window. Distinct from
     /// [`Self::KeyPackageMalformed`] so operators can attribute
     /// clock-drift problems separately from forged-signature problems.
-    /// Per `misc/specs/MLS.md` §3.4 (Expired outcome).
     KeyPackageExpired,
-    /// MLS — per-`(target_ipk, requester_relay_id)` rate
-    /// limit on KeyPackage fetches tripped (`MAX_KP_FETCH_PER_HOUR
-    /// = 60`, §0). Distinct from [`Self::DhtFlood`] (which is the
-    /// general per-peer per-RPC-class limiter) because the KP fetch
-    /// limiter is keyed on the (target, requester) *pair*, not on
-    /// the requester alone — so a peer hammering a single target
-    /// trips this code, while a peer hammering many targets at the
-    /// per-peer rate trips `DhtFlood`. Per `misc/specs/MLS.md` §5.6.
+    /// MLS — per-`(target_ipk, requester_relay_id)` rate limit on
+    /// KeyPackage fetches tripped (`MAX_KP_FETCH_PER_HOUR = 60`).
+    /// Distinct from [`Self::DhtFlood`] (the general per-peer
+    /// per-RPC-class limiter) because the KP fetch limiter is keyed
+    /// on the (target, requester) *pair*, not the requester alone —
+    /// a peer hammering a single target trips this code, while a peer
+    /// hammering many targets at the per-peer rate trips `DhtFlood`.
     KeyPackageRateLimited,
     /// MLS — `WelcomePublish` / `WelcomeFetch` / `WelcomeAck`
     /// rejected for a hard protocol violation: bad envelope sig, bad

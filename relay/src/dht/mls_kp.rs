@@ -12,8 +12,8 @@
 //!
 //! ## Storage layout
 //!
-//! Per `MLS.md` §5.1, the DHT key for a stash is `BLAKE3("kp:" || ipk)`
-//! (32 bytes). To keep a *single* stash representable as multiple KP
+//! The DHT key for a stash is `BLAKE3("kp:" || ipk)` (32 bytes). To
+//! keep a *single* stash representable as multiple KP
 //! rows in RocksDB while still benefiting from RocksDB's prefix-
 //! iterator API, the on-disk key is:
 //!
@@ -31,7 +31,7 @@
 //! Value layout: postcard-encoded
 //! [`common::proto::mls_wire::KeyPackageRecord`].
 //!
-//! ## §13.3 cross-replica static-fields check
+//! ## Cross-replica static-fields check
 //!
 //! The wire spec calls for the home to detect the case where a
 //! republish for an existing `(ipk, kp_ref)` carries **different**
@@ -39,13 +39,13 @@
 //! replay attempt: KP_ref is `SHA-256(kp_bytes)` per RFC 9420 §5.2,
 //! so a legitimate publisher cannot produce a different
 //! `(ipk, kp_ref, kp_bytes)` triple — only an attacker substituting
-//! a forged record can. We reject that case with
+//! a forged record can. We reject that with
 //! [`KeyPackagePublishOutcome::StaticFieldsConflict`].
 //!
 //! Idempotent re-publish (byte-identical record) is allowed and is
 //! a no-op (no rewrite to RocksDB).
 //!
-//! ## §5.6 anti-pinning rate limit
+//! ## Anti-pinning rate limit
 //!
 //! `MAX_KP_FETCH_PER_HOUR = 60` is enforced per
 //! `(target_ipk, requester_relay_id)` pair via a dedicated
@@ -64,8 +64,6 @@
 //! lock-free (`governor`'s default keyed state store is DashMap-
 //! backed).
 //!
-//! design-doc: `misc/specs/MLS.md` §3.4 / §3.5 / §3.6 (RPC shapes),
-//! §5 (KeyPackage distribution), §13.3 (static-fields check).
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -102,8 +100,6 @@ use rust_rocksdb::WriteOptions;
 use super::Dht;
 
 /// Column-family name for the stash CF.
-///
-/// design-doc: `misc/specs/MLS.md` §2.5 (`cf_dht_keypackage`).
 pub const CF_DHT_KEYPACKAGE: &str = "dht_keypackage";
 
 /// Length of the per-record SHA-256 KeyPackageRef, in bytes. Per
@@ -123,11 +119,9 @@ const STORAGE_KEY_LEN: usize = STASH_PREFIX_LEN + KP_REF_LEN;
 
 /// Compute the 32-byte stash prefix for `ipk`.
 ///
-/// Per `MLS.md` §5.1: `BLAKE3("kp:" || ipk)`. The literal three-byte
-/// `"kp:"` prefix differentiates KP-stash routing from presence
-/// routing (which uses bare `ipk`) so the two namespaces don't share
-/// the same DHT key. (Whether they end up at the same K-set or not
-/// is statistical — see §13.3 for the operational discussion.)
+/// `BLAKE3("kp:" || ipk)`. The literal three-byte `"kp:"` prefix
+/// differentiates KP-stash routing from presence routing (which uses
+/// bare `ipk`) so the two namespaces don't share the same DHT key.
 ///
 /// One-line wrapper that defers to the canonical
 /// [`super::key_helpers::stash_prefix`] helper.
@@ -154,10 +148,9 @@ fn storage_key(ipk: &[u8; 32], kp_ref: &[u8]) -> Option<[u8; STORAGE_KEY_LEN]> {
 /// Per-`(target_ipk, requester_relay_id)` quota for `KeyPackageFetch`.
 ///
 /// Distinct from [`super::rate_limit::PerPeerLimiters`] (which is
-/// keyed on requester alone) because the §5.6 spec calls for a
-/// per-*pair* policy: a misbehaving relay can drain Bob's stash 60×
-/// / hour but still be allowed to legitimately fetch from Alice's
-/// stash at the full quota in parallel.
+/// keyed on requester alone): a misbehaving relay can drain Bob's
+/// stash 60×/hour but is still allowed to legitimately fetch from
+/// Alice's stash at the full quota in parallel.
 ///
 /// The key shape is `(target_ipk_bytes, requester_node_id_bytes)`
 /// flattened to a fixed-width tuple type. `governor`'s
@@ -218,9 +211,7 @@ impl KpFetchLimiters {
 /// Note: this is *not* the same as `self_is_owner` for presence
 /// records (which uses bare `ipk` as the DHT key). KP routing keys
 /// off the BLAKE3-prefixed hash to keep the DHT-routing model
-/// uniform. Whether the resulting K-set matches the presence K-set
-/// is statistical (§13.3); operationally the two paths are
-/// independent.
+/// uniform; operationally the two paths are independent.
 ///
 /// One-line wrapper that defers to the canonical
 /// [`super::routing::self_in_top_k`] helper.
@@ -350,7 +341,7 @@ fn verify_outer_sig(
 /// Insert a record into the stash. Idempotent on byte-identical
 /// re-publishes; returns `Err(InsertError::StaticFieldsConflict)` if a
 /// record with the same `(ipk, kp_ref)` already exists with
-/// **different** value bytes (§13.3 forgery detection).
+/// **different** value bytes (forgery detection).
 ///
 /// All silent no-op paths surface as `InsertError::Storage`; the caller
 /// maps this to [`KeyPackagePublishOutcome::BadSig`] (the closest
@@ -374,12 +365,12 @@ fn insert_record(dht: &Dht, rec: &KeyPackageRecord) -> Result<(), InsertError> {
         .ser()
         .map_err(|e| InsertError::Storage(format!("serialize: {e:?}")))?;
 
-    // §13.3 — if a record already exists for this `(ipk, kp_ref)`,
-    // demand byte-identity. The owner-sig transcript binds
-    // `BLAKE3(kp_bytes)`, so different `kp_bytes` for the same `kp_ref`
-    // would have failed `verify_record` first — but a malicious replica
-    // could still try to slip a stale record past us. The byte-identity
-    // check is defense-in-depth.
+    // If a record already exists for this `(ipk, kp_ref)`, demand
+    // byte-identity. The owner-sig transcript binds `BLAKE3(kp_bytes)`,
+    // so different `kp_bytes` for the same `kp_ref` would have failed
+    // `verify_record` first — but a malicious replica could still try
+    // to slip a stale record past us. The byte-identity check is
+    // defense-in-depth.
     match dht.rocks.get_cf(&cf, key) {
         Ok(Some(existing)) => {
             if existing != bytes {
@@ -404,13 +395,13 @@ fn insert_record(dht: &Dht, rec: &KeyPackageRecord) -> Result<(), InsertError> {
 }
 
 /// Typed error from `insert_record`. Allows the publish handler to
-/// distinguish a §13.3 forgery-detection failure (which has its own
-/// outcome `StaticFieldsConflict`) from a generic storage failure
-/// (which surfaces as `BadSig` plus a relay-side log).
+/// distinguish a forgery-detection failure (which has its own outcome
+/// `StaticFieldsConflict`) from a generic storage failure (which
+/// surfaces as `BadSig` plus a relay-side log).
 #[derive(Debug)]
 enum InsertError {
     /// Republish for an existing `(ipk, kp_ref)` carried different
-    /// `kp_bytes` (§13.3).
+    /// `kp_bytes`.
     StaticFieldsConflict,
     /// Underlying storage failure (missing CF, RocksDB I/O, etc.).
     Storage(String),
@@ -464,24 +455,22 @@ fn iterate_stash(dht: &Dht, ipk: &[u8; 32]) -> Vec<([u8; STORAGE_KEY_LEN], KeyPa
 // Static-hash helper for KeyPackageFetch responses
 // ---------------------------------------------------------------------------
 
-/// Compute the §5.4 "static hash" surface from a record. The spec
-/// defines it as `BLAKE3(target_ipk || credential_ipk ||
-/// credential_signing_key_bytes)` — fields the requester can cross-
-/// check across K replicas to detect a malicious home substituting a
-/// forged KP.
+/// Compute the "static hash" surface from a record. Defined as
+/// `BLAKE3(target_ipk || credential_ipk || credential_signing_key_bytes)`
+/// — fields the requester can cross-check across K replicas to detect
+/// a malicious home substituting a forged KP.
 ///
 /// Because the owner-sig transcript folds in `BLAKE3(kp_bytes)`, a
-/// replica that stored a tampered `kp_bytes` for an existing
-/// `(ipk, kp_ref)` would have failed the publish-time `verify_record`
-/// check first — so the §5.4 cross-replica check is defense-in-depth
-/// rather than the primary forgery gate. We therefore extend the static
-/// hash to also bind `BLAKE3(kp_bytes)` directly: any byte-different
-/// `kp_bytes` between replicas surfaces as a different `static_hash`
-/// (the requester compares across K=3 fetches; spec §5.4 hedging).
+/// replica that stored tampered `kp_bytes` for an existing
+/// `(ipk, kp_ref)` would have failed publish-time `verify_record`
+/// first — so the cross-replica check is defense-in-depth rather than
+/// the primary forgery gate. We extend the static hash to also bind
+/// `BLAKE3(kp_bytes)` directly: any byte-different `kp_bytes` between
+/// replicas surfaces as a different `static_hash`.
 ///
-/// We still don't parse the openmls TLS-encoded `KeyPackage` to
-/// extract the inner credential's signing-key bytes — that requires
-/// the openmls dependency which the relay deliberately avoids. The
+/// We don't parse the openmls TLS-encoded `KeyPackage` to extract the
+/// inner credential's signing-key bytes — that requires the openmls
+/// dependency which the relay deliberately avoids. The
 /// `kp_bytes`-digest binding is the cheapest stand-in: the inner
 /// credential signing-key bytes are a *subset* of `kp_bytes`, so a
 /// substitution that changes them necessarily changes the digest.
@@ -515,7 +504,7 @@ fn compute_static_hash(rec: &KeyPackageRecord) -> [u8; 32] {
 ///      [`kp_record_signing_input`].
 ///    - `expires_at_ms > now_ms`.
 ///    - record's `ipk` field equals `req.ipk` (no smuggling).
-/// 5. Insert into RocksDB. §13.3 conflict surfaces as
+/// 5. Insert into RocksDB. A static-fields conflict surfaces as
 ///    `StaticFieldsConflict` outcome.
 ///
 /// `_authenticated_peer_id` is currently unused — KeyPackagePublish
@@ -575,7 +564,7 @@ pub(crate) fn handle_keypackage_publish(
             Ok(()) => {}
             Err(InsertError::StaticFieldsConflict) => {
                 common::warn!(
-                    "MLS publish: §13.3 static-fields conflict for ipk={} kp_ref={}",
+                    "MLS publish: static-fields conflict for ipk={} kp_ref={}",
                     fmt_ipk(&rec.ipk.0),
                     fmt_short(&rec.kp_ref.0)
                 );
@@ -648,7 +637,7 @@ pub(crate) fn handle_keypackage_refill(
             Ok(()) => {}
             Err(InsertError::StaticFieldsConflict) => {
                 common::warn!(
-                    "MLS refill: §13.3 static-fields conflict for ipk={} kp_ref={}",
+                    "MLS refill: static-fields conflict for ipk={} kp_ref={}",
                     fmt_ipk(&rec.ipk.0),
                     fmt_short(&rec.kp_ref.0)
                 );
@@ -1104,8 +1093,7 @@ mod tests {
 
     #[test]
     fn fetch_consumes_each_record_exactly_once() {
-        // Spec §5.3: "Consumed KPs cannot be re-vended. Strict
-        // one-shot semantics."
+        // Consumed KPs cannot be re-vended — strict one-shot semantics.
         let owner = fresh_signing_key();
         let self_id = NodeId::new([0u8; 32]);
         let dht = fresh_dht(self_id);
@@ -1243,8 +1231,8 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // 7. Static-fields conflict (§13.3): republish with different
-    //    bytes for same (ipk, kp_ref) → rejected
+    // 7. Static-fields conflict: republish with different bytes for
+    //    same (ipk, kp_ref) → rejected
     // ---------------------------------------------------------------
 
     #[test]
@@ -1262,8 +1250,7 @@ mod tests {
             KeyPackagePublishOutcome::Stored
         );
 
-        // Same (ipk, kp_ref) but different kp_bytes — forgery
-        // attempt under §13.3.
+        // Same (ipk, kp_ref) but different kp_bytes — forgery attempt.
         let rec_b = build_record(&owner, kp_ref, b"FORGED-bytes".to_vec(), now + 60_000);
         assert_eq!(
             handle_keypackage_publish(&dht, build_publish(&owner, vec![rec_b], now), auth_peer, now),
@@ -1271,9 +1258,8 @@ mod tests {
         );
     }
 
-    /// §5.6 anti-pinning rotation: the spec says clients periodically
-    /// rotate their stash even with no consumption. At the wire/server
-    /// level, this means a Publish for a fresh batch with new
+    /// Anti-pinning rotation: clients periodically rotate their stash
+    /// even with no consumption. A Publish for a fresh batch with new
     /// `kp_ref`s does *not* lose the old records — they remain
     /// consumable until natural expiry. This test pins that property.
     #[test]

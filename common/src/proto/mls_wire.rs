@@ -1,21 +1,19 @@
 //! MLS Wire Protocol.
 //!
-//! This module is the wire-format source of truth for the MLS layer
-//! described in `misc/specs/MLS.md` §3. It carries:
+//! This module is the wire-format source of truth for the MLS layer.
+//! It carries:
 //!
 //! 1. The application-layer **envelope** wrappers
 //!    ([`MlsEnvelopeP`] / [`MlsApplicationEnvelopeP`] /
 //!    [`WelcomeEnvelopeP`]) that promote `DispatchP::payload` from a
-//!    static-shared-key ciphertext to a postcard-encoded MLS frame
-//!    (§3.1).
+//!    static-shared-key ciphertext to a postcard-encoded MLS frame.
 //! 2. The **KeyPackage distribution** RPCs
 //!    ([`KeyPackagePublishReq`], [`KeyPackageFetchReq`],
 //!    [`KeyPackageRefillReq`] and their outcome enums) plus the stored
 //!    [`KeyPackageRecord`] form the home relays use to vend
-//!    one-time KeyPackages (§3.4 – §3.6, §5).
+//!    one-time KeyPackages.
 //! 3. **Signing-input helpers** that domain-separate every signed
-//!    transcript (`MLS_DOMAIN_*` tags) and reproduce the §3 layouts
-//!    byte-for-byte.
+//!    transcript (`MLS_DOMAIN_*` tags).
 //!
 //! ## What is *not* in this module
 //!
@@ -49,9 +47,6 @@
 //!
 //! Each transcript has its own unique domain string so a captured
 //! signature for one packet kind cannot be replayed as another.
-//!
-//! design-doc: `misc/specs/MLS.md` §3 (wire protocol), §5 (KeyPackage
-//! distribution), §13.9 (per-fan-out signature reuse hardening).
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -64,15 +59,13 @@ use crate::types::bytes::Bytes;
 //===:===:===:===:==:  CONSTANTS  :==:===:===:===:===||
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
 
-/// MLS-layer protocol version field mixed into every signing
-/// transcript here.
+/// MLS-layer protocol version field mixed into every signing transcript
+/// here.
 ///
 /// Held equal to [`crate::PROTOCOL_VERSION`] (= 4). Version 4 makes the
-/// §3.9 Tier-1 wrapper variants (`PublishKeyPackage`, `FetchKeyPackage`,
+/// Tier-1 wrapper variants (`PublishKeyPackage`, `FetchKeyPackage`,
 /// `PublishWelcome`, `FetchWelcomes`, `AckWelcomes`) wire-incompatible
 /// with any earlier endpoint.
-///
-/// design-doc: `misc/specs/MLS.md` §0 (`PROTOCOL_VERSION = 4`), §11.3e.
 pub const MLS_WIRE_VERSION: u16 = 4;
 
 /// Inner envelope-version byte stamped into every
@@ -80,17 +73,12 @@ pub const MLS_WIRE_VERSION: u16 = 4;
 /// [`MLS_WIRE_VERSION`]: this byte tracks promtuz's *envelope* shape,
 /// not the wider MLS-on-promtuz protocol version. Bumping it is a
 /// breaking change to the envelope layout (e.g. adding a new field).
-///
-/// design-doc: `misc/specs/MLS.md` §3.1 (`MLS_ENVELOPE_VERSION`).
 pub const MLS_ENVELOPE_VERSION: u8 = 1;
 
 /// Hard ceiling on the TLS-encoded `MlsMessageOut` bytes carried in
-/// [`MlsApplicationEnvelopeP::mls_message`]. Mirrors
-/// `MAX_FRAMED_MLS_BYTES = 64 KiB` from §0; the cap is enforced at
+/// [`MlsApplicationEnvelopeP::mls_message`]. The cap is enforced at
 /// construction time by the producer (libcore client) and at deser
 /// time by the consumer.
-///
-/// design-doc: `misc/specs/MLS.md` §0 (`MAX_FRAMED_MLS_BYTES`).
 pub const MAX_FRAMED_MLS_BYTES: usize = 64 * 1024;
 
 /// Ceiling on `(env.epoch - group.epoch())` before the recipient drops
@@ -111,16 +99,11 @@ pub const MAX_EPOCH_AHEAD: u64 = 64;
 /// [`WelcomeEnvelopeP::welcome_blob`]. Welcomes are bigger than
 /// applications because they carry per-recipient encrypted group
 /// secrets, so they get their own 256 KiB ceiling.
-///
-/// design-doc: `misc/specs/MLS.md` §0 (`MAX_WELCOME_BYTES`).
 pub const MAX_WELCOME_BYTES: usize = 256 * 1024;
 
 /// Maximum KeyPackages the publisher may pack into a single
-/// [`KeyPackagePublishReq::kps`] vec — equals
-/// `KP_STASH_TARGET = 100` from §0. Smaller batches are legal; bigger
+/// [`KeyPackagePublishReq::kps`] vec. Smaller batches are legal; bigger
 /// batches are rejected with [`KeyPackagePublishOutcome::TooMany`].
-///
-/// design-doc: `misc/specs/MLS.md` §0 (`KP_STASH_TARGET`), §3.4.
 pub const KP_STASH_TARGET: usize = 100;
 
 /// One-time stash low-water mark — informational only on the wire
@@ -128,46 +111,32 @@ pub const KP_STASH_TARGET: usize = 100;
 /// helpers using it live in libcore client code.
 pub const KP_STASH_LOW_WATER: usize = 20;
 
-/// KeyPackages the home pops from its FIFO per
-/// [`KeyPackageFetchReq`]. Always 1 — strict one-shot per fetch is
-/// the §5 design choice.
-///
-/// design-doc: `misc/specs/MLS.md` §0 (`KP_PER_FETCH`), §5.4.
+/// KeyPackages the home pops from its FIFO per [`KeyPackageFetchReq`].
+/// Always 1 — strict one-shot per fetch.
 pub const KP_PER_FETCH: usize = 1;
 
 /// Per-`(target_ipk, requester_relay_id)` `KeyPackageFetch` quota,
 /// in fetches per hour. The home returns
 /// [`KeyPackageFetchOutcome::RateLimited`] once a single requester
 /// exceeds this against a single target within a rolling hour.
-/// Cross-K aggregation across replicas is *not* enforced; see §5.6
-/// for the threat model.
-///
-/// design-doc: `misc/specs/MLS.md` §0 (`MAX_KP_FETCH_PER_HOUR`),
-/// §5.6.
+/// Cross-K aggregation across replicas is *not* enforced.
 pub const MAX_KP_FETCH_PER_HOUR: u32 = 60;
 
 /// Future-skew tolerance on KeyPackage publish/fetch timestamps,
 /// in milliseconds. Matches the wider DHT skew window
 /// (`MAX_DHT_HELLO_SKEW_MS`) so a relay's per-packet skew tolerance
 /// is the same regardless of which packet kind it inspects.
-///
-/// design-doc: `misc/specs/MLS.md` §0 (`MAX_FUTURE_SKEW_MS`).
 pub const MAX_KP_SKEW_MS: u64 = 60_000;
 
 /// KeyPackage `lifetime` extension `not_after - not_before`, in ms.
 /// 30 days. The home rejects [`KeyPackageRecord`]s whose
 /// `expires_at_ms` is more than this past `now`.
-///
-/// design-doc: `misc/specs/MLS.md` §0 (`KEYPACKAGE_LIFETIME_MS`).
 pub const KEYPACKAGE_LIFETIME_MS: u64 = 30 * 24 * 3_600_000;
 
 /// Anti-pinning client-initiated stash rotation cadence, in ms.
 /// 7 days. The client mints a fresh KP batch this often even with no
 /// consumption, so a malicious peer that hoarded fetches can't keep
-/// the stash pinned to identifiable KPs forever (§5.6 mitigation 3).
-///
-/// design-doc: `misc/specs/MLS.md` §0 (`KP_SCHEDULED_ROTATION_MS`),
-/// §5.6.
+/// the stash pinned to identifiable KPs forever.
 pub const KP_SCHEDULED_ROTATION_MS: u64 = 7 * 24 * 3_600_000;
 
 /// Hard ceiling on a single `WelcomeEnvelopeP` queued at a recipient's
@@ -176,17 +145,12 @@ pub const KP_SCHEDULED_ROTATION_MS: u64 = 7 * 24 * 3_600_000;
 /// generous — group invites are rare events relative to application
 /// messages — and bounds the disk a malicious peer can pin against
 /// the recipient.
-///
-/// design-doc: `misc/specs/MLS.md` §6.1 (per-recipient cap policy).
 pub const MAX_WELCOMES_PER_RECIPIENT: usize = 32;
 
 /// Welcome retention at the recipient's home relay before TTL eviction.
 /// 30 days. Matches [`KEYPACKAGE_LIFETIME_MS`] — a Welcome older than
 /// this references a KP that's also expired anyway, so the recipient's
 /// openmls would reject on receipt regardless.
-///
-/// design-doc: `misc/specs/MLS.md` §0 (`WELCOME_QUEUE_LIFETIME_MS`),
-/// §13.7.
 pub const WELCOME_LIFETIME_MS: u64 = 30 * 24 * 3_600_000;
 
 /// Maximum welcome ids accepted in a single
@@ -208,28 +172,20 @@ pub const WELCOME_ID_LEN: usize = 8;
 /// Sub-domains append a suffix so a captured signature for one packet
 /// kind cannot be replayed as another (mirrors `DHT_DOMAIN_PREFIX`
 /// discipline).
-///
-/// design-doc: `misc/specs/MLS.md` §0 (`MLS_DOMAIN_PREFIX`).
 pub const MLS_DOMAIN_PREFIX: &[u8] = b"promtuz-mls-v1";
 
 /// Domain-separation tag for the application-layer envelope signature
-/// (binds `to_ipk`, `group_id`, `epoch`, MLS-message hash). Per the
-/// §13.9 hardening, `to_ipk` is part of the transcript so a malicious
-/// relay can't redirect a captured envelope to a different recipient.
-///
-/// design-doc: `misc/specs/MLS.md` §3.2, §13.9.
+/// (binds `to_ipk`, `group_id`, `epoch`, MLS-message hash). `to_ipk` is
+/// part of the transcript so a malicious relay can't redirect a captured
+/// envelope to a different recipient.
 pub const MLS_ENVELOPE_SIG_DOMAIN: &[u8] = b"promtuz-mls-v1 envelope";
 
 /// Domain-separation tag for the Welcome envelope signature.
 /// Distinct from [`MLS_ENVELOPE_SIG_DOMAIN`] so a captured application
 /// envelope sig cannot be replayed as a Welcome (and vice-versa).
-///
-/// design-doc: `misc/specs/MLS.md` §3.3.
 pub const WELCOME_ENVELOPE_SIG_DOMAIN: &[u8] = b"promtuz-mls-v1 welcome-envelope";
 
 /// Domain-separation tag for [`KeyPackagePublishReq`]'s outer signature.
-///
-/// design-doc: `misc/specs/MLS.md` §3.4.
 pub const KP_PUBLISH_DOMAIN: &[u8] = b"promtuz-mls-v1 kp-publish";
 
 /// Domain-separation tag for [`KeyPackageFetchReq`]'s outer signature.
@@ -237,25 +193,18 @@ pub const KP_PUBLISH_DOMAIN: &[u8] = b"promtuz-mls-v1 kp-publish";
 /// `DhtHello` authenticates the requester — but the helper exists so
 /// a future revision can add one without re-deriving the transcript
 /// layout.)
-///
-/// design-doc: `misc/specs/MLS.md` §3.5.
 pub const KP_FETCH_DOMAIN: &[u8] = b"promtuz-mls-v1 kp-fetch";
 
 /// Domain-separation tag for [`KeyPackageRefillReq`]'s outer signature.
 /// Distinct from [`KP_PUBLISH_DOMAIN`] so a captured Refill sig can't
 /// be replayed as a Publish (the two have different replacement
-/// semantics — see §3.6).
-///
-/// design-doc: `misc/specs/MLS.md` §3.6.
+/// semantics).
 pub const KP_REFILL_DOMAIN: &[u8] = b"promtuz-mls-v1 kp-refill";
 
 /// Domain-separation tag for the per-record `owner_sig` on a
 /// [`KeyPackageRecord`]. The owner (user IPK) signs over
 /// `(ipk, kp_ref, expires_at_ms)`; the home verifies this before
 /// accepting the record into the stash.
-///
-/// design-doc: `misc/specs/MLS.md` §3.4 (paragraph "MLS-verified at
-/// the home"), §5.3.
 pub const KP_RECORD_DOMAIN: &[u8] = b"promtuz-mls-v1 kp-record";
 
 /// Domain-separation tag for the recipient-side
@@ -264,21 +213,17 @@ pub const KP_RECORD_DOMAIN: &[u8] = b"promtuz-mls-v1 kp-record";
 /// fetcher is the *recipient* of the welcome — the IPK whose welcomes
 /// live in `cf_dht_welcome` — and proves authority to drain by signing
 /// under that IPK. Mirrors the `QueueFetch` user-sig pattern.
-///
-/// design-doc: `misc/specs/MLS.md` §3.3 (welcome queue at relay).
 pub const WELCOME_FETCH_DOMAIN: &[u8] = b"promtuz-mls-v1 welcome-fetch";
 
 /// Domain-separation tag for the recipient-side
-/// [`WelcomeAckReq::user_sig`]. Distinct from
-/// [`WELCOME_FETCH_DOMAIN`] so a captured fetch sig can't be replayed
-/// as an ack (the ack deletes; fetch only reads).
-///
-/// design-doc: `misc/specs/MLS.md` §3.3 (welcome queue at relay).
+/// [`WelcomeAckReq::user_sig`]. Distinct from [`WELCOME_FETCH_DOMAIN`]
+/// so a captured fetch sig can't be replayed as an ack (the ack
+/// deletes; fetch only reads).
 pub const WELCOME_ACK_DOMAIN: &[u8] = b"promtuz-mls-v1 welcome-ack";
 
 // ---- Tier-1 (libcore→home) wrapper-sig domains --------------------
 //
-// §3.9 wrapper RPCs split into two signature categories:
+// Wrapper RPCs split into two signature categories:
 //
 //   1. User-signed RPCs (PublishKeyPackage, FetchWelcomes, AckWelcomes)
 //      carry the *real* inner Tier-2 user signature — over
@@ -319,7 +264,6 @@ pub const WELCOME_PUBLISH_WRAP_DOMAIN: &[u8] = b"promtuz-mls-v1 welcome-publish-
 ///   share the group's key material; the envelope must be addressable
 ///   by IPK alone.
 ///
-/// design-doc: `misc/specs/MLS.md` §3.1.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MlsEnvelopeP {
     /// Application-tier MLS message (could be application data, a
@@ -333,31 +277,28 @@ pub enum MlsEnvelopeP {
 }
 
 /// Application-tier envelope: encrypted MLS message addressed to a
-/// single recipient (group fan-out is N copies, one per non-self
-/// member, see §3.7).
+/// single recipient (group fan-out is N copies, one per non-self member).
 ///
-/// **Plaintext metadata** the relay sees: `version`, `group_id`,
-/// `epoch`. None of these reveal message content; `group_id` does
-/// reveal conversation graph (which IPKs participate in which
-/// group) — accepted for v1 (§3.7).
+/// **Plaintext metadata** the relay sees: `version`, `group_id`, `epoch`.
+/// None of these reveal message content; `group_id` does reveal
+/// conversation graph (which IPKs participate in which group) — accepted
+/// for v1.
 ///
 /// **Field order is load-bearing** — postcard wire and
 /// [`envelope_signing_input`] both visit fields in declaration order,
 /// so reordering silently breaks every recipient's signature check.
-///
-/// design-doc: `misc/specs/MLS.md` §3.1, §3.7.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MlsApplicationEnvelopeP {
     /// = [`MLS_ENVELOPE_VERSION`]. Bumped on a breaking layout change
     /// to this struct (independent of [`MLS_WIRE_VERSION`]).
     pub version: u8,
     /// 32-byte MLS GroupId — promtuz constrains it to `Bytes<32>` at
-    /// group-creation time (§4.1). Plaintext for routing / epoch-ahead
-    /// buffering at the recipient (§6.3).
+    /// group-creation time. Plaintext for routing / epoch-ahead buffering
+    /// at the recipient.
     pub group_id: Bytes<32>,
     /// Sender's current group epoch. Plaintext so the recipient's
     /// libcore can buffer ahead-of-epoch messages without partial
-    /// decryption (§7.3).
+    /// decryption.
     pub epoch: u64,
     /// TLS-encoded `openmls::MlsMessageOut`. Opaque to promtuz —
     /// produced by openmls's `tls_codec`. We only round-trip these
@@ -365,26 +306,22 @@ pub struct MlsApplicationEnvelopeP {
     /// [`ByteVec`].
     pub mls_message: ByteVec,
     /// Sender's Ed25519 signature over [`envelope_signing_input`].
-    /// **§13.9 hardening**: the transcript binds `to_ipk` so a
-    /// malicious relay cannot redirect a captured envelope to a
-    /// different recipient. Verified by the recipient's libcore
-    /// before feeding `mls_message` to openmls.
+    /// The transcript binds `to_ipk` so a malicious relay cannot redirect
+    /// a captured envelope to a different recipient. Verified by the
+    /// recipient's libcore before feeding `mls_message` to openmls.
     pub sender_sig: Bytes<64>,
 }
 
 /// Welcome envelope: invites the recipient into a new MLS group. The
 /// recipient's libcore verifies `sender_sig` *before* unwrapping the
-/// Welcome with openmls — this prevents a malicious peer from
-/// injecting a forged Welcome that claims to add the recipient to a
-/// fictitious group (§12.7).
+/// Welcome with openmls — this prevents a malicious peer from injecting a
+/// forged Welcome that claims to add the recipient to a fictitious group.
 ///
 /// Plaintext metadata: `version`, `group_id`, `sender_ipk`,
 /// `recipient_ipk`, `kp_ref_used`. The signature binds all of these,
-/// so a captured Welcome cannot be re-targeted at a different
-/// recipient (the IPK is in the transcript) or replayed against a
-/// different group (the GroupId is in the transcript).
-///
-/// design-doc: `misc/specs/MLS.md` §3.1, §3.3, §12.7.
+/// so a captured Welcome cannot be re-targeted at a different recipient
+/// (the IPK is in the transcript) or replayed against a different group
+/// (the GroupId is in the transcript).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WelcomeEnvelopeP {
     /// = [`MLS_ENVELOPE_VERSION`]. See [`MlsApplicationEnvelopeP::version`].
@@ -399,13 +336,12 @@ pub struct WelcomeEnvelopeP {
     pub sender_ipk: Bytes<32>,
     /// IPK of the invitee (also `DispatchP::to`). Bound into the
     /// transcript so a captured Welcome cannot be re-targeted at a
-    /// different recipient (mirrors the §13.9 application-envelope
-    /// hardening).
+    /// different recipient.
     pub recipient_ipk: Bytes<32>,
     /// TLS-encoded `openmls::Welcome`. Opaque to promtuz.
     pub welcome_blob: ByteVec,
-    /// MLS `KeyPackageRef` (SHA-256 of the encoded KeyPackage per RFC
-    /// 9420 §5.2) of the recipient's KP this Welcome consumes. The
+    /// MLS `KeyPackageRef` (SHA-256 of the encoded KeyPackage per
+    /// RFC 9420 §5.2) of the recipient's KP this Welcome consumes. The
     /// recipient's libcore looks this up in its local stash to find
     /// the matching `hpke_init_secret` / `leaf_signing_secret`.
     pub kp_ref_used: Bytes<32>,
@@ -418,14 +354,13 @@ pub struct WelcomeEnvelopeP {
 /// Build the canonical signing transcript for
 /// [`MlsApplicationEnvelopeP::sender_sig`].
 ///
-/// **§13.9 hardening**: `to_ipk` is part of the transcript. With
-/// the original §3.2 design (no `to_ipk` binding), a malicious relay
-/// could strip the `DispatchP` framing, re-wrap the same envelope
-/// addressed to a different `to`, and the inner envelope sig would
-/// still validate (since `to` was only bound by the *outer*
-/// `DispatchP::sig`). Adding `to_ipk` here forecloses that vector;
-/// cost is one extra Ed25519 sign per fan-out recipient (~25 ms for
-/// N=50 on a phone — acceptable).
+/// `to_ipk` is part of the transcript. Without this binding a malicious
+/// relay could strip the `DispatchP` framing, re-wrap the same envelope
+/// addressed to a different `to`, and the inner envelope sig would still
+/// validate (since `to` was only bound by the *outer* `DispatchP::sig`).
+/// Adding `to_ipk` here forecloses that vector; cost is one extra
+/// Ed25519 sign per fan-out recipient (~25 ms for N=50 on a phone —
+/// acceptable).
 ///
 /// Layout:
 /// ```text
@@ -446,8 +381,6 @@ pub struct WelcomeEnvelopeP {
 ///
 /// `protocol_version` is taken as a parameter rather than read from a
 /// global; callers pass [`MLS_WIRE_VERSION`].
-///
-/// design-doc: `misc/specs/MLS.md` §3.2, §13.9.
 pub fn envelope_signing_input(
     protocol_version: u16, to_ipk: &[u8; 32], group_id: &[u8; 32], epoch: u64,
     mls_message_bytes: &[u8],
@@ -482,7 +415,6 @@ pub fn envelope_signing_input(
 /// - replayed against a different group (`group_id` bound),
 /// - or paired with a different KP (`kp_ref_used` bound).
 ///
-/// design-doc: `misc/specs/MLS.md` §3.3.
 pub fn welcome_envelope_signing_input(
     protocol_version: u16, group_id: &[u8; 32], sender_ipk: &[u8; 32],
     recipient_ipk: &[u8; 32], kp_ref_used: &[u8; 32], welcome_blob: &[u8],
@@ -526,21 +458,18 @@ pub fn welcome_envelope_signing_input(
 /// ownership at re-vending time.
 ///
 /// **Why `kp_ref` is `ByteVec` not `Bytes<32>`**: openmls computes
-/// `KeyPackageRef = SHA-256(tls_encode(KeyPackage))[..32]` per RFC
-/// 9420 §5.2 — i.e. a 32-byte digest. We store as `ByteVec` to remain
-/// agnostic about the underlying ref shape (a future cipher suite
+/// `KeyPackageRef = SHA-256(tls_encode(KeyPackage))[..32]` per
+/// RFC 9420 §5.2 — i.e. a 32-byte digest. We store as `ByteVec` to
+/// remain agnostic about the underlying ref shape (a future cipher suite
 /// might use a different hash); the home checks `kp_ref.len() == 32`
-/// at store time. (See §13.1 for the SHA-256 vs BLAKE3 discussion;
-/// we use openmls's SHA-256 ref directly.)
-///
-/// design-doc: `misc/specs/MLS.md` §2.5 (`cf_dht_keypackage`), §3.4.
+/// at store time. (We use openmls's SHA-256 ref directly.)
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyPackageRecord {
     /// Owner's Ed25519 IPK. Also the verifying key for [`Self::owner_sig`].
     pub ipk: Bytes<32>,
-    /// MLS `KeyPackageRef` — SHA-256 of the TLS-encoded KeyPackage
-    /// per RFC 9420 §5.2 (32 bytes). Stored as `ByteVec` for
-    /// hash-shape agnosticism; the home enforces `len == 32`.
+    /// MLS `KeyPackageRef` — SHA-256 of the TLS-encoded KeyPackage per
+    /// RFC 9420 §5.2 (32 bytes). Stored as `ByteVec` for hash-shape
+    /// agnosticism; the home enforces `len == 32`.
     pub kp_ref: ByteVec,
     /// TLS-encoded `openmls::KeyPackage`. Opaque to promtuz; passed
     /// verbatim to the requester at fetch time.
@@ -555,15 +484,13 @@ pub struct KeyPackageRecord {
     /// Bound to `(ipk, kp_ref, BLAKE3(kp_bytes), expires_at_ms)`.
     ///
     /// A `BLAKE3(kp_bytes)` digest is folded into the transcript. A
-    /// `kp_ref`-only binding would rely on "RFC 9420 binds
-    /// `kp_ref = HashReference(kp_bytes)` so binding `kp_ref` is
-    /// enough" — but the relay does not implement RFC 9420's
-    /// `HashReference` (label-prefixed SHA-256) and therefore cannot
-    /// re-derive `kp_ref` from `kp_bytes` to enforce the invariant.
-    /// Folding in the digest closes the gap defensively: a malicious
-    /// publisher cannot mint long-lived bogus triples where `kp_ref`
-    /// is computed correctly but `kp_bytes` is malformed/replaced.
-    /// The relay just verifies the sig.
+    /// `kp_ref`-only binding would rely on RFC 9420 binding
+    /// `kp_ref = HashReference(kp_bytes)` — but the relay does not
+    /// implement RFC 9420's `HashReference` (label-prefixed SHA-256) and
+    /// therefore cannot re-derive `kp_ref` from `kp_bytes`. Folding in
+    /// the digest closes that gap: a malicious publisher cannot mint bogus
+    /// triples where `kp_ref` is computed correctly but `kp_bytes` is
+    /// malformed/replaced. The relay just verifies the sig.
     pub owner_sig: Bytes<64>,
 }
 
@@ -591,12 +518,8 @@ pub struct KeyPackageRecord {
 /// `HashReference` form of `kp_ref` from `kp_bytes` (no openmls
 /// dependency on the relay), so a "kp_ref already binds kp_bytes"
 /// rationale would be operative only at clients. The defensive bind
-/// here closes the §13.3 gap: a stolen IPK can no longer mint
-/// `(ipk, kp_ref, fake_kp_bytes)` triples and have them accepted at
-/// any home.
-///
-/// design-doc: `misc/specs/MLS.md` §3.4 (paragraph "MLS-verified at
-/// the home"), §5.3, §13.3.
+/// here prevents a stolen IPK from minting `(ipk, kp_ref, fake_kp_bytes)`
+/// triples that any home would accept.
 pub fn kp_record_signing_input(
     protocol_version: u16, ipk: &[u8; 32], kp_ref: &[u8], kp_bytes: &[u8],
     expires_at_ms: u64,
@@ -629,21 +552,18 @@ pub fn kp_record_signing_input(
 /// **Idempotent / additive**: a record `(ipk, kp_ref)` that already
 /// exists at the home is treated as an idempotent re-publish (the
 /// per-record `owner_sig` ensures byte-identical records by design;
-/// the home runs the §13.3 cross-replica static-fields check before
-/// silently accepting). Republishing with a *different* `kp_bytes`
-/// for the same `(ipk, kp_ref)` is rejected as a forgery / replay
-/// attempt.
+/// the home runs the cross-replica static-fields check before silently
+/// accepting). Republishing with a *different* `kp_bytes` for the same
+/// `(ipk, kp_ref)` is rejected as a forgery / replay attempt.
 ///
-/// **Anti-pinning rotation** (§5.6): clients periodically push fresh
-/// KP batches even with no consumption. A new batch *adds* to the
-/// existing stash rather than replacing it, so consumers fetching
-/// during the rotation window still get well-formed (in-lifetime)
-/// KPs. Old records expire naturally at `expires_at_ms`.
+/// **Anti-pinning rotation**: clients periodically push fresh KP batches
+/// even with no consumption. A new batch *adds* to the existing stash
+/// rather than replacing it, so consumers fetching during the rotation
+/// window still get well-formed (in-lifetime) KPs. Old records expire
+/// naturally at `expires_at_ms`.
 ///
 /// **Field declaration order is load-bearing** — postcard wire and
 /// [`kp_publish_signing_input`] both visit fields in declaration order.
-///
-/// design-doc: `misc/specs/MLS.md` §3.4.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyPackagePublishReq {
     /// Owner's Ed25519 IPK. Bound to the per-record `ipk` field on
@@ -666,10 +586,8 @@ pub struct KeyPackagePublishReq {
 
 /// `KeyPackagePublish` outcome. Mirrors the
 /// [`crate::proto::dht_p2p::StoreOutcome`] / `ForwardOutcome` shape
-/// (explicit enum rather than `Result<T, E>`) for §2.5 close-reason
-/// mapping consistency.
-///
-/// design-doc: `misc/specs/MLS.md` §3.4.
+/// (explicit enum rather than `Result<T, E>`) for close-reason mapping
+/// consistency.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KeyPackagePublishOutcome {
     /// Every record verified and was accepted into the stash. Already-
@@ -698,10 +616,10 @@ pub enum KeyPackagePublishOutcome {
     /// `records.len() > KP_STASH_TARGET` or any individual record
     /// failed structural validation (shape / length bounds).
     TooMany,
-    /// §13.3 cross-replica static-fields check tripped: a record with
-    /// the same `(ipk, kp_ref)` already exists at this replica with
-    /// **different** `kp_bytes`. Indicates a forgery/replay attempt.
-    /// The publish is rejected; the existing record is preserved.
+    /// Cross-replica static-fields check tripped: a record with the same
+    /// `(ipk, kp_ref)` already exists at this replica with **different**
+    /// `kp_bytes`. Indicates a forgery/replay attempt. The publish is
+    /// rejected; the existing record is preserved.
     StaticFieldsConflict,
 }
 
@@ -773,10 +691,7 @@ pub fn kp_publish_records_digest(
 /// `KeyPackageFetch` request — sender-relay → home-relay request to
 /// pop one KeyPackage from the target's stash. The relay-to-relay
 /// `DhtHello` connection-binding authenticates the requester, so this
-/// request carries no user-layer signature (mirrors `BundleFetch` in
-/// the older FS spec; see §3.5 paragraph "No user signature on Fetch").
-///
-/// design-doc: `misc/specs/MLS.md` §3.5.
+/// request carries no user-layer signature.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyPackageFetchReq {
     /// Target user whose stash we want to consume from.
@@ -792,28 +707,23 @@ pub struct KeyPackageFetchReq {
 }
 
 /// `KeyPackageFetch` outcome — three terminal states.
-///
-/// design-doc: `misc/specs/MLS.md` §3.5.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KeyPackageFetchOutcome {
     /// Stash was non-empty; one KP popped and returned.
     Found(KeyPackageFetchFound),
     /// The home holds no in-lifetime KPs for this `target_ipk`. The
     /// requester typically falls through to "ask the user to refill
-    /// their stash on next reconnect" (§5.7).
+    /// their stash on next reconnect".
     NoStash,
     /// Responder is not in the k closest owners for `target_ipk`.
-    /// Maps to `CloseReason::DhtNotOwner` (reusing the existing
-    /// variant — there's nothing MLS-specific about this rejection).
+    /// Maps to `CloseReason::DhtNotOwner`.
     NotOwner,
     /// Per-`(target_ipk, requester_relay_id)` rate limit tripped
-    /// (60/hour, §0). Maps to `CloseReason::KeyPackageRateLimited`.
+    /// (60/hour). Maps to `CloseReason::KeyPackageRateLimited`.
     RateLimited,
 }
 
 /// Found-arm payload of [`KeyPackageFetchOutcome::Found`].
-///
-/// design-doc: `misc/specs/MLS.md` §3.5.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyPackageFetchFound {
     /// The popped record, including its per-record `owner_sig` so the
@@ -821,15 +731,14 @@ pub struct KeyPackageFetchFound {
     pub record: KeyPackageRecord,
     /// Number of unconsumed in-lifetime KPs remaining at this home
     /// after this fetch. The owner's libcore can use this to decide
-    /// whether to refill on next heartbeat (§13.4 — piggy-back on
-    /// presence-republish reply, not done here).
+    /// whether to refill on next heartbeat.
     pub remaining: u32,
     /// `BLAKE3(target_ipk || credential_ipk || credential_signing_key_bytes)`
-    /// — the *static* identity fields the cross-replica check (§5.4)
-    /// compares across K homes. The requester optionally fans out
-    /// 2-of-3 fetches and demands these match. Computed by the home
-    /// from the openmls-internal `KeyPackage` structure; opaque to
-    /// promtuz (we just round-trip the 32 bytes).
+    /// — the *static* identity fields the cross-replica check compares
+    /// across K homes. The requester optionally fans out 2-of-3 fetches
+    /// and demands these match. Computed by the home from the
+    /// openmls-internal `KeyPackage` structure; opaque to promtuz (we
+    /// just round-trip the 32 bytes).
     pub static_hash: Bytes<32>,
 }
 
@@ -843,8 +752,7 @@ pub struct KeyPackageFetchResp {
 /// [`KeyPackageFetchReq`]. The request is *currently* unsigned (the
 /// `peer/1` `DhtHello` authenticates the requester); this helper
 /// exists so a future revision that adds a user-layer or relay-layer
-/// signature (e.g. for cross-relay forwarded fetches) can drop in
-/// without re-deriving the transcript.
+/// signature can drop in without re-deriving the transcript.
 ///
 /// No caller invokes this function today. We export it for symmetry
 /// with the publish/refill helpers and so future protocol revisions
@@ -855,8 +763,6 @@ pub struct KeyPackageFetchResp {
 ///   KP_FETCH_DOMAIN || protocol_version (BE u16)
 ///     || target_ipk (32) || requester_relay_id (32) || timestamp (BE u64)
 /// ```
-///
-/// design-doc: `misc/specs/MLS.md` §3.5.
 pub fn kp_fetch_signing_input(
     protocol_version: u16, target_ipk: &[u8; 32],
     requester_relay_id: &RelayId, timestamp: u64,
@@ -876,17 +782,13 @@ pub fn kp_fetch_signing_input(
 
 /// `KeyPackageRefill` request — owner tops up their existing stash.
 ///
-/// **Refill vs Publish** (§3.6): a Publish is a full-batch idempotent
-/// store. A Refill is an *append* — fewer records, intended for the
-/// "stash dipped below low-water; top it back up" path (§5.5). Both
-/// preserve existing (in-lifetime) records: the spec calls this out
-/// explicitly so anti-pinning rotation doesn't lose
-/// not-yet-consumed records during the rotation window. We implement
-/// both as additive at the relay side; the only difference is the
-/// domain string (so a captured Refill sig can't be replayed as a
-/// Publish).
-///
-/// design-doc: `misc/specs/MLS.md` §3.6.
+/// **Refill vs Publish**: a Publish is a full-batch idempotent store. A
+/// Refill is an *append* — fewer records, intended for the "stash dipped
+/// below low-water; top it back up" path. Both preserve existing
+/// (in-lifetime) records so anti-pinning rotation doesn't lose
+/// not-yet-consumed records during the rotation window. We implement both
+/// as additive at the relay side; the only difference is the domain string
+/// (so a captured Refill sig can't be replayed as a Publish).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyPackageRefillReq {
     /// Owner's Ed25519 IPK.
@@ -902,9 +804,7 @@ pub struct KeyPackageRefillReq {
 }
 
 /// `KeyPackageRefill` outcome. Mirrors [`KeyPackagePublishOutcome`]
-/// closely; semantics differ only in domain (see §3.6).
-///
-/// design-doc: `misc/specs/MLS.md` §3.6.
+/// closely; semantics differ only in domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KeyPackageRefillOutcome {
     Appended,
@@ -913,9 +813,9 @@ pub enum KeyPackageRefillOutcome {
     NotOwner,
     RateLimited,
     TooMany,
-    /// §13.3 cross-replica static-fields check tripped (same as for
-    /// Publish — a record's `(ipk, kp_ref)` already exists with
-    /// different `kp_bytes`).
+    /// Cross-replica static-fields check tripped (same as for Publish —
+    /// a record's `(ipk, kp_ref)` already exists with different
+    /// `kp_bytes`).
     StaticFieldsConflict,
 }
 
@@ -933,8 +833,6 @@ pub struct KeyPackageRefillResp {
 /// replacement vs append semantics differ; treating one as the other
 /// would let an attacker silently downgrade a fresh-batch Publish
 /// into an additive-only Refill, defeating the rotation discipline).
-///
-/// design-doc: `misc/specs/MLS.md` §3.6.
 pub fn kp_refill_signing_input(
     protocol_version: u16, ipk: &[u8; 32], records_digest: &[u8; 32],
     record_count: u32, timestamp: u64,
@@ -970,9 +868,6 @@ pub fn kp_refill_signing_input(
 /// `peer/1` `DhtHello` handshake authenticates the *forwarding*
 /// relay, not the inviter — same asymmetry as the sticky-home
 /// `Forward` RPC.
-///
-/// design-doc: `misc/specs/MLS.md` §3.3 (envelope sig binding), §6.1
-/// (welcome queue distinct from `cf_dht_queue`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WelcomePublishReq {
     /// The full welcome envelope being queued. The home verifies
@@ -986,8 +881,6 @@ pub struct WelcomePublishReq {
 }
 
 /// `WelcomePublish` outcome.
-///
-/// design-doc: `misc/specs/MLS.md` §6.1 (welcome queue at relay).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WelcomePublishOutcome {
     /// Envelope persisted to `cf_dht_welcome`. Idempotent on a
@@ -1030,13 +923,10 @@ pub struct WelcomePublishResp {
 ///
 /// **Authentication**: the recipient's IPK signs `user_sig` over
 /// [`welcome_fetch_signing_input`] (which binds `requester_relay_id`
-/// per the §13.9 cross-relay-replay defence). The home additionally
-/// checks `requester_relay_id == authenticated_peer_id` from the
-/// connection's `DhtHello` — same posture as the sticky-home
-/// `QueueFetch` RPC.
-///
-/// design-doc: `misc/specs/MLS.md` §3.3 (welcome queue at relay);
-/// mirrors [`crate::proto::dht_p2p::QueueFetch`].
+/// as a cross-relay-replay defence). The home additionally checks
+/// `requester_relay_id == authenticated_peer_id` from the connection's
+/// `DhtHello` — same posture as the sticky-home `QueueFetch` RPC.
+/// Mirrors [`crate::proto::dht_p2p::QueueFetch`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WelcomeFetchReq {
     /// User IPK whose welcomes we want to drain.
@@ -1108,8 +998,6 @@ pub struct WelcomeEntry {
 /// `requester_relay_id` against the connection's authenticated peer
 /// id. Domain-separated from `WelcomeFetch` so a captured fetch sig
 /// can't be replayed as an ack.
-///
-/// design-doc: `misc/specs/MLS.md` §3.3 (welcome queue at relay).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WelcomeAckReq {
     /// User IPK whose welcomes we're acking. Same as
@@ -1151,8 +1039,6 @@ pub struct WelcomeAckResp {
 ///
 /// Mirrors the `queue_fetch_signing_input` shape (the
 /// `requester_relay_id` binding).
-///
-/// design-doc: `misc/specs/MLS.md` §3.3 (welcome queue at relay).
 pub fn welcome_fetch_signing_input(
     protocol_version: u16, user_ipk: &[u8; 32], requester_relay_id: &RelayId,
     timestamp: u64,
@@ -1182,8 +1068,6 @@ pub fn welcome_fetch_signing_input(
 /// the id list rather than embedding it inline so the transcript is
 /// bounded regardless of how many ids the recipient acks. Same
 /// length-prefix discipline as `queue_fetch_ack_signing_input`.
-///
-/// design-doc: `misc/specs/MLS.md` §3.3 (welcome queue at relay).
 pub fn welcome_ack_signing_input(
     protocol_version: u16, user_ipk: &[u8; 32], requester_relay_id: &RelayId,
     welcome_ids: &[[u8; WELCOME_ID_LEN]], timestamp: u64,
@@ -1221,10 +1105,10 @@ pub fn welcome_ack_signing_input(
 // forwarded verbatim to the K storage homes and must verify there too.
 // See the category note at KP_FETCH_WRAP_DOMAIN above.
 
-/// Mode flag carried on `CRelayPacket::PublishKeyPackage` (§3.9). The
-/// home translates `Publish` to a §3.4 `KeyPackagePublish` (replace
-/// stash atomically) and `Refill` to a §3.6 `KeyPackageRefill` (append
-/// to stash). The phone signs the matching inner transcript
+/// Mode flag carried on `CRelayPacket::PublishKeyPackage`. The home
+/// translates `Publish` to a `KeyPackagePublish` (replace stash
+/// atomically) and `Refill` to a `KeyPackageRefill` (append to stash).
+/// The phone signs the matching inner transcript
 /// ([`kp_publish_signing_input`] for `Publish`,
 /// [`kp_refill_signing_input`] for `Refill`) so the forwarded sig
 /// verifies at the K homes — distinct domains mean a captured Publish
@@ -1628,10 +1512,9 @@ mod tests {
 
     #[test]
     fn kp_publish_and_refill_share_layout_but_differ_in_domain() {
-        // §3.6 hardening: a captured Publish sig must not validate as
-        // a Refill sig (or vice versa). The domain prefix is the only
-        // difference (the field layout after the domain is identical),
-        // so we anchor on:
+        // A captured Publish sig must not validate as a Refill sig (or
+        // vice versa). The domain prefix is the only difference (the
+        // field layout after the domain is identical), so we anchor on:
         //   1. The full transcripts differ (so a captured sig won't
         //      validate under the wrong helper).
         //   2. The *suffix* after the domain bytes is byte-identical
@@ -1692,9 +1575,9 @@ mod tests {
         }
     }
 
-    /// §13.9 hardening — changing `to_ipk` must change the transcript.
-    /// This is the *defining* property of the per-recipient binding:
-    /// without it the relay-redirection attack works.
+    /// Changing `to_ipk` must change the transcript — the defining
+    /// property of the per-recipient binding: without it the
+    /// relay-redirection attack works.
     #[test]
     fn envelope_signing_input_to_ipk_binding_changes_transcript() {
         let group_id = [0u8; 32];
@@ -1706,7 +1589,7 @@ mod tests {
         let buf_b = envelope_signing_input(MLS_WIRE_VERSION, &to_b, &group_id, 1, mls);
         assert_ne!(
             buf_a, buf_b,
-            "different to_ipk must produce different transcripts (§13.9)"
+            "different to_ipk must produce different transcripts"
         );
     }
 
@@ -1979,8 +1862,6 @@ mod tests {
     /// ever exchanged between two MLS-aware endpoints would fail to
     /// verify; this test catches that regression at compile + unit-test
     /// time.
-    ///
-    /// Spec: `misc/specs/MLS.md` §11.2 (hard cutover at v3), §11.4.
     #[test]
     fn protocol_version_and_mls_wire_version_converge_at_three() {
         assert_eq!(
