@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+
+# Reload units after removal. Data in /var/lib/pzrelay and the service user
+# are intentionally left in place (a reinstall keeps the node identity).
+systemctl daemon-reload >/dev/null 2>&1 || true
+
+exit 0

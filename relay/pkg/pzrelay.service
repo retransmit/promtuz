@@ -1,0 +1,30 @@
+[Unit]
+Description=Promtuz relay node (DHT, client auth, presence + MLS handshake replication)
+Documentation=https://github.com/promtuz/promtuz
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pzrelay
+Group=pzrelay
+ExecStart=/usr/bin/pzrelay /etc/pzrelay/relay.toml
+WorkingDirectory=/var/lib/pzrelay
+Restart=on-failure
+RestartSec=2
+
+# Least-privilege hardening. /etc + /usr are read-only; the only writable
+# path is the state dir (RocksDB + runtime-provisioned keys).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelTunables=true
+RestrictAddressFamilies=AF_INET AF_INET6
+StateDirectory=pzrelay
+ConfigurationDirectory=pzrelay
+ReadWritePaths=/var/lib/pzrelay
+
+[Install]
+WantedBy=multi-user.target

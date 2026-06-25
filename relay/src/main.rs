@@ -22,7 +22,14 @@ mod util;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `--version` / `-V`: report and exit before touching config or the runtime.
+    if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
+        println!("pzrelay {} ({})", env!("CARGO_PKG_VERSION"), env!("PZ_GIT_SHA"));
+        return Ok(());
+    }
+
     let cfg = AppConfig::load(true);
+    info!("pzrelay {} ({})", env!("CARGO_PKG_VERSION"), env!("PZ_GIT_SHA"));
 
     // `shutdown` is the legacy `watch` channel still consumed by
     // `ResolverLink`; `cancel` is the unified token observed by every

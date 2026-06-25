@@ -1,0 +1,26 @@
+# pzrelay configuration. This file is a dpkg conffile: your edits survive
+# `apt upgrade`. Provision node.crt / node.key into /var/lib/pzrelay before
+# starting (see enrollment), then `systemctl enable --now pzrelay`.
+
+[network]
+# Bind address. Set to your box's PUBLIC ip:port so the source address the
+# resolver vends to other relays is deterministically dialable.
+address = "0.0.0.0:4432"
+
+# TLS + identity material. The cert/key are issued at enrollment; the
+# identity key auto-generates (0600) on first boot if absent.
+cert_path = "/var/lib/pzrelay/node.crt"
+key_path = "/var/lib/pzrelay/node.key"
+identity_key_path = "/var/lib/pzrelay/identity.key"
+
+# Production RootCA public cert, shipped with the package.
+root_ca_path = "/etc/pzrelay/ca.pem"
+
+[[resolver.seed]]
+# Resolver identity pubkey (hex) + reachable address. Replace the key with
+# your resolver's IPK.
+key = "REPLACE_WITH_RESOLVER_IPK_HEX"
+addr = "resolver.promtuz.dev:4433"
+
+[dht]
+enabled = true

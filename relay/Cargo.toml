@@ -1,20 +1,16 @@
 [package]
 name = "relay"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 description = "Relay server — DHT node, client auth, presence replication"
 license.workspace = true
 repository.workspace = true
 default-run = "relay"
 
-# Phase 5b: relay exposes both a `[lib]` and the historic `[[bin]]`.
-# The library form is consumed by libcore's e2e integration tests
-# (`libcore/tests/e2e_phase5b.rs`) for spinning up real `Dht` instances
-# in-process. No new top-level dep on libcore — the relay code itself
-# is unchanged. The bin entry in `main.rs` is now a thin shell that
-# `use`s the lib crate; visibility on the lib's modules expanded from
-# `pub(crate)` to `pub` only where the shell binary needs them or the
-# tests do (documented in commits and `lib.rs`).
+# The relay exposes both a `[lib]` and a `[[bin]]`. The library form lets the
+# e2e harness spin up real `Dht` instances in-process; the binary in
+# `main.rs` is a thin shell over the lib. Module visibility is `pub` only
+# where the shell binary or the harness needs it.
 [lib]
 name = "relay"
 path = "src/lib.rs"
@@ -48,12 +44,31 @@ rust-rocksdb = { version = "0.46.0", features = ["multi-threaded-cf"] }
 parking_lot = "0.12.5"
 zerocopy = "0.8.40"
 tokio-util = "0.7.18"
-# Per-peer DHT inbound-RPC rate limiter. Same crate / same version as
-# the resolver side (`resolver/Cargo.toml`); we pick a `governor::Quota`
-# per-RPC-class and key the limiter on `NodeId` instead of `IpAddr`.
-# design-doc: §8.4 (storage flooding), §8.7 (DoS — request floods).
+# Per-peer DHT inbound-RPC rate limiter. Same crate/version as the resolver
+# side; keyed on `NodeId` instead of `IpAddr`.
 governor = "0.7"
-# Used by the post-handshake TLS pubkey extractor in
-# `dht::handler::handle_peer_connection`. Mirrors the parser libcore
-# uses in `libcore/src/quic/peer_config.rs`.
+# Post-handshake TLS pubkey extraction in `dht::handler`. Same parser
+# libcore uses for peer certs.
 x509-parser = "0.18"
+
+# ---------------------------------------------------------------------------
+# Debian packaging (`cargo deb`) → `pzrelay_<version>_<arch>.deb`.
+# Binary installs as /usr/bin/pzrelay; config + CA under /etc/pzrelay;
+# runtime keys + RocksDB under /var/lib/pzrelay (service user `pzrelay`).
+# ---------------------------------------------------------------------------
+[package.metadata.deb]
+name = "pzrelay"
+maintainer = "Promtuz <relay@promtuz.dev>"
+copyright = "2026 Promtuz, AGPL-3.0-or-later"
+section = "net"
+priority = "optional"
+depends = "$auto"
+extended-description = "Promtuz relay node: Kademlia DHT, client auth, presence + MLS handshake replication, store-and-forward."
+assets = [
+    ["target/release/relay", "usr/bin/pzrelay", "755"],
+    ["pkg/relay.toml", "etc/pzrelay/relay.toml", "644"],
+    ["cert/root_ca.pem", "etc/pzrelay/ca.pem", "644"],
+    ["pkg/pzrelay.service", "lib/systemd/system/pzrelay.service", "644"],
+]
+conf-files = ["/etc/pzrelay/relay.toml"]
+maintainer-scripts = "pkg/scripts/"

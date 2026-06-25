@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+# Dedicated unprivileged service user. systemd's StateDirectory= owns the
+# data dir; this just guarantees the account exists for User= to resolve.
+if ! getent passwd pzrelay >/dev/null 2>&1; then
+    adduser --system --group --no-create-home --home /var/lib/pzrelay pzrelay
+fi
+
+systemctl daemon-reload >/dev/null 2>&1 || true
+
+cat <<'EOF'
+pzrelay installed. Next:
+  1. edit  /etc/pzrelay/relay.toml   (resolver seed key + your public address)
+  2. provision node.crt / node.key into /var/lib/pzrelay   (enrollment)
+  3. systemctl enable --now pzrelay
+EOF
+
+exit 0
