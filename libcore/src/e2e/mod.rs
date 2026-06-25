@@ -286,7 +286,9 @@ async fn connect_home(
     setup_crypto_provider()?;
     let roots = load_root_ca(&ca.to_path_buf())?;
     let client_cfg = build_client_cfg(ProtoRole::Client, &roots)?;
-    let mut endpoint = Endpoint::client("127.0.0.1:0".parse()?)?;
+    // 0.0.0.0 (not 127.0.0.1) so the client can route to real relays on
+    // public IPs, not just loopback sandbox relays.
+    let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_cfg);
 
     let conn = endpoint.connect(addr, server_name)?.await?;
