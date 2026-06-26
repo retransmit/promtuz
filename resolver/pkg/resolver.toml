@@ -4,7 +4,7 @@
 
 [network]
 # Bind address — the port relays dial. 0.0.0.0 listens on all interfaces.
-address = "0.0.0.0:4433"
+address = "0.0.0.0:40433"
 
 # TLS + identity material. The resolver's node.key doubles as its identity key;
 # its pubkey is the resolver IPK that relays seed in their configs.
