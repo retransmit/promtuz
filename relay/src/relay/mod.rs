@@ -103,7 +103,7 @@ impl Relay {
     fn endpoint(cfg: &AppConfig, node_signing: &SigningKey) -> Endpoint {
         use ProtoRole as PR;
 
-        graceful!(setup_crypto_provider(), "CRYPTO_ERR:");
+        graceful!(setup_crypto_provider(), "installing the crypto provider");
 
         let server_cfg = graceful!(
             build_server_cfg_with_alpn_split(
@@ -112,10 +112,10 @@ impl Relay {
                 node_signing.clone(),
                 &[PR::Resolver, PR::Relay, PR::Peer, PR::Client],
             ),
-            "SERVER_CFG_ERR:"
+            "building the TLS server config"
         );
 
-        let endpoint = graceful!(Endpoint::server(server_cfg, cfg.network.address), "QUIC_ERR:");
+        let endpoint = graceful!(Endpoint::server(server_cfg, cfg.network.address), "starting the QUIC endpoint");
         if let Ok(addr) = endpoint.local_addr() {
             info!("relay listening at QUIC({:?})", addr);
         }
@@ -130,22 +130,22 @@ impl Relay {
 
         let mut endpoint = Self::endpoint(&cfg, &keys.signing);
 
-        let roots = graceful!(load_root_ca(&cfg.network.root_ca_path), "CA_ERR:");
+        let roots = graceful!(load_root_ca(&cfg.network.root_ca_path), "loading the root CA");
 
         let client_cfg =
-            Arc::new(graceful!(build_client_cfg(ProtoRole::Relay, &roots), "CLIENT_CFG_ERR:"));
+            Arc::new(graceful!(build_client_cfg(ProtoRole::Relay, &roots), "building the QUIC client config"));
         // peer/1 is the key-as-identity trust domain (self-signed NodeKey
         // certs, pinned to the dialed NodeId post-handshake), not the CA
         // hierarchy — so it gets its own verifier, not build_client_cfg.
         let peer_client_cfg =
-            Arc::new(graceful!(crate::dht::peer_dial::build_peer_client_cfg(), "PEER_CFG_ERR:"));
+            Arc::new(graceful!(crate::dht::peer_dial::build_peer_client_cfg(), "building the peer/1 client config"));
 
         endpoint.set_default_client_config((*client_cfg).clone());
 
         // Single shared `Arc<DB>` so the DHT replica and the message
         // queue point at the same on-disk store but live in separate
         // column families.
-        let rocks = Arc::new(graceful!(rocksdb(), "failed to setup rocksdb"));
+        let rocks = Arc::new(graceful!(rocksdb(), "opening the RocksDB store"));
         // `clients` is `Arc<RwLock<...>>` (not a bare `RwLock`) so the
         // inner map can be cloned-by-Arc into `Dht.clients` for the
         // home-side `Forward` handler.
