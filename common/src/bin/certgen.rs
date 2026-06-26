@@ -8,7 +8,6 @@ use std::fs;
 use std::process::{
     self,
 };
-use base64::Engine as _;
 use common::quic::id::NodeId;
 use rcgen::{CertificateParams, SanType};
 use rcgen::DnType;
@@ -44,17 +43,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         let csr_path = std::env::args().nth(2).ok_or("usage: certgen sign <csr-path>")?;
         let csr_pem = fs::read_to_string(&csr_path)?;
 
-        // rcgen verifies the PKCS#10 self-signature (proof of possession).
+        // rcgen parses the CSR and verifies its PKCS#10 self-signature (proof
+        // of possession) against the key it exposes as `public_key`.
+        use rcgen::PublicKeyData as _;
         let mut csr = rcgen::CertificateSigningRequestParams::from_pem(&csr_pem)?;
 
-        // Derive identity from the public key, never the CSR's claimed subject:
-        // a CA cert with an attacker-chosen CN would let one relay impersonate
-        // another on the client TLS path.
-        let der = base64::engine::general_purpose::STANDARD.decode(
-            csr_pem.lines().filter(|l| !l.starts_with("-----")).collect::<String>(),
-        )?;
-        let pubkey = common::node::enroll::spki_ed25519(&der)
-            .ok_or("CSR carries no Ed25519 public key")?;
+        // Derive identity ONLY from `public_key` — the exact key rcgen verified
+        // PoP against, and the one `signed_by` embeds as the cert SPKI. Never
+        // byte-scan the raw CSR: the attacker controls the subject/attribute
+        // bytes and could smuggle a second SPKI past a scan, yielding a cert
+        // whose real key is the attacker's but whose CN is a victim's NodeId.
+        if csr.public_key.algorithm() != &rcgen::PKCS_ED25519 {
+            return Err("CSR is not Ed25519".into());
+        }
+        let pubkey: [u8; 32] = csr
+            .public_key
+            .der_bytes()
+            .try_into()
+            .map_err(|_| "CSR public key is not a 32-byte Ed25519 key")?;
         let id = NodeId::new(&pubkey);
 
         csr.params.distinguished_name = rcgen::DistinguishedName::new();
