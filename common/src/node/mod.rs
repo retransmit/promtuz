@@ -1,4 +1,4 @@
 pub mod config;
 
-#[cfg(feature = "quic")]
+#[cfg(all(feature = "quic", feature = "crypto"))]
 pub mod enroll;
