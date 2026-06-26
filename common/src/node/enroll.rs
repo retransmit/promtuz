@@ -165,4 +165,55 @@ mod tests {
             .expect("rcgen parses our hand-rolled CSR");
         let _ = std::fs::remove_file(&path);
     }
+
+    // Full loop: ephemeral CA → emit_csr → sign exactly as `certgen sign` →
+    // cert_is_valid must accept. Guards the keystone (a wrong reject = a node
+    // that waits for enrollment forever).
+    #[cfg(feature = "certgen")]
+    #[test]
+    fn accepts_our_ca_signed_cert() {
+        use rcgen::BasicConstraints;
+        use rcgen::CertificateParams;
+        use rcgen::DnType;
+        use rcgen::IsCa;
+        use rcgen::Issuer;
+        use rcgen::KeyPair;
+        use rcgen::SanType;
+
+        let _ = crate::quic::config::setup_crypto_provider();
+
+        // Ephemeral CA.
+        let ca_key = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+        let ca_pem = ca_cert.pem();
+
+        // Node key + CSR.
+        let node = SigningKey::from_bytes(&[9u8; 32]);
+        let id = NodeId::new(&node.verifying_key().to_bytes());
+        let dir = std::env::temp_dir();
+        let csr_path = dir.join("pz_pos.csr");
+        emit_csr(&csr_path, &node, &id).unwrap();
+
+        // Sign exactly as `certgen sign` does (CN/SAN derived from the key).
+        let csr_pem = std::fs::read_to_string(&csr_path).unwrap();
+        let mut csr = rcgen::CertificateSigningRequestParams::from_pem(&csr_pem).unwrap();
+        csr.params.distinguished_name = rcgen::DistinguishedName::new();
+        csr.params.distinguished_name.push(DnType::CommonName, id.to_string());
+        csr.params.subject_alt_names = vec![SanType::DnsName(id.to_string().try_into().unwrap())];
+        let issuer = Issuer::from_ca_cert_pem(&ca_pem, &ca_key).unwrap();
+        let cert = csr.signed_by(&issuer).unwrap();
+
+        let cert_path = dir.join("pz_pos.crt");
+        let ca_path = dir.join("pz_pos_ca.pem");
+        std::fs::write(&cert_path, cert.pem()).unwrap();
+        std::fs::write(&ca_path, &ca_pem).unwrap();
+
+        assert!(cert_is_valid(&cert_path, &ca_path, &id, &node.verifying_key().to_bytes()));
+
+        for p in [csr_path, cert_path, ca_path] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
