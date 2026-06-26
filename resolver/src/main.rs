@@ -19,7 +19,14 @@ use crate::util::config::AppConfig;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `--version` / `-V`: report and exit before touching config or the runtime.
+    if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
+        println!("pzresolver {} ({})", env!("CARGO_PKG_VERSION"), env!("PZ_GIT_SHA"));
+        return Ok(());
+    }
+
     let cfg = AppConfig::load(true);
+    common::info!("pzresolver {} ({})", env!("CARGO_PKG_VERSION"), env!("PZ_GIT_SHA"));
 
     let resolver = Arc::new(Resolver::new(cfg));
     let acceptor = Acceptor::new(resolver.endpoint.clone());

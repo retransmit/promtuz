@@ -70,7 +70,7 @@ extended-description = "Promtuz relay node: Kademlia DHT, client auth, presence 
 assets = [
     ["target/release/relay", "usr/bin/pzrelay", "755"],
     ["pkg/relay.toml", "etc/pzrelay/relay.toml", "644"],
-    ["cert/root_ca.pem", "etc/pzrelay/ca.pem", "644"],
+    ["../certs/root_ca.pem", "etc/pzrelay/ca.pem", "644"],
     ["pkg/pzrelay.service", "lib/systemd/system/pzrelay.service", "644"],
 ]
 conf-files = ["/etc/pzrelay/relay.toml"]

@@ -1,0 +1,27 @@
+[Unit]
+Description=Promtuz resolver (relay discovery service)
+Documentation=https://github.com/promtuz/promtuz
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pzresolver
+Group=pzresolver
+ExecStart=/usr/bin/pzresolver /etc/pzresolver/resolver.toml
+Restart=on-failure
+RestartSec=2
+
+# Least-privilege hardening. The resolver is stateless (in-memory) and writes
+# nothing, so the whole filesystem can stay read-only.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelTunables=true
+RestrictAddressFamilies=AF_INET AF_INET6
+ConfigurationDirectory=pzresolver
+
+[Install]
+WantedBy=multi-user.target

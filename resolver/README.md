@@ -1,131 +1,63 @@
-# Resolver
+# pzresolver
 
-The resolver is the coordination layer of the system.  
-Relays come and go, clients appear at random, network conditions fluctuate —
-the resolver’s job is simply to keep track of who is online right now.
+Promtuz resolver — a stateless relay discovery service. Relays register here so
+clients can find them; it keeps only an in-memory map of which relays are online
+and owns no message data. Part of [promtuz](../README.md).
 
-It doesn’t forward data.  
-It doesn’t store messages.  
-It doesn’t maintain long-term state.  
-It just keeps a live view of the network.
+Resolvers are run by the operator (you), not volunteers, so deployment is
+deliberate and manual.
 
-Think of it as a directory with a pulse.
+## Install (Debian / Ubuntu)
 
----
+Add the Promtuz apt repo (the same one relays use), then install:
 
-## What the Resolver Actually Does
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+sudo curl -fsSL https://apt.promtuz.dev/promtuz-archive-keyring.asc \
+     -o /etc/apt/keyrings/promtuz.asc
 
-A resolver accepts QUIC connections from relays, clients, or other resolvers
-and identifies each peer using ALPN. The resolver only cares about relays and
-their health. Everything revolves around that.
+echo "deb [signed-by=/etc/apt/keyrings/promtuz.asc] https://apt.promtuz.dev edge main" \
+  | sudo tee /etc/apt/sources.list.d/promtuz.list
 
-When a relay connects:
-
-1. The resolver identifies it (`relay/1`)  
-2. Receives a `RelayHello`  
-3. Responds with `HelloAck`  
-4. Waits for periodic heartbeats  
-5. Tracks the relay in its live registry  
-
-A relay vanishes → its heartbeat expires → it’s removed.  
-Simple, predictable, stateless.
-
----
-
-## Why Resolvers Exist
-
-Relays are ephemeral. They reboot, restart, move hosts, or vanish for hours.
-Clients need a stable discovery point that isn’t one of those relays.
-
-The resolver provides:
-
-- a stable entry point  
-- a current list of available relays  
-- optional cross-resolver synchronization  
-- a neutral place to verify identity and protocol versions  
-
-There’s no “primary” resolver — they are interchangeable.  
-A node connects to whichever one responds first.
-
----
-
-## Communication Model
-
-Everything uses QUIC with ALPN-based role routing:
-
-```rs
-enum ProtoRole {
-    Resolver,
-    Relay,
-    Peer,
-    Client,
-}
+sudo apt update && sudo apt install pzresolver
 ```
 
-Each category maps to a dedicated handler.  
-There’s no ambiguity about who’s speaking.
+## Configure + run
 
-Control messages all use single unidirectional streams:
+```sh
+# Place the resolver's cert/key (its node.key pubkey is the resolver IPK that
+# relays seed in their configs):
+sudo cp node.crt node.key /etc/pzresolver/
 
-- Relay → Resolver: `RelayHello`, heartbeats  
-- Resolver → Relay: `HelloAck`, updates  
-- Resolver ↔ Resolver: gossip (optional)  
-- Client → Resolver: queries (planned)
+# Check the bind address:
+sudoedit /etc/pzresolver/resolver.toml
 
-Each message is a CBOR payload on its own stream — no multiplexing,
-no shared channels, no session semantics. QUIC’s cheap streams make this trivial.
+sudo systemctl enable --now pzresolver
+journalctl -u pzresolver -f
+```
 
----
+## Update
 
-## Resolver Philosophy
+```sh
+sudo apt update && sudo apt upgrade     # config preserved
+```
 
-Resolvers aren’t authoritative. They don’t store anything long-term and don’t
-decide topology. They simply observe which relays are reachable and make that
-information available.
+## Paths
 
-A resolver should:
+| What | Where |
+|------|-------|
+| binary | `/usr/bin/pzresolver` |
+| config | `/etc/pzresolver/resolver.toml` (conffile) |
+| certs + CA | `/etc/pzresolver/` (`node.crt`, `node.key`, `ca.pem`) |
+| logs | `journalctl -u pzresolver` |
+| version | `pzresolver --version` |
 
-- stay online  
-- accept incoming peers  
-- record what it sees  
-- expire stale relays  
-- optionally gossip with other resolvers  
+Stateless — no database, no `/var/lib`. Runs as the unprivileged `pzresolver`
+user under a hardened systemd unit.
 
-If a resolver dies, nothing breaks — relays reconnect to another one.
+## Build from source
 
----
-
-## Lifecycle
-
-A resolver loops through the same simple pattern:
-
-1. Bind QUIC endpoint  
-2. Accept connections  
-3. Inspect ALPN  
-4. Route to appropriate handler  
-5. Update internal registry  
-6. Clean up expired relays  
-
-There’s no heavy coordination or negotiation.  
-Most of the resolver’s work is maintaining timestamps and responding to a
-small set of control messages.
-
----
-
-## High-Level Goals
-
-- Track relays reliably  
-- Provide a list of active relays to others  
-- Make no assumptions about uptime  
-- Handle churn gracefully  
-- Stay protocol-agnostic on the data side  
-
-This keeps the resolver small, predictable, and easy to reason about.
-
----
-
-## Status
-
-The resolver is stable for presence tracking and connection routing.  
-Additional capabilities (resolver mesh, querying layer, metrics) can be
-added without changing the core behavior.
+```sh
+./scripts/build-deb.sh resolver
+# → target/x86_64-unknown-linux-gnu/debian/pzresolver_<version>_amd64.deb
+```

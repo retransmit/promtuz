@@ -1,0 +1,15 @@
+# pzresolver configuration. This file is a dpkg conffile: your edits survive
+# `apt upgrade`. Provision node.crt / node.key into /etc/pzresolver before
+# starting, then `systemctl enable --now pzresolver`.
+
+[network]
+# Bind address — the port relays dial. 0.0.0.0 listens on all interfaces.
+address = "0.0.0.0:4433"
+
+# TLS + identity material. The resolver's node.key doubles as its identity key;
+# its pubkey is the resolver IPK that relays seed in their configs.
+cert_path = "/etc/pzresolver/node.crt"
+key_path = "/etc/pzresolver/node.key"
+
+# Production RootCA public cert, shipped with the package.
+root_ca_path = "/etc/pzresolver/ca.pem"

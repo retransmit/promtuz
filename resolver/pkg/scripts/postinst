@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+# Dedicated unprivileged service user. The resolver is stateless, so no home
+# or data dir is needed.
+if ! getent passwd pzresolver >/dev/null 2>&1; then
+    adduser --system --group --no-create-home --home /nonexistent pzresolver
+fi
+
+systemctl daemon-reload >/dev/null 2>&1 || true
+
+cat <<'EOF'
+pzresolver installed. Next:
+  1. provision node.crt / node.key into /etc/pzresolver
+  2. check /etc/pzresolver/resolver.toml (bind address)
+  3. systemctl enable --now pzresolver
+EOF
+
+exit 0
