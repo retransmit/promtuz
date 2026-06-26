@@ -226,10 +226,13 @@ mod tests {
 
 #[cfg(all(feature = "server", feature = "tokio"))]
 pub use orchestrate::ensure_enrolled;
+#[cfg(all(feature = "server", feature = "tokio"))]
+pub use orchestrate::spawn_config_reload;
 
 #[cfg(all(feature = "server", feature = "tokio"))]
 mod orchestrate {
     use std::path::Path;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     use notify::RecursiveMode;
@@ -292,5 +295,53 @@ mod orchestrate {
                 return Ok(());
             }
         }
+    }
+
+    /// Watch the config file; on a change that still parses, re-exec the
+    /// process in place (PID-stable, independent of the systemd `Restart=`
+    /// policy). A parse failure logs and keeps running on the current config,
+    /// so a bad edit never crash-loops the node. Opt-in via `watch_reload`.
+    pub fn spawn_config_reload(config_path: PathBuf) {
+        tokio::spawn(async move {
+            let dir = config_path
+                .parent()
+                .unwrap_or_else(|| Path::new("/etc/promtuz"))
+                .to_path_buf();
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(8);
+            let Ok(mut watcher) = notify::recommended_watcher(move |_e| {
+                let _ = tx.blocking_send(());
+            }) else {
+                return;
+            };
+            if watcher.watch(&dir, RecursiveMode::NonRecursive).is_err() {
+                return;
+            }
+            let _keep = watcher;
+
+            while rx.recv().await.is_some() {
+                // Debounce: editors emit several events per save.
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                while rx.try_recv().is_ok() {}
+
+                match std::fs::read_to_string(&config_path)
+                    .ok()
+                    .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+                {
+                    Some(_) => {
+                        crate::info!("config changed and parses; restarting in place");
+                        use std::os::unix::process::CommandExt as _;
+                        let err = std::process::Command::new(
+                            std::env::current_exe().unwrap_or_default(),
+                        )
+                        .args(std::env::args_os().skip(1))
+                        .exec();
+                        crate::warn!("re-exec failed: {err}; staying on the old config");
+                    },
+                    None => crate::warn!(
+                        "config changed but failed to parse; keeping current config"
+                    ),
+                }
+            }
+        });
     }
 }

@@ -30,6 +30,9 @@ async fn main() -> Result<()> {
     // if not enrolled), so the endpoint is only built with usable TLS material.
     let csr_path = cli.config.with_extension("csr");
     common::node::enroll::ensure_enrolled(&cfg.network, &csr_path, "resolver").await?;
+    if cfg.network.watch_reload {
+        common::node::enroll::spawn_config_reload(cli.config.clone());
+    }
 
     let resolver = Arc::new(Resolver::new(cfg));
     let acceptor = Acceptor::new(resolver.endpoint.clone());

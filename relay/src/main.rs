@@ -33,6 +33,9 @@ async fn main() -> Result<()> {
     // if not enrolled), so the endpoint is only built with usable TLS material.
     let csr_path = cli.config.with_extension("csr");
     common::node::enroll::ensure_enrolled(&cfg.network, &csr_path, "relay").await?;
+    if cfg.network.watch_reload {
+        common::node::enroll::spawn_config_reload(cli.config.clone());
+    }
 
     // `shutdown` is the legacy `watch` channel still consumed by
     // `ResolverLink`; `cancel` is the unified token observed by every
