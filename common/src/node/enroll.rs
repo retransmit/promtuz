@@ -256,7 +256,7 @@ mod orchestrate {
             anyhow::anyhow!("loading/creating the node key at {}", net.key_path.display())
         })?;
         let key_pub = signing.verifying_key().to_bytes();
-        let node_id = NodeId::new(&key_pub);
+        let node_id = NodeId::new(key_pub);
 
         if cert_is_valid(&net.cert_path, &net.root_ca_path, &node_id, &key_pub) {
             let _ = std::fs::remove_file(csr_path);

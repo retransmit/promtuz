@@ -167,7 +167,7 @@ async fn run_scenario(client_bin: &Path, ca: &Path, relays: &[(SocketAddr, Strin
 /// — drive the 1:1 scenario against already-running relays (e.g. the real
 /// servers), with `e2e-client` subprocesses on this host dialing them.
 async fn run_remote(args: &[String]) -> Result<()> {
-    if args.len() < 5 || args.len() % 2 == 0 {
+    if args.len() < 5 || args.len().is_multiple_of(2) {
         bail!("usage: testnet remote <ca.pem> <relay_addr> <relay_id> <relay_addr> <relay_id> ...");
     }
     let ca = PathBuf::from(&args[0]);

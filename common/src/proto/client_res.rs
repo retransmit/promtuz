@@ -12,8 +12,8 @@ use crate::types::bytes::Bytes;
 /// Hard cap on the *combined* number of relay descriptors a single
 /// [`ClientRequest::GetBootstrapPeers`] may ask for.
 ///
-/// The resolver rejects requests where `count_xor_near + count_rtt_near
-/// > MAX_BOOTSTRAP_RESULTS` (after `u8`-saturating addition) so an
+/// The resolver rejects requests where `count_xor_near + count_rtt_near > MAX_BOOTSTRAP_RESULTS`
+/// (after `u8`-saturating addition) so an
 /// unauthenticated caller cannot trigger an unbounded sort/scan. The
 /// combined cap is a small fraction of `MAX_RELAYS = 1024` (the registry
 /// size cap on the resolver) — large enough that a fresh-joining relay
@@ -106,9 +106,7 @@ mod tests {
         let bytes = [seed; 32];
         RelayDescriptor {
             id:     RelayId::from_bytes(bytes),
-            addr:   format!("127.0.0.{}:4242", seed.max(1))
-                .parse()
-                .expect("valid socket addr"),
+            addr:   format!("127.0.0.{}:4242", seed.max(1)).parse().expect("valid socket addr"),
             pubkey: Bytes([seed.wrapping_add(1); 32]),
         }
     }
@@ -131,11 +129,7 @@ mod tests {
         // drifted decoded payloads. Counts use mid-range values so an
         // off-by-one in the codec for either field shows up.
         let near = [0xABu8; 32];
-        let req = ClientRequest::GetBootstrapPeers {
-            near,
-            count_xor_near: 8,
-            count_rtt_near: 4,
-        };
+        let req = ClientRequest::GetBootstrapPeers { near, count_xor_near: 8, count_rtt_near: 4 };
         let bytes = req.ser().expect("postcard serialize");
         let decoded = ClientRequest::deser(&bytes).expect("postcard deserialize");
         assert_eq!(decoded, req);
@@ -143,7 +137,8 @@ mod tests {
 
     #[test]
     fn client_response_get_relays_round_trips_through_postcard() {
-        let resp = ClientResponse::GetRelays { relays: vec![sample_descriptor(1), sample_descriptor(2)] };
+        let resp =
+            ClientResponse::GetRelays { relays: vec![sample_descriptor(1), sample_descriptor(2)] };
         let bytes = resp.ser().expect("postcard serialize");
         let decoded = ClientResponse::deser(&bytes).expect("postcard deserialize");
         assert_eq!(decoded, resp);
@@ -170,10 +165,7 @@ mod tests {
         // returns empty lists. Pin that postcard handles two
         // back-to-back zero-length `Vec`s correctly under the
         // length-prefix encoding.
-        let resp = ClientResponse::GetBootstrapPeers {
-            xor_near: vec![],
-            rtt_near: vec![],
-        };
+        let resp = ClientResponse::GetBootstrapPeers { xor_near: vec![], rtt_near: vec![] };
         let bytes = resp.ser().expect("postcard serialize");
         let decoded = ClientResponse::deser(&bytes).expect("postcard deserialize");
         assert_eq!(decoded, resp);

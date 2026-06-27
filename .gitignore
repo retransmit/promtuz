@@ -11,3 +11,5 @@ target
 /deploy
 
 release.sh
+
+docs

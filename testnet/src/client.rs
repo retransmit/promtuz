@@ -95,7 +95,7 @@ impl ClientProc {
 
         if let Some(rest) = resp.strip_prefix("ok ") {
             // rest = "<cmd> <data...>"; drop the echoed command token.
-            Ok(rest.splitn(2, ' ').nth(1).unwrap_or("").to_string())
+            Ok(rest.split_once(' ').map(|x| x.1).unwrap_or("").to_string())
         } else if let Some(rest) = resp.strip_prefix("err ") {
             bail!("{}: `{line}` failed: {rest}", self.label)
         } else {
