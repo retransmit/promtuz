@@ -10,8 +10,6 @@ use once_cell::sync::OnceCell;
 use quinn::Endpoint;
 use tokio::runtime::Runtime;
 
-use crate::ndk::key_manager::KeyManager;
-
 // Expose the modules the e2e harness in `relay/tests/` drives. Each
 // was `pub(crate)` before and contained no extra-crate callers under
 // cdylib (Android only goes through `#[jni]` exports). Bumping to
@@ -50,8 +48,6 @@ static JVM: OnceLock<JavaVM> = OnceLock::new();
 pub static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().unwrap());
 
 pub static ENDPOINT: OnceCell<Arc<Endpoint>> = OnceCell::new();
-
-pub static KEY_MANAGER: OnceCell<Arc<KeyManager>> = OnceCell::new();
 
 //////////////////////////////////////////////
 //============ GLOBAL FUNCTIONS ============//

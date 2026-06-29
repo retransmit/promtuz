@@ -8,7 +8,7 @@ use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 use zeroize::Zeroizing;
 
-use crate::KEY_MANAGER;
+use crate::platform::SECURE_STORE;
 use crate::db::identity::IDENTITY_DB;
 use crate::db::identity::IdentityRow;
 
@@ -68,12 +68,12 @@ impl Identity {
     /// `[u8; 32]` (the previous `secret_key_bytes`) defeated the
     /// `Zeroizing` wrapper and let the secret persist on caller stacks.
     pub(super) fn secret_key_with_manager() -> Result<Zeroizing<SecretKey>> {
-        let key_manager = KEY_MANAGER.get().ok_or(anyhow!("API is not initialized"))?;
+        let store = SECURE_STORE.get().ok_or(anyhow!("API is not initialized"))?;
         let conn = IDENTITY_DB.lock();
 
         Ok(conn.query_one("SELECT enc_isk FROM identity WHERE id = 0", [], |row| {
             let eisk: Vec<u8> = row.get("enc_isk")?;
-            let secret = key_manager.decrypt(&eisk).map_err(|_| rusqlite::Error::UnwindingPanic)?;
+            let secret = store.open(eisk).map_err(|_| rusqlite::Error::UnwindingPanic)?;
             let secret: [u8; 32] =
                 secret.try_into().map_err(|_| rusqlite::Error::UnwindingPanic)?;
 
