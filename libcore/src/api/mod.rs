@@ -31,7 +31,6 @@ use crate::quic::peer_identity::PeerIdentity;
 pub mod conn_stats;
 pub mod connection;
 pub mod identity;
-pub mod messaging;
 pub mod misc;
 pub mod welcome;
 

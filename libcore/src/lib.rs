@@ -21,6 +21,7 @@ pub mod api;
 pub mod data;
 pub mod db;
 pub mod events;
+pub mod messaging;
 pub mod mls;
 mod ndk;
 pub mod quic;
