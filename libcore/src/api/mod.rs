@@ -11,6 +11,7 @@
 pub mod identity;
 pub mod init;
 pub mod messaging;
+pub mod qr;
 
 use crate::data::identity::Identity;
 

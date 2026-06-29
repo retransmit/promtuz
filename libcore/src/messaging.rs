@@ -263,6 +263,38 @@ pub async fn send(to: [u8; 32], content: String) -> Result<()> {
     }
 }
 
+/// Eager pairing: create the implicit 1:1 group with `to` and publish a
+/// Welcome carrying `pairing` (the inviter's invite + our display name),
+/// so a not-yet-contact recipient can gate-accept us. Persists the
+/// group_id on success. Entry point for `api::identity::pair_from_qr`.
+pub async fn pair(to: [u8; 32], pairing: PairingP) -> Result<()> {
+    let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
+    let ipk_signer = crate::data::identity::secret_key_signing(&our_ipk)?;
+
+    let dht_client = {
+        let guard = RELAY.read();
+        guard.as_ref().and_then(|r| r.dht_client.clone())
+    };
+    let client = dht_client
+        .ok_or_else(|| anyhow!("not connected to a relay; reconnect before pairing"))?;
+    let provider = PromtuzMlsProvider::shared();
+    let stash = KeyPackageStash::new(stash_db_handle());
+    let buffer = EpochCatchupBuffer::new(stash_db_handle());
+    let ctx = MlsContext {
+        provider: &provider,
+        stash:    &stash,
+        buffer:   &buffer,
+        dht:      client.as_ref(),
+    };
+
+    let group =
+        lazy_create_group_paired(&ctx, &our_ipk, &ipk_signer, &to, Some(pairing)).await?;
+    if let Err(e) = Contact::set_mls_group_id(&to, &group.group_id()) {
+        warn!("PAIR: persist mls_group_id failed: {e}");
+    }
+    Ok(())
+}
+
 /// Bundle of references threaded through the MLS-aware send/receive
 /// paths. Held by reference so the caller controls lifetime; the
 /// `'a` allows tests to plumb a stack-local fake without `Arc`-cloning.
@@ -1653,6 +1685,7 @@ mod tests {
             welcome_blob:  ByteVec(vec![0u8; MAX_WELCOME_BYTES + 1]),
             kp_ref_used:   [0u8; 32].into(),
             sender_sig:    [0u8; 64].into(),
+            pairing:       None,
         };
         let outer = MlsEnvelopeP::Welcome(env);
         let bytes = outer.ser().expect("ser");
