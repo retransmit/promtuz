@@ -31,8 +31,7 @@ The general flow: a client asks a resolver for available relays, connects to one
 common/     Shared crate — crypto, wire protocol, QUIC config, identity, DHT/MLS message types
 relay/      Relay node — DHT, client auth, presence + KeyPackage/Welcome replication, store-and-forward
 resolver/   Resolver — relay discovery service
-libcore/    Client library — MLS engine + networking, compiled to .so for Android via JNI
-jni_macro/  Proc-macro helpers for the JNI bindings
+libcore/    Client library — MLS engine + networking, exposed via uniffi (Kotlin/Swift bindings)
 testnet/    End-to-end harness — spins up a real resolver + N relays + clients as subprocesses
 android/    Android app — Kotlin, Jetpack Compose, Material 3
 ```
