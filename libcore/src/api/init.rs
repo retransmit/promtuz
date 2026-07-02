@@ -40,8 +40,11 @@ use crate::platform::SECURE_STORE;
 use crate::platform::SecureStore;
 use crate::quic::server::RelayConnError;
 
-/// Root CA for the relay/resolver TLS — a protocol constant, compiled in.
-const ROOT_CA: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../certs/root_ca.pem"));
+/// Root CA for the relay/resolver TLS, baked in at build time. Sourced from
+/// the repo's gitignored `.tls/` — the same dev CA store testnet signs with
+/// (see `testnet/src/certs.rs`), so it's never committed. Deployments build
+/// against their own `.tls/RootCA.pem`.
+const ROOT_CA: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../.tls/RootCA.pem"));
 
 /// One-time initialization. Installs the platform ports, builds the
 /// client-only QUIC endpoint, and starts the relay loop. `resolver_seeds`
