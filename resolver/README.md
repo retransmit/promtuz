@@ -64,6 +64,6 @@ user under a hardened systemd unit.
 ## Build from source
 
 ```sh
-./scripts/build-deb.sh resolver
+./tools/scripts/build-deb.sh resolver
 # → target/x86_64-unknown-linux-gnu/debian/pzresolver_<version>_amd64.deb
 ```

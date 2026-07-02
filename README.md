@@ -32,8 +32,9 @@ common/     Shared crate — crypto, wire protocol, QUIC config, identity, DHT/M
 relay/      Relay node — DHT, client auth, presence + KeyPackage/Welcome replication, store-and-forward
 resolver/   Resolver — relay discovery service
 libcore/    Client library — MLS engine + networking, exposed via uniffi (Kotlin/Swift bindings)
-testnet/    End-to-end harness — spins up a real resolver + N relays + clients as subprocesses
 android/    Android app — Kotlin, Jetpack Compose, Material 3
+ios/        iOS app — Swift, SwiftUI
+tools/      Dev tooling — testnet (e2e harness) + scripts (deb packaging)
 ```
 
 ## What works

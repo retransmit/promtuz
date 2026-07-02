@@ -91,7 +91,7 @@ Requires Rust, [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild),
 runs on Debian 10+ / Ubuntu 18.04+:
 
 ```sh
-./scripts/build-deb.sh relay
+./tools/scripts/build-deb.sh relay
 # → target/x86_64-unknown-linux-gnu/debian/pzrelay_<version>_amd64.deb
 ```
 

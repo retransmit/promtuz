@@ -28,7 +28,7 @@ governor = "0.10.4"
 # Debian packaging (`cargo deb`) → `pzresolver_<version>_<arch>.deb`.
 # Binary installs as /usr/bin/pzresolver; config + CA + keys + cert under /etc/promtuz.
 # The resolver is stateless (in-memory) — no /var/lib, nothing written at run.
-# Build via ./scripts/build-deb.sh resolver (cargo-zigbuild → libc6 only).
+# Build via ./tools/scripts/build-deb.sh resolver (cargo-zigbuild → libc6 only).
 # ---------------------------------------------------------------------------
 [package.metadata.deb]
 name = "pzresolver"

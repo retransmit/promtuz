@@ -11,7 +11,7 @@ name = "testnet"
 path = "src/main.rs"
 
 [dependencies]
-common = { path = "../common", features = ["quic"] }
+common = { path = "../../common", features = ["quic"] }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 hex = { workspace = true }

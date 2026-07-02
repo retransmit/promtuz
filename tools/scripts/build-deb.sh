@@ -3,8 +3,8 @@
 # old glibc + static libstdc++/libgcc) → cargo-deb. The result runs on
 # Debian 10+ / Ubuntu 18.04+ with libc6 as its only dependency.
 #
-#   ./scripts/build-deb.sh relay
-#   ./scripts/build-deb.sh resolver
+#   ./tools/scripts/build-deb.sh relay
+#   ./tools/scripts/build-deb.sh resolver
 #
 # Do NOT run a plain `cargo deb`: it rebuilds against the host glibc (+ dynamic
 # libstdc++), producing a binary the pinned `depends = libc6` mislabels and that
