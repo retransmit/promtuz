@@ -9,6 +9,7 @@ import android.provider.Settings
 import android.util.Rational
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.Preview
@@ -17,61 +18,37 @@ import androidx.camera.core.ViewPort
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LoadingIndicator
-import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
-import androidx.activity.compose.BackHandler
 import androidx.core.view.doOnLayout
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.promtuz.chat.R
-import com.promtuz.chat.domain.model.Identity
 import com.promtuz.chat.presentation.state.PermissionState
 import com.promtuz.chat.presentation.viewmodel.QrScannerVM
 import com.promtuz.chat.ui.activities.QrScanner
@@ -85,18 +62,12 @@ fun QrScannerScreen(
     activity: QrScanner,
     viewModel: QrScannerVM
 ) {
-    val selectedIdentity by viewModel.selectedIdentity.collectAsState()
-    val isProcessingIdentity by viewModel.isProcessingIdentity.collectAsState()
-    val processingIdentityName by viewModel.processingIdentityName.collectAsState()
-    val frozenFrameBitmap by viewModel.frozenFrameBitmap.collectAsState()
-    val backPressedOnce by viewModel.backPressedOnce.collectAsState()
-
     Box(
         Modifier.fillMaxSize()
     ) {
         val cameraProvider by viewModel.cameraProviderState.collectAsState()
-        val identities by viewModel.identities.collectAsState()
-//        val identitiesBeingSaved by viewModel.identitiesBeingSaved.collectAsState()
+        val scanError by viewModel.scanError.collectAsState()
+        val paired by viewModel.paired.collectAsState()
 
         PermissionRequester(activity, viewModel)
 
@@ -107,52 +78,17 @@ fun QrScannerScreen(
             )
         }
 
-        // Show frozen frame overlay when processing
-        frozenFrameBitmap?.let { bitmap ->
-            Image(
-                bitmap = bitmap.asImageBitmap(),
-                contentDescription = "Frozen camera frame",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
-            )
-        }
-
-        LaunchedEffect(selectedIdentity, isProcessingIdentity) {
-            if (selectedIdentity != null || isProcessingIdentity) {
-                activity.freezeCamera()
-            } else {
-                activity.unfreezeCamera()
+        LaunchedEffect(scanError) {
+            scanError?.let {
+                Toast.makeText(activity, it, Toast.LENGTH_SHORT).show()
+                viewModel.clearScanError()
             }
         }
 
-//        selectedIdentity?.let {
-//            IdentityConfirmationDialog(it, viewModel) {
-//                viewModel.dismissIdentity()
-//            }
-//        }
-
-        if (isProcessingIdentity) {
-            IdentityProcessingDialog(
-                identityName = processingIdentityName,
-                backPressedOnce = backPressedOnce,
-                viewModel = viewModel
-            )
-        }
-
-        LazyColumn(
-            Modifier.align(BiasAlignment(0f, 0.65f)),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            items(identities, { identity -> identity.ipk.toHexString() }) {
-                IdentityActionButton(
-                    it,
-                    viewModel,
-                    Modifier.animateItem(
-                        fadeInSpec = null
-                    )
-                ) {
-
-                }
+        LaunchedEffect(paired) {
+            if (paired) {
+                Toast.makeText(activity, "Contact added", Toast.LENGTH_SHORT).show()
+                activity.finish()
             }
         }
 
@@ -305,121 +241,4 @@ private fun CameraPreview(
             }
         }, modifier = modifier
     )
-}
-
-
-@Composable
-private fun IdentityActionButton(
-    userIdentity: Identity,
-    viewModel: QrScannerVM,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit
-) {
-    val selectedIdentity by viewModel.selectedIdentity.collectAsState()
-
-    val isNew = true // user.isNew
-    val name = userIdentity.nickname.let { if (it.isNullOrBlank()) "Anonymous" else it }
-
-    val saving by remember { derivedStateOf { selectedIdentity == userIdentity } }
-
-    Button({
-        viewModel.saveUserIdentity(userIdentity)
-        onClick()
-    }, modifier, enabled = !saving) {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (saving) LoadingIndicator(
-                Modifier.size(24.dp),
-                color = LocalContentColor.current
-            )
-            else Icon(
-                painter = if (isNew) painterResource(R.drawable.i_user_add) else painterResource(R.drawable.i_user_check),
-                if (isNew) "Add Contact" else "Contact Saved"
-            )
-
-            Text(buildAnnotatedString {
-                append("Add ")
-                withStyle(style = SpanStyle(fontWeight = FontWeight.Bold)) {
-                    append(name)
-                }
-            })
-        }
-    }
-}
-
-
-@Composable
-private fun IdentityProcessingDialog(
-    identityName: String?,
-    backPressedOnce: Boolean,
-    viewModel: QrScannerVM
-) {
-    // Handle back press with double-tap to cancel
-    BackHandler {
-        viewModel.onBackPressedDuringProcessing()
-    }
-
-    Dialog(
-        onDismissRequest = { viewModel.onBackPressedDuringProcessing() },
-        properties = DialogProperties(
-            dismissOnBackPress = false, // We handle back press ourselves via BackHandler
-            dismissOnClickOutside = false
-        )
-    ) {
-        Card(
-            shape = RoundedCornerShape(28.dp),
-            elevation = CardDefaults.cardElevation(8.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
-            ),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(28.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                LoadingIndicator(
-                    modifier = Modifier.size(48.dp),
-                    color = MaterialTheme.colorScheme.primary
-                )
-
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text(
-                        "Connecting",
-                        style = MaterialTheme.typography.titleLargeEmphasized,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-
-                    identityName?.let { name ->
-                        Text(
-                            "to $name",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center
-                        )
-                    }
-                }
-
-                Text(
-                    "Establishing secure connection...",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.outline,
-                    textAlign = TextAlign.Center
-                )
-
-                // Show cancel hint
-                TextButton(onClick = { viewModel.dismissProcessing() }) {
-                    Text("Cancel")
-                }
-            }
-        }
-    }
 }

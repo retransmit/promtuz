@@ -7,32 +7,17 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.mlkit.vision.barcode.common.Barcode
-import com.promtuz.chat.domain.model.Identity
 import com.promtuz.chat.presentation.state.PermissionState
-import com.promtuz.core.API
+import com.promtuz.core.CoreBridge
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import timber.log.Timber
+import uniffi.core.CoreException
 
 class QrScannerVM(
-    private val application: Application, private val api: API
+    private val application: Application
 ) : ViewModel() {
-    companion object {
-        @Volatile
-        private var instance: QrScannerVM? = null
-
-        @JvmStatic
-        fun onIdentityQrScanned(name: String) {
-            instance?.onIdentityQrDetected(name)
-        }
-
-        internal fun setInstance(vm: QrScannerVM) {
-            instance = vm
-        }
-    }
-
     private val context: Context get() = application.applicationContext
     private val log = Timber.tag("QrScannerVM")
 
@@ -49,26 +34,20 @@ class QrScannerVM(
     private val _cameraProviderState = MutableStateFlow<ProcessCameraProvider?>(null)
     val cameraProviderState = _cameraProviderState.asStateFlow()
 
-    private val _selectedIdentity = MutableStateFlow<Identity?>(null)
-    val selectedIdentity = _selectedIdentity.asStateFlow()
+    private val _scanError = MutableStateFlow<String?>(null)
+    val scanError = _scanError.asStateFlow()
 
-    private val _identities = MutableStateFlow<List<Identity>>(emptyList())
-    val identities = _identities.asStateFlow()
+    /** Flips true once a valid invite is accepted; the screen closes on it. */
+    private val _paired = MutableStateFlow(false)
+    val paired = _paired.asStateFlow()
 
-    private val _isProcessingIdentity = MutableStateFlow(false)
-    val isProcessingIdentity = _isProcessingIdentity.asStateFlow()
+    // Guards against the analyzer re-firing pairFromQr while one is in flight.
+    // The ML Kit analyzer delivers frames serially, so a plain flag suffices.
+    @Volatile
+    private var processing = false
 
-    private val _processingIdentityName = MutableStateFlow<String?>(null)
-    val processingIdentityName = _processingIdentityName.asStateFlow()
-
-    private val _frozenFrameBitmap = MutableStateFlow<android.graphics.Bitmap?>(null)
-    val frozenFrameBitmap = _frozenFrameBitmap.asStateFlow()
-
-    private val _backPressedOnce = MutableStateFlow(false)
-    val backPressedOnce = _backPressedOnce.asStateFlow()
-
-    init {
-        setInstance(this)
+    fun clearScanError() {
+        _scanError.value = null
     }
 
     fun setCameraProvider(provider: ProcessCameraProvider) {
@@ -87,51 +66,24 @@ class QrScannerVM(
         _isCameraAvailable.value = true
     }
 
-    fun handleScannedBarcodes(barcodes: List<Barcode>) = viewModelScope.launch {
-        _identities.value = (barcodes.mapNotNull { barcode ->
-            barcode.rawBytes?.let { bytes ->
-                API.parseQRBytes(bytes)
-                null
-            } ?: return@mapNotNull null
-        }).distinctBy { it }
-    }
-
-    fun dismissIdentity() {
-        _selectedIdentity.value = null
-        _identities.update { emptyList() }
-    }
-
-    fun saveUserIdentity(userIdentity: Identity) {
-        _selectedIdentity.value = userIdentity
-    }
-
-    fun onIdentityQrDetected(name: String) {
-        log.d("Identity QR detected: $name")
-        _isProcessingIdentity.value = true
-        _processingIdentityName.value = name
-        _backPressedOnce.value = false
-    }
-
-    fun setFrozenFrame(bitmap: android.graphics.Bitmap?) {
-        _frozenFrameBitmap.value = bitmap
-    }
-
-    fun onBackPressedDuringProcessing() {
-        println("SYSTEM BACK PRESS -  ${_backPressedOnce.value}")
-        if (_backPressedOnce.value) {
-            // Second press - actually cancel
-            dismissProcessing()
-        } else {
-            // First press - show warning
-            _backPressedOnce.value = true
+    fun handleScannedBarcodes(barcodes: List<Barcode>) {
+        // One accepted invite per scan session: ignore re-detections of the
+        // same QR held in frame (analyzer ticks ~2x/s) and anything after a
+        // successful pair. A bad QR re-arms so the user can try another.
+        if (processing || _paired.value) return
+        val bytes = barcodes.firstNotNullOfOrNull { it.rawBytes } ?: return
+        processing = true
+        viewModelScope.launch {
+            try {
+                CoreBridge.pairFromQr(bytes)
+                imageAnalysis.clearAnalyzer() // valid invite accepted — stop scanning
+                _paired.value = true
+            } catch (e: CoreException) {
+                log.e(e, "pairFromQr failed")
+                _scanError.value = e.message ?: "Invalid QR code"
+            } finally {
+                processing = false
+            }
         }
-    }
-
-    fun dismissProcessing() {
-        _isProcessingIdentity.value = false
-        _processingIdentityName.value = null
-        _frozenFrameBitmap.value = null
-        _backPressedOnce.value = false
-        // TODO: Notify peer if connected (for future implementation)
     }
 }

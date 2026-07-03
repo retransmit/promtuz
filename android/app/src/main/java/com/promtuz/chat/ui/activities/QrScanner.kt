@@ -102,30 +102,10 @@ class QrScanner : AppCompatActivity() {
             viewModel.setCameraProvider(cameraProviderFuture.get())
         }, ContextCompat.getMainExecutor(this))
 
-        unfreezeCamera()
+        startAnalyzer()
     }
 
-    fun freezeCamera() {
-        Timber.tag(TAG).d("Freezing Camera")
-
-        // Capture the current preview frame before freezing
-        try {
-            previewView?.bitmap?.let { bitmap ->
-                viewModel.setFrozenFrame(bitmap)
-                Timber.tag(TAG).d("Captured frame: ${bitmap.width}x${bitmap.height}")
-            }
-        } catch (e: Exception) {
-            Timber.tag(TAG).e(e, "Failed to capture frame")
-        }
-
-        viewModel.cameraProviderState.value?.unbind()
-        viewModel.imageAnalysis.clearAnalyzer()
-    }
-
-    fun unfreezeCamera() {
-        Timber.tag(TAG).d("Unfreezing Camera")
-
-        viewModel.setFrozenFrame(null)
+    private fun startAnalyzer() {
         viewModel.imageAnalysis.setAnalyzer(
             ContextCompat.getMainExecutor(this), qrAnalyzer()
         )

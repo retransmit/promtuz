@@ -4,26 +4,21 @@ import android.app.Application
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.promtuz.chat.domain.model.MessageData
 import com.promtuz.chat.domain.model.UiMessage
 import com.promtuz.chat.domain.model.UiMessagePosition
 import com.promtuz.chat.domain.model.UiMessageStatus
-import com.promtuz.chat.utils.serialization.AppCbor
-import com.promtuz.core.API
-import com.promtuz.core.events.MessageEvent
+import com.promtuz.core.CoreBridge
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.serialization.ExperimentalSerializationApi
-import kotlinx.serialization.decodeFromByteArray
 import timber.log.Timber
+import uniffi.core.MessageEvent
+import uniffi.core.MessageRecord
 
 class ChatVM(
-    private val application: Application,
-    private val api: API
+    private val application: Application
 ) : ViewModel() {
     private val context: Context get() = application.applicationContext
 
@@ -34,18 +29,23 @@ class ChatVM(
     var peerIpk: ByteArray = ByteArray(32)
         private set
 
+    private var initialized = false
+
     fun init(peerIpk: ByteArray) {
+        // Guard re-entry: the activity re-calls this on recreation (rotation),
+        // but the ViewModel + its viewModelScope survive — without this we'd
+        // stack a second messageEvents collector each time.
+        if (initialized) return
+        initialized = true
         this.peerIpk = peerIpk
         loadMessages()
         listenForIncoming()
     }
 
-    @OptIn(ExperimentalSerializationApi::class)
     private fun loadMessages() {
         viewModelScope.launch {
             try {
-                val bytes = api.getMessages(peerIpk, 50, null)
-                val rows = AppCbor.instance.decodeFromByteArray<List<MessageData>>(bytes)
+                val rows = CoreBridge.messages(peerIpk, 50, "")
                 _messages.value = rows.toUi()
             } catch (e: Exception) {
                 Timber.tag("ChatVM").e(e, "Failed to load messages")
@@ -55,7 +55,7 @@ class ChatVM(
 
     private fun listenForIncoming() {
         viewModelScope.launch {
-            api.eventsFlow.filterIsInstance<MessageEvent>().collect { event ->
+            CoreBridge.messageEvents.collect { event ->
                 when (event) {
                     is MessageEvent.Received -> {
                         if (event.from.contentEquals(peerIpk)) {
@@ -64,7 +64,7 @@ class ChatVM(
                                 event.content,
                                 false,
                                 UiMessagePosition.Single,
-                                event.timestamp * 1000,
+                                event.timestamp.toLong() * 1000,
                                 null
                             ))
                         }
@@ -76,7 +76,7 @@ class ChatVM(
                                 event.content,
                                 true,
                                 UiMessagePosition.Single,
-                                event.timestamp * 1000,
+                                event.timestamp.toLong() * 1000,
                                 UiMessageStatus.Sent
                             ))
                         }
@@ -98,10 +98,16 @@ class ChatVM(
     }
 
     fun dispatchMessage(content: String) {
-        api.sendMessage(peerIpk, content)
+        viewModelScope.launch {
+            try {
+                CoreBridge.sendMessage(peerIpk, content)
+            } catch (e: Exception) {
+                Timber.tag("ChatVM").e(e, "Failed to send message")
+            }
+        }
     }
 
-    private fun List<MessageData>.toUi(): List<UiMessage> = mapIndexed { i, m ->
+    private fun List<MessageRecord>.toUi(): List<UiMessage> = mapIndexed { i, m ->
         val prev = getOrNull(i - 1)
         val next = getOrNull(i + 1)
 
@@ -116,7 +122,7 @@ class ChatVM(
         }
 
         UiMessage(
-            m.id, m.content, m.outgoing, position, m.timestamp * 1000, UiMessageStatus.entries[m.status]
+            m.id, m.content, m.outgoing, position, m.timestamp.toLong() * 1000, UiMessageStatus.entries[m.status.toInt()]
         )
     }
 

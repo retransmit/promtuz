@@ -5,15 +5,17 @@ import android.app.Application
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import com.promtuz.chat.presentation.state.WelcomeField
 import com.promtuz.chat.presentation.state.WelcomeStatus
 import com.promtuz.chat.presentation.state.WelcomeUiState
-import com.promtuz.core.API
+import com.promtuz.core.CoreBridge
+import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
+import uniffi.core.CoreException
 
 class WelcomeVM(
-    private val application: Application,
-    private val api: API
+    private val application: Application
 ) : ViewModel(), KoinComponent {
 
     private val _uiState = mutableStateOf(
@@ -37,10 +39,13 @@ class WelcomeVM(
 
         onChange(WelcomeField.Status, WelcomeStatus.Generating)
 
-        if (api.welcome(name)) {
-            onSuccess()
-        } else {
-            onChange(WelcomeField.Status, WelcomeStatus.Normal)
+        viewModelScope.launch {
+            try {
+                CoreBridge.enroll(name)
+                onSuccess()
+            } catch (e: CoreException) {
+                onChange(WelcomeField.Status, WelcomeStatus.Normal)
+            }
         }
     }
 }

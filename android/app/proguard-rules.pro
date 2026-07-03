@@ -19,3 +19,10 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# --- uniffi generated bindings + JNA (JNI/reflection, must survive R8) ---
+-keep class uniffi.core.** { *; }
+-keep class com.sun.jna.** { *; }
+-keepclassmembers class * extends com.sun.jna.** { *; }
+-keep class * implements com.sun.jna.Library { *; }
+-dontwarn java.awt.**

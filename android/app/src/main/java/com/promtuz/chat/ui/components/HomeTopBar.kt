@@ -43,7 +43,7 @@ fun HomeTopBar(
                         interactionSource = null,
                         onClick = {},
                         onDoubleClick = {
-                            appViewModel.connection()
+                            appViewModel.refreshChats()
                         }
                     )
             )

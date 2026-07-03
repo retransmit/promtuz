@@ -12,7 +12,6 @@ junit = "4.13.2"
 junitVersion = "1.3.0"
 espressoCore = "3.7.0"
 kotlinxCoroutinesCore = "1.10.2"
-kotlinxSerializationCBOR = "1.9.0"
 lifecycleRuntimeKtx = "2.10.0"
 activityCompose = "1.12.2"
 composeBom = "2026.01.00"
@@ -33,6 +32,10 @@ cameraCore = "1.6.0-alpha02"
 koin-bom = "4.1.1"
 timber = "5.0.1"
 uiGraphics = "1.10.1"
+
+# JNA backs the uniffi Kotlin bindings. >=5.17 required for 16KB-page
+# devices (Android 15+/Play); declared with @aar in app/build.gradle.kts.
+jna = "5.19.0"
 
 [libraries]
 androidx-camera-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "cameraCore" }
@@ -64,7 +67,6 @@ androidx-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-man
 androidx-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
 androidx-material3 = { group = "androidx.compose.material3", name = "material3", version.ref = "material3" }
 google-material = { group = "com.google.android.material", name = "material", version.ref = "material" }
-kotlinx-serialization-cbor = { module = "org.jetbrains.kotlinx:kotlinx-serialization-cbor", version.ref = "kotlinxSerializationCBOR" }
 
 # Core Navigation 3 libraries
 androidx-navigation3-runtime = { module = "androidx.navigation3:navigation3-runtime", version.ref = "nav3Core" }

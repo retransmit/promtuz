@@ -73,7 +73,6 @@ fun SettingsScreen(
             ),
             SettingGroup(
                 "Network", listOf(
-                    SettingItem("Statistics", R.drawable.i_connection_status) { navigate(Routes.NetworkStats) },
                     SettingItem("Resolvers", R.drawable.i_dns) {},
                     SettingItem("Relay Nodes", R.drawable.i_hub) {},
                 )

@@ -6,6 +6,7 @@ import com.promtuz.chat.di.appModule
 import com.promtuz.chat.di.vmModule
 import com.promtuz.chat.utils.logs.AppLog
 import com.promtuz.chat.utils.logs.AppLogger
+import com.promtuz.core.CoreInitializer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -42,11 +43,13 @@ class Promtuz : Application() {
     }
 
     override fun onCreate() {
-        Timber.plant(
-            Timber.DebugTree(), AppLogger
-        )
+        // Security: no DebugTree / logcat scraper in release builds.
+        if (isDebuggable()) {
+            Timber.plant(Timber.DebugTree(), AppLogger)
+            readJNILogs()
+        }
 
-        readJNILogs()
+        CoreInitializer.start()
 
         startKoin {
             androidLogger()

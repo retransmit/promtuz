@@ -21,7 +21,4 @@ object Routes : NavKey {
 
     @Serializable
     data object Logs : NavKey
-
-    @Serializable
-    data object NetworkStats : NavKey
 }

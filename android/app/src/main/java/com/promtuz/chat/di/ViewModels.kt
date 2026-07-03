@@ -2,7 +2,6 @@ package com.promtuz.chat.di
 
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.presentation.viewmodel.ChatVM
-import com.promtuz.chat.presentation.viewmodel.NetworkStatsVM
 import com.promtuz.chat.presentation.viewmodel.QrScannerVM
 import com.promtuz.chat.presentation.viewmodel.SavedUsersVM
 import com.promtuz.chat.presentation.viewmodel.SettingsVM
@@ -21,5 +20,4 @@ val vmModule = module {
     viewModelOf(::SavedUsersVM)
     viewModelOf(::SettingsVM)
     viewModelOf(::ChatVM)
-    viewModelOf(::NetworkStatsVM)
 }

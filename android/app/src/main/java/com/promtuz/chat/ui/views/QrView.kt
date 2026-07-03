@@ -15,7 +15,7 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.common.BitMatrix
 import com.google.zxing.qrcode.QRCodeWriter
-import com.promtuz.core.API
+import com.promtuz.core.CoreBridge
 
 class QrView(context: Context) : View(context) {
 
@@ -67,7 +67,7 @@ class QrView(context: Context) : View(context) {
             }
         }
 
-        roundMask = API.computeQrMask(grid, n)
+        roundMask = CoreBridge.computeQrMask(grid, n)
 
         loading = false
         invalidate()
