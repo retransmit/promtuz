@@ -131,11 +131,13 @@ impl Resolver {
     ///    (replay protection — captured packets stop being usable
     ///    quickly).
     /// 4. Enforce the `MAX_RELAYS` capacity cap before any mutation.
-    /// 5. Reject if a live connection already exists for this id
-    ///    (`AlreadyConnected`); only sweep stale entries whose
-    ///    [`Connection::close_reason`] is `Some`. This avoids
-    ///    same-identity takeover-by-replay: an attacker with a captured
-    ///    valid signature still can't kick the legitimate relay off.
+    /// 5. Last-connection-wins: if a live entry already exists for this id,
+    ///    close it and let the fresh (signature-proven) registration take
+    ///    over. A relay restart/redeploy leaves its old QUIC conn lingering
+    ///    (no FIN → `close_reason` stays `None`); rejecting locked the relay
+    ///    out until that idle-timed out and made it hammer the per-IP rate
+    ///    limit. The freshness window + client-side relay-cert pinning bound
+    ///    the replay-flap risk (a redirected addr just fails closed).
     /// 6. Insert the new entry under the write lock.
     ///
     /// Why not derive the pubkey from `relay_id` alone? Because `relay_id`
@@ -169,18 +171,15 @@ impl Resolver {
         // 4-6. registry mutation under write lock
         let mut relays = self.relays.write();
 
-        // 5. honour an already-live connection — even from the same identity.
-        // Only sweep entries whose connection is already gone.
+        // 5. Last-connection-wins (see doc): close any superseded live entry
+        // and let this fresh, signature-proven registration replace it. The
+        // ptr-guarded watcher (`remove_relay_if_same`) makes the displaced
+        // connection's cleanup a no-op, so it can't evict the new entry.
         if let Some(existing) = relays.get(&relay_id) {
             if existing.conn.close_reason().is_none() {
-                warn!(
-                    "relay({}) rejected: id {} already has a live connection",
-                    conn.remote_address(),
-                    relay_id
-                );
-                return Err(CloseReason::AlreadyConnected);
+                info!("relay({relay_id}) reconnected, superseding prior session");
+                CloseReason::Reconnecting.close(&existing.conn);
             }
-            // Stale entry — drop it, watcher task will idempotently no-op.
             relays.remove(&relay_id);
         }
 
