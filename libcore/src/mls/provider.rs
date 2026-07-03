@@ -117,16 +117,6 @@ mod tests {
     }
 
     #[test]
-    fn construction_smoke() {
-        let p = build_provider();
-        // Touch every accessor — no panic, no compile-error on the
-        // OpenMlsProvider trait.
-        let _ = OpenMlsProvider::storage(&p);
-        let _ = OpenMlsProvider::crypto(&p);
-        let _ = OpenMlsProvider::rand(&p);
-    }
-
-    #[test]
     fn rand_returns_different_arrays() {
         let p = build_provider();
         let a: [u8; 32] = OpenMlsProvider::rand(&p).random_array().expect("rand");

@@ -142,8 +142,6 @@ pub(crate) async fn handle_drain_queue_with(
     //    once self-as-home is stable). The remote source is cleaned
     //    up via `QueueFetchAck` after the ack lands.
     let mut delivered_keys: Vec<MessageKey> = Vec::new();
-    let mut seen_ids: std::collections::HashSet<[u8; 16]> =
-        std::collections::HashSet::new();
     let mut deliver_queue: Vec<DeliverP> = Vec::new();
 
     iterate_cf_messages(&ctx, &recipient_arr, &mut deliver_queue, &mut delivered_keys);
@@ -157,24 +155,12 @@ pub(crate) async fn handle_drain_queue_with(
         iterate_cf_dht_queue(&dht, &recipient_arr, &mut deliver_queue);
     }
 
-    // Pre-dedupe by id from the local CFs so the cross-cf overlap
-    // (a message that ends up in BOTH cf_messages and cf_dht_queue
-    // — possible if a sender's local-fallback path coexisted with a
-    // home-store path during a routing transition) doesn't ship
-    // twice. Order: cf_messages first, then cf_dht_queue, so a tie
-    // goes to the legacy queue's chronology.
-    let mut deduped: Vec<DeliverP> = Vec::with_capacity(deliver_queue.len());
-    for d in deliver_queue.drain(..) {
-        if seen_ids.insert(d.id.0) {
-            deduped.push(d);
-        }
-    }
-
     // 4. If !i_am_home AND drain_auth set AND DHT is enabled, fetch
-    //    from remote homes and append. Snapshot the auth out of
-    //    the mutex *without* holding the guard across the await.
+    //    from remote homes. Snapshot the auth out of the mutex
+    //    *without* holding the guard across the await.
     let auth_snapshot: Option<DrainAuth> = ctx.drain_auth.lock().clone();
 
+    let mut remote_msgs: Vec<DispatchP> = Vec::new();
     if !i_am_home {
         if let (Some(auth), Some(dht)) =
             (auth_snapshot, ctx.relay.dht.as_ref().cloned())
@@ -183,11 +169,7 @@ pub(crate) async fn handle_drain_queue_with(
             // Hand off to the (possibly-stubbed) remote fetcher.
             let result: RemoteFetchResult =
                 (remote_fetcher)(dht.clone(), recipient_arr, auth, self_id).await;
-            for d in result.messages {
-                if seen_ids.insert(d.id.0) {
-                    deduped.push(dispatch_to_deliver(d));
-                }
-            }
+            remote_msgs = result.messages;
             // Stash per-home delivered ids + home descriptors for the
             // post-`AckDrain` `QueueFetchAck` fan-out. Replace any
             // prior pending state — the latest drain wins.
@@ -205,6 +187,15 @@ pub(crate) async fn handle_drain_queue_with(
             );
         }
     }
+
+    // Merge local-CF deliveries with the remote-fetched dispatches,
+    // deduping by `DispatchP.id`. First occurrence wins: the local CFs
+    // (cf_messages before cf_dht_queue) rank ahead of the remote source,
+    // so a message that landed in BOTH — possible when a sender's
+    // local-fallback path coexisted with a home-store path during a
+    // routing transition — ships once, from the local side. See
+    // [`dedupe_deliveries`].
+    let deduped = dedupe_deliveries(deliver_queue, remote_msgs);
 
     // 5. Stream the unified, deduplicated batch.
     for deliver in &deduped {
@@ -477,6 +468,29 @@ fn dispatch_to_deliver(d: DispatchP) -> DeliverP {
     }
 }
 
+/// Merge locally-drained deliveries with remote-fetched dispatches,
+/// deduping by `DispatchP.id` with first-occurrence-wins semantics.
+/// `local` entries (already in cf_messages-then-cf_dht_queue order)
+/// rank ahead of `remote`, so a dispatch present in both is delivered
+/// once, from the local side. Single source of truth for the drain
+/// dedupe — [`handle_drain_queue_with`] delegates here.
+fn dedupe_deliveries(local: Vec<DeliverP>, remote: Vec<DispatchP>) -> Vec<DeliverP> {
+    let mut seen: std::collections::HashSet<[u8; 16]> =
+        std::collections::HashSet::with_capacity(local.len() + remote.len());
+    let mut out: Vec<DeliverP> = Vec::with_capacity(local.len() + remote.len());
+    for d in local {
+        if seen.insert(d.id.0) {
+            out.push(d);
+        }
+    }
+    for d in remote {
+        if seen.insert(d.id.0) {
+            out.push(dispatch_to_deliver(d));
+        }
+    }
+    out
+}
+
 /// Default production [`RemoteFetcher`] — calls
 /// [`crate::dht::queue_drain::fetch_remote_queues_with_homes`] and
 /// absorbs any error into an empty result (the drain falls back to
@@ -549,8 +563,10 @@ mod tests {
     //! helpers; the integration test of the full pipeline is left to
     //! a future cluster smoke test.
 
+    use common::proto::client_rel::DeliverP;
     use common::proto::client_rel::DispatchP;
 
+    use super::dedupe_deliveries;
     use super::dispatch_to_deliver;
 
     #[test]
@@ -569,59 +585,48 @@ mod tests {
         assert_eq!(deliver.sig, dispatch.sig);
     }
 
-    /// Pure-data dedupe test: local + remote sources holding
-    /// overlapping ids must collapse to one entry per id, with
-    /// first-occurrence wins (mirrors the `seen_ids.insert`
-    /// loop in `handle_drain_queue_with`).
+    /// The real cross-source drain dedupe — the guard that stops a
+    /// message present in both a local CF and a remote home from being
+    /// delivered twice. Drives the production [`dedupe_deliveries`]
+    /// reducer directly (not a re-implementation) over a local set and
+    /// a remote set that share one id.
     #[test]
-    fn dedupe_across_local_and_remote_keeps_first_occurrence() {
-        use std::collections::HashSet;
+    fn dedupe_deliveries_collapses_cross_source_dup_keeping_local_first() {
+        let local_deliver = |id: u8, from: u8| DeliverP {
+            id:      [id; 16].into(),
+            from:    [from; 32].into(),
+            payload: vec![id].into(),
+            sig:     [0u8; 64].into(),
+        };
+        let remote_dispatch = |id: u8, from: u8| DispatchP {
+            to:      [9u8; 32].into(),
+            from:    [from; 32].into(),
+            id:      [id; 16].into(),
+            payload: vec![id].into(),
+            sig:     [0u8; 64].into(),
+        };
 
-        use common::proto::client_rel::DeliverP;
+        // Local drains A, B (from=1); remote returns B, C (from=2). B overlaps.
+        let local = vec![local_deliver(0xAA, 1), local_deliver(0xBB, 1)];
+        let remote = vec![remote_dispatch(0xBB, 2), remote_dispatch(0xCC, 2)];
 
-        let id_x: [u8; 16] = [0xAA; 16];
-        let id_y: [u8; 16] = [0xBB; 16];
+        let out = dedupe_deliveries(local, remote);
 
-        let local = vec![
-            DeliverP {
-                id:      id_x.into(),
-                from:    [0u8; 32].into(),
-                payload: vec![1u8].into(),
-                sig:     [0u8; 64].into(),
-            },
-        ];
-        let remote = vec![
-            DispatchP {
-                to:      [0u8; 32].into(),
-                from:    [0u8; 32].into(),
-                id:      id_x.into(), // duplicates local
-                payload: vec![1u8].into(),
-                sig:     [0u8; 64].into(),
-            },
-            DispatchP {
-                to:      [0u8; 32].into(),
-                from:    [0u8; 32].into(),
-                id:      id_y.into(), // new
-                payload: vec![2u8].into(),
-                sig:     [0u8; 64].into(),
-            },
-        ];
+        // Duplicate B collapses to one; order is local-first then the
+        // new remote id, never re-shipping B.
+        let ids: Vec<[u8; 16]> = out.iter().map(|d| d.id.0).collect();
+        assert_eq!(
+            ids,
+            vec![[0xAA; 16], [0xBB; 16], [0xCC; 16]],
+            "dedupe must keep local order and append only new remote ids"
+        );
 
-        let mut seen: HashSet<[u8; 16]> = HashSet::new();
-        let mut out: Vec<DeliverP> = Vec::new();
-        for d in local {
-            if seen.insert(d.id.0) {
-                out.push(d);
-            }
-        }
-        for d in remote {
-            if seen.insert(d.id.0) {
-                out.push(dispatch_to_deliver(d));
-            }
-        }
-
-        assert_eq!(out.len(), 2, "duplicate id collapsed");
-        assert_eq!(out[0].id.0, id_x); // local-first
-        assert_eq!(out[1].id.0, id_y); // remote-only
+        // First occurrence wins: the surviving B is the LOCAL copy
+        // (from=1), not the remote one (from=2).
+        let b = out.iter().find(|d| d.id.0 == [0xBB; 16]).expect("B present");
+        assert_eq!(
+            b.from.0, [1u8; 32],
+            "overlapping id must keep the local copy, not be overwritten by remote"
+        );
     }
 }

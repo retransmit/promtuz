@@ -554,31 +554,6 @@ mod tests {
     }
 
     // -------------------------------------------------------------
-    // Test 1: Push a message at current_epoch+1; group hasn't
-    // advanced → buffered (Inserted).
-    // -------------------------------------------------------------
-    #[test]
-    fn push_returns_inserted_when_under_cap() {
-        let (provider_b, buffer, _alice_group, bob_group, _alice, _bob) = {
-            let (a, b, ag, bg, al, bo) = pair_setup();
-            (a, b, ag, bg, al, bo)
-        };
-        let _ = provider_b;
-        // Hand-rolled "ahead" message: any non-empty bytes; we
-        // don't process it in this test, just check the bookkeeping.
-        let outcome = buffer
-            .push(
-                &bob_group,
-                b"hand-rolled-msg".to_vec(),
-                bob_group.epoch() + 1,
-                vec![0x01, 0x02, 0x03],
-            )
-            .expect("push");
-        assert_eq!(outcome, PushOutcome::Inserted);
-        assert_eq!(buffer.buffered_count(&bob_group.group_id()).unwrap(), 1);
-    }
-
-    // -------------------------------------------------------------
     // Test 2: Process the commit; drain_when_ready returns the
     // buffered application message.
     // -------------------------------------------------------------

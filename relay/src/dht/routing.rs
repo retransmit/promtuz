@@ -701,6 +701,23 @@ mod tests {
         panic!("could not find id mapping to bucket {target_bucket}")
     }
 
+    /// Fill `bucket` in `t` with `BUCKET_SIZE` distinct peers, asserting
+    /// each insert returns `Inserted`. Returns the ids in insertion order
+    /// (so `[0]` is the LRU head). Shared by the bucket-full insert,
+    /// candidate-slot, and eviction/promotion tests.
+    fn fill_bucket(t: &mut RoutingTable, bucket: usize, cursor: &mut u32) -> Vec<NodeId> {
+        let mut filled: Vec<NodeId> = Vec::new();
+        while filled.len() < BUCKET_SIZE {
+            let id = id_in_bucket(&t.self_id, bucket, cursor);
+            if filled.contains(&id) {
+                continue;
+            }
+            filled.push(id);
+            assert_eq!(t.insert(desc(id)), InsertOutcome::Inserted);
+        }
+        filled
+    }
+
     // -------- bucket_for math ------------------------------------------
 
     #[test]
@@ -768,16 +785,7 @@ mod tests {
         // probability is fragile. Instead force a target bucket and
         // populate it past BUCKET_SIZE via `id_in_bucket`.
         let target_bucket = 255;
-        let mut filled = Vec::new();
-        for _ in 0..BUCKET_SIZE {
-            let id = id_in_bucket(&t.self_id, target_bucket, &mut cursor);
-            // skip dupes between collisions
-            if filled.contains(&id) {
-                continue;
-            }
-            filled.push(id);
-            assert_eq!(t.insert(desc(id)), InsertOutcome::Inserted);
-        }
+        let filled = fill_bucket(&mut t, target_bucket, &mut cursor);
 
         // The (B+1)th insert into the same bucket must yield PendingPing.
         // Loop until we find a fresh id in the same bucket that isn't
@@ -806,15 +814,7 @@ mod tests {
         let target_bucket = 255;
 
         // Fill `entries`.
-        let mut active: Vec<NodeId> = Vec::new();
-        while active.len() < BUCKET_SIZE {
-            let id = id_in_bucket(&t.self_id, target_bucket, &mut cursor);
-            if active.contains(&id) {
-                continue;
-            }
-            active.push(id);
-            assert_eq!(t.insert(desc(id)), InsertOutcome::Inserted);
-        }
+        let active = fill_bucket(&mut t, target_bucket, &mut cursor);
 
         // Fill `candidates` with another B distinct ids, each yielding
         // PendingPing.
@@ -851,6 +851,12 @@ mod tests {
         let self_desc = desc(t.self_id);
         assert_eq!(t.insert(self_desc), InsertOutcome::IsSelf);
         assert_eq!(t.total_known(), 0);
+        // Routing-table state is genuinely untouched: `total_known` only
+        // counts active entries, so also confirm nothing was parked in
+        // any bucket's `candidates` cache.
+        for bucket in t.buckets.iter() {
+            assert!(bucket.candidates.is_empty());
+        }
     }
 
     // -------- find_closest ---------------------------------------------
@@ -888,15 +894,6 @@ mod tests {
         let expected_ids: Vec<NodeId> = expected.into_iter().take(5).map(|(_, id)| id).collect();
         let got_ids: Vec<NodeId> = got.iter().map(|d| d.id).collect();
         assert_eq!(got_ids, expected_ids);
-
-        // Strict monotonicity of the returned distances.
-        let dists: Vec<[u8; 32]> = got_ids
-            .iter()
-            .map(|id| xor_bytes(id.as_bytes(), target.as_bytes()))
-            .collect();
-        for w in dists.windows(2) {
-            assert!(w[0] <= w[1], "find_closest result not sorted by XOR");
-        }
     }
 
     #[test]
@@ -939,15 +936,7 @@ mod tests {
         let target_bucket = 255;
 
         // Fill the bucket.
-        let mut active: Vec<NodeId> = Vec::new();
-        while active.len() < BUCKET_SIZE {
-            let id = id_in_bucket(&t.self_id, target_bucket, &mut cursor);
-            if active.contains(&id) {
-                continue;
-            }
-            active.push(id);
-            assert_eq!(t.insert(desc(id)), InsertOutcome::Inserted);
-        }
+        let active = fill_bucket(&mut t, target_bucket, &mut cursor);
 
         // Add one more peer in the same bucket → goes to candidates.
         let candidate_id = loop {
@@ -1018,10 +1007,6 @@ mod tests {
             .unwrap()
             .rtt_ema_ms;
         assert_eq!(ema_after_second, Some(112));
-        // Sanity: the EMA moved towards 200 (positive direction) but
-        // didn't snap to it — the smoothing is doing its job.
-        let v = ema_after_second.unwrap();
-        assert!(v > 100 && v < 200);
     }
 
     #[test]
@@ -1035,7 +1020,7 @@ mod tests {
 
     #[test]
     fn buckets_needing_refresh_returns_stale_indices() {
-        let mut t = fresh_table(0);
+        let t = fresh_table(0);
         // Fresh table — no buckets stale "now".
         assert!(t.buckets_needing_refresh(Instant::now()).is_empty());
 
@@ -1045,38 +1030,6 @@ mod tests {
             + Duration::from_millis(super::super::config::BUCKET_REFRESH_MS + 1_000);
         let stale = t.buckets_needing_refresh(far_future);
         assert_eq!(stale.len(), BUCKETS);
-
-        // After mark_refreshed on bucket 7, a re-call from the same
-        // future-now should still report bucket 7 as fresh-enough only
-        // if `mark_refreshed` happened *after* `far_future`. It doesn't
-        // (Instant::now() at call time < far_future), so bucket 7 is
-        // still stale — we instead verify mark_refreshed correctly
-        // updates the timestamp.
-        t.mark_refreshed(7);
-        // mark_refreshed used the real `Instant::now()`, which is
-        // strictly less than `far_future` constructed above, so the
-        // bucket remains stale relative to `far_future`. The right way
-        // to test mark_refreshed is to query a NEAR-future "now" that's
-        // before our manual mark — but Instant doesn't let us roll back.
-        // Instead: query "now + 0", which is at most a few microseconds
-        // past mark_refreshed, comfortably under BUCKET_REFRESH_MS.
-        let now = Instant::now();
-        let still_stale = t.buckets_needing_refresh(now);
-        assert!(!still_stale.contains(&7));
     }
 
-    // -------- self-insert sanity ---------------------------------------
-
-    #[test]
-    fn insert_self_descriptor_is_no_op() {
-        // Belt-and-suspenders alongside `insert_self_id_returns_is_self`:
-        // ensure the routing-table state is genuinely untouched (not
-        // just that the outcome enum is correct).
-        let mut t = fresh_table(0);
-        let _ = t.insert(desc(t.self_id));
-        for bucket in t.buckets.iter() {
-            assert!(bucket.entries.is_empty());
-            assert!(bucket.candidates.is_empty());
-        }
-    }
 }

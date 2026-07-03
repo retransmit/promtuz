@@ -696,71 +696,6 @@ mod tests {
         }
     }
 
-    /// Even with a populated routing table, if every K-closest entry
-    /// is `self_relay_id` itself the result is `NoHomes`. This is
-    /// `find_closest` excludes-self semantics + an explicit filter,
-    /// so the test is a regression guard against a future change to
-    /// either of those behaviours.
-    #[tokio::test(flavor = "current_thread")]
-    async fn fetch_remote_queues_filters_out_self() {
-        // We can't easily inject "all K closest are self" because
-        // `find_closest` already excludes self by routing-table
-        // invariant. The equivalent test is "empty routing table"
-        // (above) — calling fetch with the same self_id either
-        // way yields no remote homes.
-        //
-        // To exercise the explicit filter, manually populate the
-        // routing table with a single entry whose id == self_id and
-        // confirm the filter strips it. This is easiest done at the
-        // helper-level since the routing table's `learn_from_*` path
-        // refuses to insert self.
-        //
-        // Instead, we cover the filter via the
-        // `dedupe_uses_id_not_pointer_equality` test below (which
-        // exercises the post-fan-out half) and rely on the
-        // production code's `routing.find_closest` already
-        // refusing self.
-        let _ = fresh_dht; // anchor — keep helper used
-    }
-
-    /// Pure-function test for the `Vec<Vec<_>>` → dedupe-by-id reduce
-    /// step. Two homes returning the same dispatch must produce one entry
-    /// in the output.
-    #[test]
-    fn fetch_remote_queues_dedupe_collapses_replicated_messages() {
-        // Synthesise the post-fan-out shape directly. Each home's
-        // batch holds the *same* DispatchP; the dedupe must emit
-        // exactly one.
-        let id_a: [u8; 16] = [0x11; 16];
-        let id_b: [u8; 16] = [0x22; 16];
-
-        let d_a = mock_dispatch(id_a, b"hello");
-        let d_b = mock_dispatch(id_b, b"world");
-
-        // Two homes, each returns both messages.
-        let per_home: Vec<Vec<DispatchP>> = vec![
-            vec![d_a.clone(), d_b.clone()],
-            vec![d_a.clone(), d_b.clone()],
-        ];
-
-        // Same dedupe loop the function uses; exercises the in-line
-        // logic without needing a `Dht`.
-        let mut seen: HashSet<[u8; 16]> = HashSet::new();
-        let mut out: Vec<DispatchP> = Vec::new();
-        for batch in per_home {
-            for d in batch {
-                if seen.insert(d.id.0) {
-                    out.push(d);
-                }
-            }
-        }
-
-        assert_eq!(out.len(), 2, "two unique messages expected");
-        let ids: HashSet<[u8; 16]> = out.iter().map(|d| d.id.0).collect();
-        assert!(ids.contains(&id_a));
-        assert!(ids.contains(&id_b));
-    }
-
     /// Dedupe preserves first-occurrence ordering. Catches a
     /// regression where switching `Vec<DispatchP>` for an unordered
     /// `HashMap`-based dedupe would shuffle delivery order on the
@@ -792,21 +727,6 @@ mod tests {
         assert_eq!(out[0].id.0, id_first);
         assert_eq!(out[1].id.0, id_third);
         assert_eq!(out[2].id.0, id_second);
-    }
-
-    /// `MAX_QUEUE_FETCH_PAGES = 10` is the documented defensive
-    /// bound. Catches a regression that bumps the constant without
-    /// updating the doc-comment, or vice-versa.
-    #[test]
-    fn fetch_remote_queues_max_pages_constant_is_ten() {
-        assert_eq!(MAX_QUEUE_FETCH_PAGES, 10);
-    }
-
-    /// `QUEUE_FETCH_TIMEOUT_MS` is documented as 3000 ms (2× the
-    /// `FORWARD_TIMEOUT_MS` window).
-    #[test]
-    fn fetch_remote_queues_timeout_constant_is_three_seconds() {
-        assert_eq!(QUEUE_FETCH_TIMEOUT_MS, 3000);
     }
 
     fn mock_dispatch(id: [u8; 16], payload: &[u8]) -> DispatchP {

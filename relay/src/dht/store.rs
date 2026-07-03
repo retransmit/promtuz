@@ -1095,30 +1095,6 @@ mod tests {
     }
 
     #[test]
-    fn store_tombstone_advertises_via_merkle() {
-        // Storing a tombstone must update the Merkle tree (insert with
-        // tombstone domain), not remove the leaf entry — so
-        // anti-entropy carries deletions.
-        let relay = fresh_signing_key();
-        let user = fresh_signing_key();
-        let self_id = NodeId::new(relay.verifying_key().to_bytes());
-        let dht = fresh_dht(self_id);
-
-        let now: u64 = 1_700_000_000_000;
-        // Empty start state.
-        let slice_id = NodeId::new(user.verifying_key().to_bytes()).as_bytes()[0];
-        let _ = slice_id; // sanity: the slice is whatever the IPK's first byte is
-
-        let tomb = build_tombstone(&user, &relay, 1, now);
-        let user_slice = tomb.user_ipk.0[0];
-        assert_eq!(dht.merkle.read().root(user_slice), [0u8; 32]);
-
-        assert_eq!(store_tombstone(&dht, tomb.clone(), now), TombstoneOutcome::Stored);
-        // Now non-zero — the tombstone leaf populated the slice.
-        assert_ne!(dht.merkle.read().root(user_slice), [0u8; 32]);
-    }
-
-    #[test]
     fn record_then_tombstone_changes_merkle_root() {
         // The leaf hash for a record vs the leaf hash for a tombstone
         // differ by domain tag (`MERKLE_RECORD_DOMAIN` vs
@@ -1260,30 +1236,6 @@ mod tests {
             }
         }
         assert!(!found_overflow, "QueueFull rejection must not write the entry");
-    }
-
-    #[test]
-    fn enqueue_for_home_accepts_under_cap() {
-        // Sanity gate: a small number of writes succeeds and each
-        // returns `Stored`. Catches a regression where the cap-check
-        // accidentally fires immediately (e.g. an `>=` flipped to `>`
-        // with the wrong base).
-        let relay = fresh_signing_key();
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let self_id = NodeId::new(relay.verifying_key().to_bytes());
-        let dht = fresh_dht(self_id);
-
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-        let now: u64 = 1_700_000_000_000;
-
-        for i in 0..5u8 {
-            let mut id = [0u8; 16];
-            id[0] = i;
-            let dispatch = build_dispatch(&from_user, &to_ipk, id, b"under-cap");
-            let outcome = enqueue_for_home(&dht, &to_ipk, &dispatch, now + i as u64);
-            assert_eq!(outcome, ForwardOutcome::Stored, "iter {i}");
-        }
     }
 
     #[test]

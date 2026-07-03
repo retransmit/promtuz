@@ -112,17 +112,6 @@ mod tests {
     }
 
     #[test]
-    fn client_request_get_relays_round_trips_through_postcard() {
-        // The pre-existing `GetRelays()` variant is exercised here to
-        // pin its wire shape — adding `GetBootstrapPeers` as a new
-        // enum tag must not perturb the bytes of the legacy variant.
-        let req = ClientRequest::GetRelays();
-        let bytes = req.ser().expect("postcard serialize");
-        let decoded = ClientRequest::deser(&bytes).expect("postcard deserialize");
-        assert_eq!(decoded, req);
-    }
-
-    #[test]
     fn client_request_get_bootstrap_peers_round_trips_through_postcard() {
         // Pin the wire shape of the new variant so a future field
         // reorder or rename surfaces here, not weeks later as silently

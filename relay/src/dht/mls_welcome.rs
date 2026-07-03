@@ -1066,19 +1066,17 @@ mod tests {
         let now = fresh_now();
         let auth_peer = NodeId::new([0xBB; 32]);
 
-        // Use the same fetch over and over; it'll always fail
-        // ownership-late but the rate limit is checked *before*
-        // ownership in our handler. Wait — we need to confirm: in our
-        // ladder, rate-limit is step 3, ownership is step 4. But step
-        // 1 (requester binding) and step 2 (skew) happen before
-        // rate-limit. Both are ok here.
+        // Rate-limit precedes ownership in the ladder, so these
+        // ownership-failing fetches still consume a token each.
         let fetch = build_fetch(&user, auth_peer, now);
 
-        // Drain the burst (240). The function still consumes a token
-        // even if the eventual outcome is BadSig/NotOwner.
         let mut rate_limited_count = 0;
         for _ in 0..(MAX_WELCOME_RPC_PER_HOUR as usize + 5) {
-            if handle_welcome_fetch(&dht, fetch.clone(), auth_peer, now) == WelcomeFetchOutcome::RateLimited { rate_limited_count += 1 }
+            if handle_welcome_fetch(&dht, fetch.clone(), auth_peer, now)
+                == WelcomeFetchOutcome::RateLimited
+            {
+                rate_limited_count += 1;
+            }
         }
         assert!(
             rate_limited_count > 0,
@@ -1114,7 +1112,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn close_reason_mapping_for_publish_outcomes() {
+    fn close_reason_mapping_for_publish_and_fetch_outcomes() {
         use common::quic::CloseReason;
         assert!(matches!(
             close_reason_for_publish(WelcomePublishOutcome::BadSig),
@@ -1133,11 +1131,6 @@ mod tests {
         assert!(
             close_reason_for_publish(WelcomePublishOutcome::StaleTimestamp).is_none()
         );
-    }
-
-    #[test]
-    fn close_reason_mapping_for_fetch_outcomes() {
-        use common::quic::CloseReason;
         assert!(matches!(
             close_reason_for_fetch(&WelcomeFetchOutcome::BadSig),
             Some(CloseReason::WelcomeMalformed)

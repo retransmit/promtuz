@@ -1045,23 +1045,31 @@ mod tests {
 
     #[test]
     fn decide_lookup_outcome_lone_found_with_two_not_present_returns_not_present() {
-        // Eclipse case: 2 NotPresent + 1 Found from the K-closest.
-        // Strict quorum (= 2) requires 2 *Found* to agree;
-        // 1 alone is insufficient → NotPresent.
+        // Eclipse case: a single sub-quorum `Found` group never passes,
+        // regardless of how many `NotPresent` replies accompany it.
+        // Strict quorum (= 2) requires 2 *Found* to agree; 1 alone is
+        // insufficient → NotPresent. Covers the 2×NotPresent case and
+        // the [Found, NotPresent] tie boundary.
         let user = fresh_signing_key();
         let relay = fresh_signing_key();
         let rec = record_for(5, &relay, &user);
 
+        // 2 NotPresent + 1 Found.
         let replies = vec![
             ValueReply::NotPresent,
             ValueReply::NotPresent,
-            ValueReply::Found(rec),
+            ValueReply::Found(rec.clone()),
         ];
         match decide_lookup_outcome(replies) {
             FindValueOutcome::NotPresent => {}
-            FindValueOutcome::Found(_) => {
-                panic!("lone Found must not pass quorum")
-            }
+            FindValueOutcome::Found(_) => panic!("lone Found must not pass quorum"),
+        }
+
+        // 1 Found + 1 NotPresent — the tie boundary; still no quorum.
+        let replies = vec![ValueReply::Found(rec), ValueReply::NotPresent];
+        match decide_lookup_outcome(replies) {
+            FindValueOutcome::NotPresent => {}
+            FindValueOutcome::Found(_) => panic!("no group reached quorum"),
         }
     }
 
@@ -1106,21 +1114,6 @@ mod tests {
         match decide_lookup_outcome(replies) {
             FindValueOutcome::Found(r) => assert_eq!(r.generation, 7),
             FindValueOutcome::NotPresent => panic!("two groups at quorum should yield Found"),
-        }
-    }
-
-    #[test]
-    fn decide_lookup_outcome_one_each_no_quorum_returns_not_present() {
-        // 1 Found + 1 NotPresent: neither path reaches quorum.
-        // Returns NotPresent (the doubt-defaults-to-offline rule).
-        let user = fresh_signing_key();
-        let relay = fresh_signing_key();
-        let rec = record_for(1, &relay, &user);
-
-        let replies = vec![ValueReply::Found(rec), ValueReply::NotPresent];
-        match decide_lookup_outcome(replies) {
-            FindValueOutcome::NotPresent => {}
-            FindValueOutcome::Found(_) => panic!("no group reached quorum"),
         }
     }
 

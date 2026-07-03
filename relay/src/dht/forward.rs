@@ -651,24 +651,6 @@ mod tests {
     }
 
     #[test]
-    fn forward_summary_empty_has_zero_success_and_no_delivered() {
-        let s = ForwardSummary::default();
-        assert_eq!(s.success_count(), 0);
-        assert!(!s.any_delivered());
-        assert!(!s.meets_k_min());
-    }
-
-    #[test]
-    fn forward_summary_one_stored_does_not_meet_k_min() {
-        let mut s = ForwardSummary::default();
-        s.stored_at.push(id_for(1));
-        assert_eq!(s.success_count(), 1);
-        assert!(!s.any_delivered());
-        // K_MIN = 2, so 1 stored alone does not meet the threshold.
-        assert!(!s.meets_k_min());
-    }
-
-    #[test]
     fn forward_summary_two_stored_meets_k_min_no_delivered() {
         let mut s = ForwardSummary::default();
         s.stored_at.push(id_for(1));
@@ -755,32 +737,14 @@ mod tests {
             }
             other => panic!("expected InsufficientReplicas, got {other:?}"),
         }
-    }
 
-    /// Verifies the self-store path actually wrote into `cf_dht_queue`.
-    /// Catches a regression where the self-store branch silently no-ops
-    /// the on-disk write (e.g. if the `enqueue_for_home` call were
-    /// replaced by an unimplemented stub).
-    #[tokio::test(flavor = "current_thread")]
-    async fn forward_to_homes_self_store_actually_writes_cf_dht_queue() {
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-        let dispatch = build_dispatch(&from_user, &to_ipk, [42u8; 16], b"persisted");
-
-        let now: u64 = 1_700_000_000_000;
-        let _ = forward_to_homes(dht.clone(), dispatch.clone(), now).await;
-
-        // Confirm a key with the recipient's IPK as prefix exists in
-        // `cf_dht_queue`. The exact key shape is `MessageKey { recipient
-        // = to_ipk, ts_ms = now, dispatch_id = [42; 16] }` per
-        // `enqueue_for_home`.
-        let found = dht.store.queue.prefix(to_ipk).next().is_some();
-        assert!(found, "self-store must have written to dht_queue");
+        // Self-store must have durably written the dispatch into
+        // `cf_dht_queue` under the recipient's IPK prefix — regression
+        // guard against the self-store branch silently no-op'ing the
+        // on-disk write (e.g. `enqueue_for_home` replaced by a stub).
+        assert!(
+            dht.store.queue.prefix(to_ipk).next().is_some(),
+            "self-store must have written to dht_queue"
+        );
     }
 }

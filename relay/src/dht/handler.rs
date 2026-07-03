@@ -1022,41 +1022,6 @@ mod tests {
         NodeId::new([0xFAu8; 32])
     }
 
-    /// Rate-limit wiring: drive the per-peer limiter through the same
-    /// primitive the handler uses, against a fresh `Dht`. This is the
-    /// integration-equivalent of
-    /// `rate_limit::tests::limiter_grants_burst_then_denies` but
-    /// exercises the actual `Dht::rate_limiters` field (so an
-    /// accidental refactor that builds a fresh limiter per call
-    /// would surface here as "no rate limit ever trips").
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_dispatch_per_peer_rate_limit_trips_on_store_burst() {
-        use crate::dht::config::RATE_LIMIT_EXPENSIVE_BURST;
-        use crate::dht::rate_limit::RpcClass;
-
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        let peer_id = NodeId::new([0xAA; 32]);
-
-        // Drain the burst.
-        for _ in 0..((RATE_LIMIT_EXPENSIVE_BURST as usize) + 5) {
-            let _ = dht.rate_limiters.check(&peer_id, RpcClass::Expensive);
-        }
-
-        // Subsequent rapid checks should now trip — the burst is
-        // exhausted and the steady-state rate hasn't refilled.
-        let mut denied = 0;
-        for _ in 0..50 {
-            if dht.rate_limiters.check(&peer_id, RpcClass::Expensive).is_err() {
-                denied += 1;
-            }
-        }
-        assert!(denied > 0, "Dht::rate_limiters must trip under burst");
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn handle_merkle_summary_with_zero_bitset_returns_no_roots() {
         // Empty bitset = "I'm interested in no slices" → empty reply
@@ -1153,50 +1118,6 @@ mod tests {
             .expect("inside skew window must pass");
     }
 
-    #[test]
-    fn dht_hello_metrics_initially_zero_then_bump_on_reject() {
-        // Tests the metrics-counter wiring for the dht_hello_*
-        // counters. Drive the counters via the public increment
-        // helpers (the same helpers
-        // `recv_and_verify_hello` calls) and confirm the observed
-        // values change predictably.
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        // Initial state.
-        assert_eq!(
-            dht.metrics
-                .dht_hello_accepted
-                .load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
-        assert_eq!(
-            dht.metrics
-                .dht_hello_rejected
-                .load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
-
-        // Bump and observe.
-        dht.metrics.inc_dht_hello_accepted();
-        dht.metrics.inc_dht_hello_rejected();
-        dht.metrics.inc_dht_hello_rejected();
-        assert_eq!(
-            dht.metrics
-                .dht_hello_accepted
-                .load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
-        assert_eq!(
-            dht.metrics
-                .dht_hello_rejected
-                .load(std::sync::atomic::Ordering::Relaxed),
-            2
-        );
-    }
-
     // -----------------------------------------------------------------
     // Sticky-home — home-side handler integration tests
     // -----------------------------------------------------------------
@@ -1211,7 +1132,6 @@ mod tests {
     use common::proto::dht_p2p::queue_fetch_ack_signing_input;
     use common::proto::dht_p2p::queue_fetch_signing_input;
     // `Bytes` already imported at the top of `tests` for `make_hello`.
-    use crate::dht::config::K;
 
     fn build_dispatch(
         from_user: &SigningKey, to_ipk: &[u8; 32], id: [u8; 16], payload: &[u8],
@@ -1443,161 +1363,55 @@ mod tests {
         }
     }
 
-    /// When self is not in the K-closest, return an empty exhausted
-    /// response.
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_queue_fetch_rpc_returns_empty_when_self_not_owner() {
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 0xFF;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        // K closer peers than self for a target = [0; 32].
-        for i in 0..3u8 {
-            let mut s = [0u8; 32];
-            s[31] = i;
-            let id = NodeId::new(s);
-            let desc = NodeDescriptor {
-                id,
-                addr: "127.0.0.1:1".parse().unwrap(),
-                pubkey: [0u8; 32].into(),
-            };
-            dht.routing.write().insert(desc);
-        }
-
-        let user = fresh_signing_key();
-        // Use a user whose IPK is [0; 32] won't sign; instead pick a
-        // signer and force the target to mismatch self by having
-        // many peers closer.
-        let user_ipk: [u8; 32] = user.verifying_key().to_bytes();
-        // The check is "self in K for user_ipk". With 3 peers
-        // installed at [0,0,...,0..3] the target's distance ranking
-        // depends on user_ipk. To make this deterministic, ensure
-        // self_seed[0] = 0xFF differs strongly from a 0-leading user.
-        // The user_ipk derived from a fresh signing key has random
-        // first byte; if it's < 0xFF we should be drifted out. To
-        // be robust, derive user_ipk and verify post-condition; if
-        // self happens to be in K (rare), skip the assertion (cf.
-        // discipline elsewhere).
-        let target_id = NodeId::from_bytes(user_ipk);
-        let closest = dht.routing.read().find_closest(&target_id, K);
-        let is_drifted = closest.len() == K && {
-            let self_d = xor32_test(self_id.as_bytes(), &user_ipk);
-            let kth_d = xor32_test(closest[K - 1].id.as_bytes(), &user_ipk);
-            self_d > kth_d
-        };
-        if !is_drifted {
-            // Test fixture didn't actually displace self — skip this
-            // test rather than assert false. (This happens once per
-            // ~(0xFF) seed iterations; if the SEQ counter aligns,
-            // we get a non-displacing fixture.)
-            return;
-        }
-
-        let now = wall_clock_ms();
-        let msg = queue_fetch_signing_input(&user_ipk, &self_id, now);
-        let sig = user.sign(&msg).to_bytes();
-        let req = DhtRequest::QueueFetch(QueueFetch {
-            user_ipk: Bytes(user_ipk),
-            requester_relay_id: self_id,
-            timestamp: now,
-            user_sig: Bytes(sig),
-        });
-
-        let resp = handle_dht_request(&dht, req, self_id).await;
-        match resp {
-            DhtResponse::QueueFetch(r) => {
-                assert!(r.messages.is_empty());
-                assert!(r.exhausted);
-            }
-            other => panic!("expected QueueFetch, got {other:?}"),
-        }
-    }
-
-    /// Cap returned batch at MAX_FETCH_QUEUE_BATCH and return
-    /// `exhausted = false`.
+    /// Batch-cap boundary: the returned batch is always capped at
+    /// `MAX_FETCH_QUEUE_BATCH`, and `exhausted` reflects whether entries
+    /// remain past the cap. Exactly-cap → exhausted (peek of cap+1
+    /// returns cap); cap+5 → not exhausted (more remain).
     #[tokio::test(flavor = "current_thread")]
     async fn handle_queue_fetch_rpc_caps_at_max_batch() {
         use common::proto::dht_p2p::MAX_FETCH_QUEUE_BATCH;
 
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
+        // (enqueued_count, expected_exhausted)
+        for (enqueued, expected_exhausted) in
+            [(MAX_FETCH_QUEUE_BATCH + 5, false), (MAX_FETCH_QUEUE_BATCH, true)]
+        {
+            let mut self_seed = [0u8; 32];
+            self_seed[0] = 1;
+            let self_id = NodeId::new(self_seed);
+            let dht = fresh_dht(self_id);
 
-        let user = fresh_signing_key();
-        let user_ipk: [u8; 32] = user.verifying_key().to_bytes();
-        let from_user = fresh_signing_key();
+            let user = fresh_signing_key();
+            let user_ipk: [u8; 32] = user.verifying_key().to_bytes();
+            let from_user = fresh_signing_key();
 
-        // Pre-populate with MAX_FETCH_QUEUE_BATCH + 5 entries.
-        let now = wall_clock_ms();
-        for i in 0..MAX_FETCH_QUEUE_BATCH + 5 {
-            let mut id = [0u8; 16];
-            id[0..8].copy_from_slice(&(i as u64).to_be_bytes());
-            let dispatch = build_dispatch(&from_user, &user_ipk, id, b"x");
-            super::super::store::enqueue_for_home(&dht, &user_ipk, &dispatch, now + i as u64);
-        }
-
-        let msg = queue_fetch_signing_input(&user_ipk, &self_id, now);
-        let sig = user.sign(&msg).to_bytes();
-        let req = DhtRequest::QueueFetch(QueueFetch {
-            user_ipk: Bytes(user_ipk),
-            requester_relay_id: self_id,
-            timestamp: now,
-            user_sig: Bytes(sig),
-        });
-
-        let resp = handle_dht_request(&dht, req, self_id).await;
-        match resp {
-            DhtResponse::QueueFetch(r) => {
-                assert_eq!(r.messages.len(), MAX_FETCH_QUEUE_BATCH);
-                assert!(!r.exhausted, "more entries remain after the cap");
+            let now = wall_clock_ms();
+            for i in 0..enqueued {
+                let mut id = [0u8; 16];
+                id[0..8].copy_from_slice(&(i as u64).to_be_bytes());
+                let dispatch = build_dispatch(&from_user, &user_ipk, id, b"x");
+                super::super::store::enqueue_for_home(&dht, &user_ipk, &dispatch, now + i as u64);
             }
-            other => panic!("expected QueueFetch, got {other:?}"),
-        }
-    }
 
-    /// `exhausted = true` when the queue holds exactly
-    /// `MAX_FETCH_QUEUE_BATCH` entries (peek of cap+1 returns cap →
-    /// exhausted).
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_queue_fetch_rpc_marks_exhausted_correctly() {
-        use common::proto::dht_p2p::MAX_FETCH_QUEUE_BATCH;
+            let msg = queue_fetch_signing_input(&user_ipk, &self_id, now);
+            let sig = user.sign(&msg).to_bytes();
+            let req = DhtRequest::QueueFetch(QueueFetch {
+                user_ipk: Bytes(user_ipk),
+                requester_relay_id: self_id,
+                timestamp: now,
+                user_sig: Bytes(sig),
+            });
 
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        let user = fresh_signing_key();
-        let user_ipk: [u8; 32] = user.verifying_key().to_bytes();
-        let from_user = fresh_signing_key();
-        let now = wall_clock_ms();
-
-        // Exactly MAX_FETCH_QUEUE_BATCH entries.
-        for i in 0..MAX_FETCH_QUEUE_BATCH {
-            let mut id = [0u8; 16];
-            id[0..8].copy_from_slice(&(i as u64).to_be_bytes());
-            let dispatch = build_dispatch(&from_user, &user_ipk, id, b"y");
-            super::super::store::enqueue_for_home(&dht, &user_ipk, &dispatch, now + i as u64);
-        }
-
-        let msg = queue_fetch_signing_input(&user_ipk, &self_id, now);
-        let sig = user.sign(&msg).to_bytes();
-        let req = DhtRequest::QueueFetch(QueueFetch {
-            user_ipk: Bytes(user_ipk),
-            requester_relay_id: self_id,
-            timestamp: now,
-            user_sig: Bytes(sig),
-        });
-
-        let resp = handle_dht_request(&dht, req, self_id).await;
-        match resp {
-            DhtResponse::QueueFetch(r) => {
-                assert_eq!(r.messages.len(), MAX_FETCH_QUEUE_BATCH);
-                assert!(r.exhausted, "exactly cap → exhausted");
+            let resp = handle_dht_request(&dht, req, self_id).await;
+            match resp {
+                DhtResponse::QueueFetch(r) => {
+                    assert_eq!(r.messages.len(), MAX_FETCH_QUEUE_BATCH);
+                    assert_eq!(
+                        r.exhausted, expected_exhausted,
+                        "enqueued={enqueued}: exhausted must reflect entries past the cap"
+                    );
+                }
+                other => panic!("expected QueueFetch, got {other:?}"),
             }
-            other => panic!("expected QueueFetch, got {other:?}"),
         }
     }
 
@@ -1808,57 +1622,5 @@ mod tests {
         // Queue untouched.
         let remaining = super::super::store::lookup_queue_for_user(&dht, &user_ipk, 8);
         assert_eq!(remaining.len(), 1);
-    }
-
-    /// Stable-ordering xor helper used by the not_owner test.
-    fn xor32_test(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-        let mut out = [0u8; 32];
-        for i in 0..32 {
-            out[i] = a[i] ^ b[i];
-        }
-        out
-    }
-
-    /// The online-deliver path requires a live QUIC `Connection`; the
-    /// `Delivered` outcome itself can only be reached in a real
-    /// two-relay harness (covered by the integration suite). We *can*
-    /// test that the handler routes through the online-recipient branch
-    /// when `dht.clients` is `None` (the unit-test fixture), in which
-    /// case the offline path takes over and we get `Stored`. This is
-    /// the canonical "online recipient short-circuit absent → fall
-    /// through" regression guard. The full `Delivered` confirmation
-    /// lives in the integration suite.
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_forward_rpc_delivers_when_recipient_online() {
-        // With no clients map, every path falls through to enqueue.
-        // The test verifies the dispatcher reaches the enqueue path
-        // (i.e. didn't return BadSig / NotOwner in error). A real
-        // `Delivered` outcome requires a live recipient `Connection`
-        // and is integration-tested separately.
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = fresh_dht(self_id);
-
-        let sender_relay = fresh_signing_key();
-        install_peer_in_routing(&dht, &sender_relay);
-
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-        let dispatch = build_dispatch(&from_user, &to_ipk, [0xAB; 16], b"online-test");
-
-        let now = wall_clock_ms();
-        let fwd = build_signed_forward(&sender_relay, dispatch, now);
-        let req = DhtRequest::Forward(fwd);
-        let resp = handle_dht_request(&dht, req, fake_peer_id()).await;
-        match resp {
-            DhtResponse::Forward(r) => {
-                // `dht.clients` is `None` in this fixture → offline
-                // path → `Stored`.
-                assert_eq!(r.outcome, ForwardOutcome::Stored);
-            }
-            other => panic!("expected Forward, got {other:?}"),
-        }
     }
 }

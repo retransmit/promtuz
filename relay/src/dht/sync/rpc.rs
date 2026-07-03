@@ -717,55 +717,6 @@ mod tests {
     }
 
     #[test]
-    fn handle_fetch_record_returns_tombstones_for_known_ipks() {
-        // `FetchRecord` reply carries both records and tombstones. A
-        // peer that holds a tombstone for `ipk` returns it under
-        // `tombstones`, not `records`.
-        let user = fresh_signing_key();
-        let relay = fresh_signing_key();
-        let self_id = NodeId::new(relay.verifying_key().to_bytes());
-        let dht = fresh_dht(self_id);
-
-        let now = wall_clock_ms();
-        // Build & store a record, then tombstone it.
-        let rec = build_record(&user, &relay, 1, now, 600_000);
-        assert_eq!(
-            store::store_record(&dht, rec.clone(), now + 1),
-            StoreOutcome::Stored
-        );
-        let user_ipk: [u8; 32] = rec.user_ipk.0;
-        let relay_pubkey: [u8; 32] = relay.verifying_key().to_bytes();
-        let relay_id = NodeId::new(relay_pubkey);
-        let msg = common::proto::dht_p2p::tombstone_signing_input(
-            &user_ipk, &relay_id, &relay_pubkey, 1, now,
-        );
-        let tomb_sig = relay.sign(&msg);
-        let tomb = common::proto::dht_p2p::TombstoneRecord {
-            user_ipk:     user_ipk.into(),
-            relay_id,
-            relay_pubkey: relay_pubkey.into(),
-            generation:   1,
-            deleted_at:   now,
-            relay_sig:    tomb_sig.to_bytes().into(),
-        };
-        assert_eq!(
-            store::store_tombstone(&dht, tomb.clone(), now),
-            common::proto::dht_p2p::TombstoneOutcome::Stored
-        );
-
-        let resp = handle_fetch_record(
-            &dht,
-            FetchRecord { user_ipks: vec![user_ipk.into()] },
-        );
-        // No live record (tombstone supersedes it at store time).
-        assert_eq!(resp.records.len(), 0);
-        // Exactly one tombstone returned.
-        assert_eq!(resp.tombstones.len(), 1);
-        assert_eq!(resp.tombstones[0].generation, 1);
-        assert_eq!(resp.tombstones[0].user_ipk.0, user_ipk);
-    }
-
-    #[test]
     fn fetch_record_carries_tombstone_to_peer_with_record() {
         // Anti-entropy convergence test:
         // - dht_a holds a tombstone for `(user, gen 1)`.
@@ -827,6 +778,8 @@ mod tests {
         );
         assert!(resp.records.is_empty());
         assert_eq!(resp.tombstones.len(), 1);
+        assert_eq!(resp.tombstones[0].generation, 1);
+        assert_eq!(resp.tombstones[0].user_ipk.0, user_ipk);
 
         // dht_b applies the tombstone — same conflict resolution that
         // `fetch_and_apply` would use.

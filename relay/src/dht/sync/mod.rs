@@ -557,6 +557,34 @@ async fn migrate_one(
 mod tests {
     use super::*;
 
+    /// Module-local test fixture: a fresh on-disk `Dht` at a unique temp
+    /// path, `self_id` seeded from `self_seed0`. Kept module-local
+    /// (rather than reusing `store.rs`'s helper) so the path counter
+    /// can't cross-talk with parallel runs in other modules.
+    fn fresh_dht(tag: &str, self_seed0: u8) -> Arc<Dht> {
+        use std::sync::atomic::AtomicU64;
+        use std::sync::atomic::Ordering::SeqCst;
+
+        use ed25519_dalek::SigningKey;
+
+        use crate::dht::DhtConfig;
+        use common::quic::id::NodeId;
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let id = SEQ.fetch_add(1, SeqCst);
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("promtuz-{tag}-{pid}-{id}"));
+        let _ = std::fs::remove_dir_all(&path);
+
+        let store = Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
+        let signing = SigningKey::from_bytes(&[7u8; 32]);
+        let cfg = DhtConfig::default();
+        let mut self_seed = [0u8; 32];
+        self_seed[0] = self_seed0;
+        let self_id = NodeId::new(self_seed);
+        Arc::new(Dht::new(self_id, signing, cfg, store).expect("dht"))
+    }
+
     #[test]
     fn merkle_state_empty_root_is_zero() {
         let s = MerkleState::empty();
@@ -707,33 +735,9 @@ mod tests {
     /// immediately, well ahead of the 30-second sync cadence.
     #[tokio::test(flavor = "current_thread")]
     async fn scheduler_exits_on_cancellation() {
-        use std::sync::Arc;
-        use std::sync::atomic::AtomicU64;
-        use std::sync::atomic::Ordering as AtomicOrdering;
-
-        use ed25519_dalek::SigningKey;
         use tokio_util::sync::CancellationToken;
 
-        use crate::dht::Dht;
-        use crate::dht::DhtConfig;
-        use common::quic::id::NodeId;
-
-        // Minimal fixture inline — we don't share `fresh_dht` across
-        // sync/* tests because the path-suffix counter would collide
-        // with parallel test runs.
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let id = SEQ.fetch_add(1, AtomicOrdering::SeqCst);
-        let pid = std::process::id();
-        let path = std::env::temp_dir().join(format!("promtuz-sched-test-{pid}-{id}"));
-        let _ = std::fs::remove_dir_all(&path);
-
-        let store = Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
-        let signing = SigningKey::from_bytes(&[7u8; 32]);
-        let cfg = DhtConfig::default();
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = Arc::new(Dht::new(self_id, signing, cfg, store).expect("dht"));
+        let dht = fresh_dht("sched-test", 1);
 
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
@@ -742,9 +746,6 @@ mod tests {
         });
 
         // Yield once so the scheduler has a chance to start, then cancel.
-        // With `start_paused = true`, real time doesn't advance, so the
-        // `interval` ticks won't fire — the only awaitable that resolves
-        // is the cancellation.
         tokio::task::yield_now().await;
         cancel.cancel();
 
@@ -793,10 +794,6 @@ mod tests {
     /// candidates were indeed dispatched.
     #[tokio::test(flavor = "current_thread")]
     async fn drift_migration_sweep_dispatches_planned_candidates() {
-        use std::sync::Arc;
-        use std::sync::atomic::AtomicU64;
-        use std::sync::atomic::Ordering as AtomicOrdering;
-
         use common::proto::client_rel::DispatchP;
         use common::proto::client_rel::dispatch_sig_message;
         use common::proto::dht_p2p::NodeDescriptor;
@@ -804,25 +801,8 @@ mod tests {
         use ed25519_dalek::Signer;
         use ed25519_dalek::SigningKey;
 
-        use crate::dht::Dht;
-        use crate::dht::DhtConfig;
-
-        // Inline `fresh_dht` analogue (sync/* tests don't share with
-        // store.rs's helper to avoid path-counter cross-talk).
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let id = SEQ.fetch_add(1, AtomicOrdering::SeqCst);
-        let pid = std::process::id();
-        let path = std::env::temp_dir().join(format!("promtuz-mig-test-{pid}-{id}"));
-        let _ = std::fs::remove_dir_all(&path);
-
-        let store = Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
-        let signing = SigningKey::from_bytes(&[7u8; 32]);
-        let cfg = DhtConfig::default();
         // self far from a 0-prefix target
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 0xFF;
-        let self_id = NodeId::new(self_seed);
-        let dht = Arc::new(Dht::new(self_id, signing, cfg, store).expect("dht"));
+        let dht = fresh_dht("mig-test", 0xFF);
 
         // Install K=3 peers strictly closer to a 0-prefix target.
         for i in 0..3u8 {
@@ -907,30 +887,7 @@ mod tests {
     /// metrics on every tick regardless of work.
     #[tokio::test(flavor = "current_thread")]
     async fn drift_migration_sweep_is_noop_on_empty_plan() {
-        use std::sync::Arc;
-        use std::sync::atomic::AtomicU64;
-        use std::sync::atomic::Ordering as AtomicOrdering;
-
-        use common::quic::id::NodeId;
-        use ed25519_dalek::SigningKey;
-
-        use crate::dht::Dht;
-        use crate::dht::DhtConfig;
-
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let id = SEQ.fetch_add(1, AtomicOrdering::SeqCst);
-        let pid = std::process::id();
-        let path =
-            std::env::temp_dir().join(format!("promtuz-mig-noop-test-{pid}-{id}"));
-        let _ = std::fs::remove_dir_all(&path);
-
-        let store = Arc::new(crate::storage::db::Store::open(&path).expect("open store"));
-        let signing = SigningKey::from_bytes(&[7u8; 32]);
-        let cfg = DhtConfig::default();
-        let mut self_seed = [0u8; 32];
-        self_seed[0] = 1;
-        let self_id = NodeId::new(self_seed);
-        let dht = Arc::new(Dht::new(self_id, signing, cfg, store).expect("dht"));
+        let dht = fresh_dht("mig-noop-test", 1);
 
         super::run_drift_migration_sweep(dht.clone()).await;
         let attempted = dht

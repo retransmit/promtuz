@@ -1893,6 +1893,17 @@ use crate::proto::pack::Packer;
             600_000,
         );
 
+        // Sticky-home variants (folded from the former
+        // dht_packet_round_trip_for_sticky_home_variants) — codec-only,
+        // so dummy signed fixtures suffice.
+        let now: u64 = 1_700_000_000_000;
+        let dispatch = build_dispatch(&fresh_signing_key(), &[0u8; 32], [4u8; 16], b"q");
+        let fwd = build_forward(&fresh_signing_key(), dispatch.clone(), now);
+        let req_id = NodeId::new(fresh_signing_key().verifying_key().to_bytes());
+        let sticky_user = fresh_signing_key();
+        let qf = build_queue_fetch(&sticky_user, req_id, now);
+        let ack = build_queue_fetch_ack(&sticky_user, req_id, vec![[1u8; 16]], now);
+
         let cases = vec![
             DhtRequest::Ping(Ping {
                 nonce:     [0u8; 16].into(),
@@ -1925,6 +1936,9 @@ use crate::proto::pack::Packer;
             DhtRequest::FetchRecord(FetchRecord {
                 user_ipks: vec![dummy_ipk],
             }),
+            DhtRequest::Forward(fwd),
+            DhtRequest::QueueFetch(qf),
+            DhtRequest::QueueFetchAck(ack),
         ];
 
         let responses = vec![
@@ -1950,6 +1964,12 @@ use crate::proto::pack::Packer;
                 records:    vec![dummy_record],
                 tombstones: Vec::new(),
             }),
+            DhtResponse::Forward(ForwardResp { outcome: ForwardOutcome::Stored }),
+            DhtResponse::QueueFetch(QueueFetchResp {
+                messages:  vec![dispatch],
+                exhausted: true,
+            }),
+            DhtResponse::QueueFetchAck(QueueFetchAckResp { ok: true }),
         ];
 
         for req in cases {
@@ -2062,28 +2082,23 @@ use crate::proto::pack::Packer;
     }
 
     #[test]
-    fn dht_hello_verify_rejects_stale_timestamp() {
-        // Timestamp ~2 minutes in the past — far beyond the 60s skew.
+    fn dht_hello_verify_rejects_stale_or_future_timestamp() {
+        // Both directions ~2 minutes off — far beyond the 60s skew.
         let key = fresh_signing_key();
         let now: u64 = 1_700_000_000_000;
-        let stale_ts = now - 120_000;
-        let hello = build_dht_hello(&key, stale_ts);
-        match hello.verify(now) {
-            Err(DhtHelloVerifyError::ClockSkew) => {}
-            other => panic!("expected ClockSkew, got {other:?}"),
-        }
-    }
 
-    #[test]
-    fn dht_hello_verify_rejects_future_timestamp() {
-        // Timestamp ~2 minutes in the future — far beyond the 60s skew.
-        let key = fresh_signing_key();
-        let now: u64 = 1_700_000_000_000;
-        let future_ts = now + 120_000;
-        let hello = build_dht_hello(&key, future_ts);
-        match hello.verify(now) {
+        // Stale: timestamp ~2 minutes in the past.
+        let stale = build_dht_hello(&key, now - 120_000);
+        match stale.verify(now) {
             Err(DhtHelloVerifyError::ClockSkew) => {}
-            other => panic!("expected ClockSkew, got {other:?}"),
+            other => panic!("expected ClockSkew (stale), got {other:?}"),
+        }
+
+        // Future: timestamp ~2 minutes in the future.
+        let future = build_dht_hello(&key, now + 120_000);
+        match future.verify(now) {
+            Err(DhtHelloVerifyError::ClockSkew) => {}
+            other => panic!("expected ClockSkew (future), got {other:?}"),
         }
     }
 
@@ -2098,38 +2113,6 @@ use crate::proto::pack::Packer;
             Err(DhtHelloVerifyError::BadSignature) => {}
             other => panic!("expected BadSignature, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn dht_hello_two_relays_authenticate_each_other_synchronously() {
-        // Integration-style smoke test: two `Dht`-equivalent identity
-        // keys; one constructs a hello, the other verifies it. The
-        // resulting authenticated NodeId matches the claimed (and
-        // signed) identity. The actual QUIC round-trip is exercised
-        // elsewhere.
-        let dialer_key = fresh_signing_key();
-        let receiver_key = fresh_signing_key();
-        // dialer != receiver — receiver verifies dialer's hello.
-        assert_ne!(
-            dialer_key.verifying_key().to_bytes(),
-            receiver_key.verifying_key().to_bytes()
-        );
-
-        let now: u64 = 1_700_000_000_000;
-        let hello = build_dht_hello(&dialer_key, now);
-
-        // Wire round-trip (would be a quinn uni-stream in production).
-        let bytes = hello.ser().expect("serialize");
-        let received = DhtHello::deser(&bytes).expect("deserialize");
-
-        // Receiver verifies and stashes `received.node_id` as the
-        // connection's authenticated identity.
-        received.verify(now + 5).expect("hello must verify");
-        let authenticated_id = received.node_id;
-        assert_eq!(
-            authenticated_id,
-            NodeId::new(dialer_key.verifying_key().to_bytes())
-        );
     }
 
     // -----------------------------------------------------------------
@@ -2213,151 +2196,6 @@ use crate::proto::pack::Packer;
             delivered_ids,
             timestamp,
             user_sig: sig.to_bytes().into(),
-        }
-    }
-
-    // ------- Round-trip tests: postcard encode → decode → equal -------
-
-    #[test]
-    fn forward_round_trip() {
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let sender_relay = fresh_signing_key();
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-
-        let dispatch = build_dispatch(&from_user, &to_ipk, [7u8; 16], b"hello");
-        let fwd = build_forward(&sender_relay, dispatch, 1_700_000_000_000);
-
-        let bytes = fwd.ser().expect("postcard serialize");
-        let decoded = Forward::deser(&bytes).expect("postcard deserialize");
-        assert_eq!(decoded, fwd);
-    }
-
-    #[test]
-    fn forward_resp_round_trip() {
-        // Cover every outcome variant — catches a missing serde derive
-        // on a single arm (which postcard would reject at decode time).
-        for outcome in [
-            ForwardOutcome::Delivered,
-            ForwardOutcome::Stored,
-            ForwardOutcome::NotOwner,
-            ForwardOutcome::QueueFull,
-            ForwardOutcome::BadSig,
-            ForwardOutcome::RateLimited,
-        ] {
-            let r = ForwardResp { outcome };
-            let bytes = r.ser().expect("ser");
-            let decoded = ForwardResp::deser(&bytes).expect("deser");
-            assert_eq!(decoded, r);
-        }
-    }
-
-    #[test]
-    fn queue_fetch_round_trip() {
-        let user = fresh_signing_key();
-        let req_relay = fresh_signing_key();
-        let req_id = NodeId::new(req_relay.verifying_key().to_bytes());
-        let qf = build_queue_fetch(&user, req_id, 1_700_000_000_000);
-
-        let bytes = qf.ser().expect("ser");
-        let decoded = QueueFetch::deser(&bytes).expect("deser");
-        assert_eq!(decoded, qf);
-    }
-
-    #[test]
-    fn queue_fetch_resp_round_trip() {
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-        let dispatch = build_dispatch(&from_user, &to_ipk, [9u8; 16], b"x");
-        for exhausted in [true, false] {
-            let r = QueueFetchResp {
-                messages: vec![dispatch.clone()],
-                exhausted,
-            };
-            let bytes = r.ser().expect("ser");
-            let decoded = QueueFetchResp::deser(&bytes).expect("deser");
-            assert_eq!(decoded, r);
-        }
-    }
-
-    #[test]
-    fn queue_fetch_ack_round_trip() {
-        let user = fresh_signing_key();
-        let req_relay = fresh_signing_key();
-        let req_id = NodeId::new(req_relay.verifying_key().to_bytes());
-        let ack = build_queue_fetch_ack(
-            &user,
-            req_id,
-            vec![[1u8; 16], [2u8; 16], [3u8; 16]],
-            1_700_000_000_000,
-        );
-        let bytes = ack.ser().expect("ser");
-        let decoded = QueueFetchAck::deser(&bytes).expect("deser");
-        assert_eq!(decoded, ack);
-
-        // Empty ack must also round-trip — wire format permits it.
-        let empty =
-            build_queue_fetch_ack(&user, req_id, Vec::new(), 1_700_000_000_000);
-        let bytes = empty.ser().expect("ser");
-        let decoded = QueueFetchAck::deser(&bytes).expect("deser");
-        assert_eq!(decoded, empty);
-    }
-
-    #[test]
-    fn queue_fetch_ack_resp_round_trip() {
-        for ok in [true, false] {
-            let r = QueueFetchAckResp { ok };
-            let bytes = r.ser().expect("ser");
-            let decoded = QueueFetchAckResp::deser(&bytes).expect("deser");
-            assert_eq!(decoded, r);
-        }
-    }
-
-    #[test]
-    fn dht_packet_round_trip_for_sticky_home_variants() {
-        // Verify the sticky-home `DhtRequest` / `DhtResponse` variants
-        // slot into the outer `DhtPacket` codec without confusing the
-        // discriminator. Mirrors
-        // `dht_packet_round_trip_for_every_request_variant`.
-        let from_user = fresh_signing_key();
-        let to_user = fresh_signing_key();
-        let to_ipk: [u8; 32] = to_user.verifying_key().to_bytes();
-        let sender_relay = fresh_signing_key();
-        let user = fresh_signing_key();
-        let req_relay = fresh_signing_key();
-        let req_id = NodeId::new(req_relay.verifying_key().to_bytes());
-
-        let dispatch = build_dispatch(&from_user, &to_ipk, [4u8; 16], b"q");
-        let now: u64 = 1_700_000_000_000;
-        let fwd = build_forward(&sender_relay, dispatch.clone(), now);
-        let qf = build_queue_fetch(&user, req_id, now);
-        let ack = build_queue_fetch_ack(&user, req_id, vec![[1u8; 16]], now);
-
-        let requests = vec![
-            DhtRequest::Forward(fwd),
-            DhtRequest::QueueFetch(qf),
-            DhtRequest::QueueFetchAck(ack),
-        ];
-        let responses = vec![
-            DhtResponse::Forward(ForwardResp { outcome: ForwardOutcome::Stored }),
-            DhtResponse::QueueFetch(QueueFetchResp {
-                messages:  vec![dispatch.clone()],
-                exhausted: true,
-            }),
-            DhtResponse::QueueFetchAck(QueueFetchAckResp { ok: true }),
-        ];
-        for r in requests {
-            let pkt = DhtPacket::Request(r.clone());
-            let bytes = pkt.ser().expect("ser");
-            let decoded = DhtPacket::deser(&bytes).expect("deser");
-            assert_eq!(decoded, pkt);
-        }
-        for r in responses {
-            let pkt = DhtPacket::Response(r.clone());
-            let bytes = pkt.ser().expect("ser");
-            let decoded = DhtPacket::deser(&bytes).expect("deser");
-            assert_eq!(decoded, pkt);
         }
     }
 
@@ -2550,8 +2388,12 @@ use crate::proto::pack::Packer;
 
         decoded.verify(now).expect("verify ok");
 
-        // Empty ack must also verify cleanly — no-op deletion.
+        // Empty ack must also round-trip and verify cleanly — no-op
+        // deletion (the wire format permits an empty id list).
         let empty = build_queue_fetch_ack(&user, req_id, Vec::new(), now);
+        let empty_bytes = empty.ser().expect("ser");
+        let empty_decoded = QueueFetchAck::deser(&empty_bytes).expect("deser");
+        assert_eq!(empty_decoded, empty);
         empty.verify(now).expect("empty ack must verify");
     }
 

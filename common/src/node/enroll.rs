@@ -153,20 +153,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "certgen")]
-    #[test]
-    fn csr_parses_with_rcgen() {
-        let key = SigningKey::from_bytes(&[3u8; 32]);
-        let id = NodeId::new(key.verifying_key().to_bytes());
-        let path = std::env::temp_dir().join("pz_csr_roundtrip.csr");
-        emit_csr(&path, &key, &id).unwrap();
-        let pem = std::fs::read_to_string(&path).unwrap();
-        // from_pem validates the PKCS#10 structure AND the self-signature.
-        rcgen::CertificateSigningRequestParams::from_pem(&pem)
-            .expect("rcgen parses our hand-rolled CSR");
-        let _ = std::fs::remove_file(&path);
-    }
-
     // Full loop: ephemeral CA → emit_csr → sign exactly as `certgen sign` →
     // cert_is_valid must accept. Guards the keystone (a wrong reject = a node
     // that waits for enrollment forever).

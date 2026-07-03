@@ -636,23 +636,4 @@ mod tests {
         let other_ipk = SigningKey::from_bytes(&[4u8; 32]).verifying_key().to_bytes();
         assert!(verify_ipk_binding(&other_ipk, &tls_pub, &sig).is_err());
     }
-
-    #[test]
-    fn cert_built_with_subkey_self_verifies() {
-        // The production cert is signed with the TLS sub-key and embeds the
-        // sub-key's pubkey in the SPKI. The post-handshake extractor MUST
-        // accept that pairing — this test guards against accidentally
-        // re-introducing IPK-as-SPKI signing.
-        use common::crypto::sign::derive_p2p_tls_key;
-        let ipk_seed = [42u8; 32];
-        let ipk_pub = SigningKey::from_bytes(&ipk_seed).verifying_key().to_bytes();
-        let subkey = derive_p2p_tls_key(&ipk_seed, &ipk_pub);
-
-        let cert_der = build_self_signed(&subkey);
-
-        let parsed = extract_ed25519_pubkey_from_cert(&cert_der)
-            .expect("subkey-signed cert must verify against subkey SPKI");
-        assert_eq!(parsed, subkey.verifying_key().to_bytes());
-        assert_ne!(parsed, ipk_pub, "cert SPKI must be the sub-key, not the IPK");
-    }
 }

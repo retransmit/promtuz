@@ -1009,21 +1009,23 @@ mod tests {
             requester_relay_id: auth_peer,
             timestamp: now,
         };
-        // First fetch consumes one; remaining = 2.
-        match handle_keypackage_fetch(&dht, fetch_req.clone(), auth_peer, now) {
-            KeyPackageFetchOutcome::Found(f) => assert_eq!(f.remaining, 2),
-            other => panic!("first fetch: {other:?}"),
+        // Each fetch consumes one record and returns a distinct kp_ref
+        // (strict one-shot: a consumed KP is never re-vended); the
+        // remaining count decrements 2 → 1 → 0.
+        let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        for expected_remaining in [2u32, 1, 0] {
+            match handle_keypackage_fetch(&dht, fetch_req.clone(), auth_peer, now) {
+                KeyPackageFetchOutcome::Found(f) => {
+                    assert_eq!(f.remaining, expected_remaining);
+                    assert!(
+                        seen.insert(f.record.kp_ref.0.clone()),
+                        "each fetch must return a distinct kp_ref"
+                    );
+                }
+                other => panic!("fetch (remaining {expected_remaining}): {other:?}"),
+            }
         }
-        // Second consumes another; remaining = 1.
-        match handle_keypackage_fetch(&dht, fetch_req.clone(), auth_peer, now) {
-            KeyPackageFetchOutcome::Found(f) => assert_eq!(f.remaining, 1),
-            other => panic!("second fetch: {other:?}"),
-        }
-        // Third leaves stash empty; remaining = 0.
-        match handle_keypackage_fetch(&dht, fetch_req.clone(), auth_peer, now) {
-            KeyPackageFetchOutcome::Found(f) => assert_eq!(f.remaining, 0),
-            other => panic!("third fetch: {other:?}"),
-        }
+        assert_eq!(seen.len(), 3, "all three KPs consumed exactly once");
         // Fourth: NoStash.
         assert!(matches!(
             handle_keypackage_fetch(&dht, fetch_req, auth_peer, now),
@@ -1052,51 +1054,6 @@ mod tests {
             handle_keypackage_fetch(&dht, req, auth_peer, now),
             KeyPackageFetchOutcome::NoStash
         ));
-    }
-
-    // ---------------------------------------------------------------
-    // 4. Fetch is one-time-use (each fetch returns a distinct KP)
-    // ---------------------------------------------------------------
-
-    #[test]
-    fn fetch_consumes_each_record_exactly_once() {
-        // Consumed KPs cannot be re-vended — strict one-shot semantics.
-        let owner = fresh_signing_key();
-        let self_id = NodeId::new([0u8; 32]);
-        let dht = fresh_dht(self_id);
-        let now = fresh_now();
-        let auth_peer = NodeId::new([0xBB; 32]);
-
-        let recs: Vec<KeyPackageRecord> = (0..3u8)
-            .map(|i| {
-                let mut kp_ref = [0u8; 32];
-                kp_ref[0] = 100 + i; // distinguishable
-                build_record(&owner, kp_ref, vec![i], now + 60_000)
-            })
-            .collect();
-        assert_eq!(
-            handle_keypackage_publish(&dht, build_publish(&owner, recs.clone(), now), auth_peer, now),
-            KeyPackagePublishOutcome::Stored
-        );
-
-        let target_ipk: [u8; 32] = owner.verifying_key().to_bytes();
-        let fetch_req = KeyPackageFetchReq {
-            target_ipk: target_ipk.into(),
-            requester_relay_id: auth_peer,
-            timestamp: now,
-        };
-
-        let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
-        for _ in 0..3 {
-            match handle_keypackage_fetch(&dht, fetch_req.clone(), auth_peer, now) {
-                KeyPackageFetchOutcome::Found(f) => {
-                    let inserted = seen.insert(f.record.kp_ref.0.clone());
-                    assert!(inserted, "each fetch must return a distinct kp_ref");
-                }
-                other => panic!("expected Found, got {other:?}"),
-            }
-        }
-        assert_eq!(seen.len(), 3, "all three KPs consumed exactly once");
     }
 
     // ---------------------------------------------------------------

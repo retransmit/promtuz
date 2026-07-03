@@ -121,28 +121,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn signer_is_deterministic_for_same_seed() {
-        // SigningKey from a fixed seed produces deterministic
-        // signatures — verify the wrapper preserves that property
-        // (it must, since we delegate to dalek's own `sign`).
-        let key_a = SigningKey::from_bytes(&[42u8; 32]);
-        let key_b = SigningKey::from_bytes(&[42u8; 32]);
-        let s_a = Ed25519Signer::new(key_a);
-        let s_b = Ed25519Signer::new(key_b);
-        let msg = b"some-mls-payload";
-        let sig_a = Signer::sign(&s_a, msg).expect("sign");
-        let sig_b = Signer::sign(&s_b, msg).expect("sign");
-        assert_eq!(sig_a, sig_b, "ed25519 signatures over same key must match");
-    }
-
-    #[test]
-    fn signer_advertises_ed25519() {
-        let s = Ed25519Signer::generate();
-        assert_eq!(Signer::signature_scheme(&s), SignatureScheme::ED25519);
-    }
-
-    #[test]
     fn public_key_roundtrips_through_dalek() {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
         // Round-trip: build, extract pubkey, rebuild from bytes,
         // compare. The ed25519_dalek API is pubkey-deterministic over
         // the secret half, so this catches any drift in the wrapping.
@@ -151,5 +132,18 @@ mod tests {
         let pk1 = s.public_key();
         let pk2 = SigningKey::from_bytes(&secret).verifying_key().to_bytes();
         assert_eq!(pk1, pk2);
+
+        // Wire contract: advertised scheme is ED25519.
+        assert_eq!(Signer::signature_scheme(&s), SignatureScheme::ED25519);
+
+        // sign() must emit a genuine 64-byte ed25519 signature that
+        // verifies under the advertised pubkey — exercises the
+        // `.to_bytes().to_vec()` glue in the Signer impl.
+        let msg = b"some-mls-payload";
+        let sig_bytes = Signer::sign(&s, msg).expect("sign");
+        let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().expect("64-byte sig");
+        let vk = VerifyingKey::from_bytes(&pk1).expect("valid pubkey");
+        vk.verify(msg, &Signature::from_bytes(&sig_arr))
+            .expect("signature verifies under public key");
     }
 }

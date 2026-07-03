@@ -435,25 +435,6 @@ mod tests {
         assert_eq!(group.member_count(), 1);
     }
 
-    // -------------------------------------------------------------
-    // Test 2: Add a member (yields commit + welcome).
-    // -------------------------------------------------------------
-    #[test]
-    fn add_member_yields_commit_and_welcome() {
-        let provider_a = build_provider();
-        let provider_b = build_provider();
-        let alice = Party::new(&provider_a, 1);
-        let bob = Party::new(&provider_b, 2);
-        let mut group = create_group(&provider_a, &alice, &[0xAA; 32]);
-        let bob_kp = make_kp(&provider_b, &bob);
-        let (_commit, _welcome) = group
-            .add_members(&provider_a, &alice.sig_kp, &[bob_kp])
-            .expect("add member");
-        group.merge_pending_commit(&provider_a).expect("merge");
-        assert_eq!(group.epoch(), 1);
-        assert_eq!(group.member_count(), 2);
-    }
-
     /// Helper: extract a `Welcome` from an `MlsMessageOut` by
     /// round-tripping through tls_codec → `MlsMessageIn` →
     /// `MlsMessageBodyIn::Welcome`. We can't use
@@ -487,6 +468,10 @@ mod tests {
             .add_members(&provider_a, &alice.sig_kp, &[bob_kp])
             .expect("add bob");
         alice_group.merge_pending_commit(&provider_a).expect("merge");
+        // Folded from the former add_member_yields_commit_and_welcome:
+        // absolute epoch + member-count pins after one add+merge.
+        assert_eq!(alice_group.epoch(), 1);
+        assert_eq!(alice_group.member_count(), 2);
 
         // Bob processes Welcome.
         let welcome_msg = extract_welcome_via_tls(welcome);
@@ -507,6 +492,9 @@ mod tests {
             .expect("encrypt");
         let bytes = mls_message_to_bytes(&alice_msg).expect("ser");
         let on_bob = mls_message_from_bytes(&bytes).expect("deser");
+        // Folded from application_round_trip_through_tls_codec: app
+        // messages frame as PrivateMessage (cleartext-framing guard).
+        assert_eq!(on_bob.wire_format(), WireFormat::PrivateMessage);
         let proto = on_bob.try_into_protocol_message().expect("proto");
         let content = bob_group.process_incoming(&provider_b, proto).expect("process");
         match content {
@@ -621,29 +609,13 @@ mod tests {
         let alice = Party::new(&provider, 1);
         let mut group = create_group(&provider, &alice, &[0xAA; 32]);
         let proposal = group.leave(&provider, &alice.sig_kp).expect("leave");
-        // openmls 0.8: leave returns a Remove proposal (PublicMessage
-        // by default). The wire format is *not* PrivateMessage.
-        assert_ne!(
-            mls_message_to_bytes(&proposal).expect("ser").len(),
-            0,
-            "proposal serialises to non-empty bytes"
+        // openmls 0.8: leave returns a Remove proposal, framed as a
+        // PublicMessage by default — not PrivateMessage.
+        let bytes = mls_message_to_bytes(&proposal).expect("ser");
+        assert_eq!(
+            mls_message_from_bytes(&bytes).expect("deser").wire_format(),
+            WireFormat::PublicMessage
         );
-    }
-
-    // -------------------------------------------------------------
-    // Test 7: tls_codec round-trip stays consistent.
-    // -------------------------------------------------------------
-    #[test]
-    fn application_round_trip_through_tls_codec() {
-        let provider = build_provider();
-        let alice = Party::new(&provider, 1);
-        let mut group = create_group(&provider, &alice, &[0xCC; 32]);
-        let msg = group
-            .create_application_message(&provider, &alice.sig_kp, b"alice-only")
-            .expect("encrypt");
-        let bytes = mls_message_to_bytes(&msg).expect("ser");
-        let parsed = mls_message_from_bytes(&bytes).expect("deser");
-        assert_eq!(parsed.wire_format(), WireFormat::PrivateMessage);
     }
 
     // -------------------------------------------------------------

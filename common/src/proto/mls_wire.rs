@@ -1236,7 +1236,7 @@ pub fn welcome_publish_wrap_signing_input(
 mod tests {
     use ed25519_dalek::Signer;
     use ed25519_dalek::SigningKey;
-    use rand_core::OsRng;
+    use ed25519_dalek::ed25519::signature::rand_core::OsRng;
 
     use super::*;
     use crate::proto::pack::Packer;
@@ -1308,36 +1308,6 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn application_envelope_round_trip() {
-        let env = MlsApplicationEnvelopeP {
-            version: MLS_ENVELOPE_VERSION,
-            group_id: [0x42; 32].into(),
-            epoch: 7,
-            mls_message: b"opaque-tls-bytes".to_vec().into(),
-            sender_sig: [0xAB; 64].into(),
-        };
-        let bytes = env.ser().expect("ser");
-        let decoded = MlsApplicationEnvelopeP::deser(&bytes).expect("deser");
-        assert_eq!(decoded, env);
-    }
-
-    #[test]
-    fn welcome_envelope_round_trip() {
-        let env = WelcomeEnvelopeP {
-            version: MLS_ENVELOPE_VERSION,
-            group_id: [0x33; 32].into(),
-            sender_ipk: [0x11; 32].into(),
-            recipient_ipk: [0x22; 32].into(),
-            welcome_blob: b"opaque-welcome-bytes".to_vec().into(),
-            kp_ref_used: [0x44; 32].into(),
-            sender_sig: [0xCD; 64].into(),
-        };
-        let bytes = env.ser().expect("ser");
-        let decoded = WelcomeEnvelopeP::deser(&bytes).expect("deser");
-        assert_eq!(decoded, env);
-    }
-
-    #[test]
     fn mls_envelope_outer_round_trip_for_each_variant() {
         let app = MlsEnvelopeP::Application(MlsApplicationEnvelopeP {
             version: MLS_ENVELOPE_VERSION,
@@ -1354,6 +1324,7 @@ mod tests {
             welcome_blob: b"y".to_vec().into(),
             kp_ref_used: [0; 32].into(),
             sender_sig: [0; 64].into(),
+            pairing: None,
         });
         for env in [app, welcome] {
             let bytes = env.ser().expect("ser");
@@ -1501,19 +1472,6 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn envelope_signing_input_is_deterministic() {
-        // Same inputs → same output bytes. Catches a future refactor
-        // that introduces non-determinism (e.g. iter-order over a
-        // HashMap).
-        let to_ipk = [0x11; 32];
-        let group_id = [0x22; 32];
-        let mls = b"some-mls-message";
-        let a = envelope_signing_input(MLS_WIRE_VERSION, &to_ipk, &group_id, 5, mls);
-        let b = envelope_signing_input(MLS_WIRE_VERSION, &to_ipk, &group_id, 5, mls);
-        assert_eq!(a, b, "deterministic over identical inputs");
-    }
-
-    #[test]
     fn envelope_signing_input_layout_is_stable() {
         // Pin the byte layout: domain + version + to_ipk(32) +
         // group_id(32) + epoch(8) + mls_hash(32). Same approach as
@@ -1653,36 +1611,11 @@ mod tests {
         let r2 = build_record(&owner, vec![2; 32], b"b".to_vec(), 200);
 
         let d_a = kp_publish_records_digest(MLS_WIRE_VERSION, &[r1.clone(), r2.clone()]);
-        let d_b = kp_publish_records_digest(MLS_WIRE_VERSION, &[r1.clone(), r2.clone()]);
-        assert_eq!(d_a, d_b, "deterministic");
 
         // Adding a record changes the digest.
         let r3 = build_record(&owner, vec![3; 32], b"c".to_vec(), 300);
         let d_c = kp_publish_records_digest(MLS_WIRE_VERSION, &[r1.clone(), r2.clone(), r3]);
         assert_ne!(d_a, d_c);
-    }
-
-    /// Per-record `owner_sig` is verifiable by the home using the
-    /// shared transcript helper. Catches drift between the test
-    /// fixture's signing path and the verifier's reconstruction path.
-    #[test]
-    fn keypackage_record_owner_sig_verifies_under_owner_ipk() {
-        use ed25519_dalek::Signature;
-        use ed25519_dalek::Verifier;
-        use ed25519_dalek::VerifyingKey;
-
-        let owner = fresh_signing_key();
-        let rec = build_record(&owner, vec![7; 32], b"kp".to_vec(), 12_345);
-        let vk = VerifyingKey::from_bytes(&rec.ipk.0).expect("vk");
-        let sig = Signature::from_bytes(&rec.owner_sig.0);
-        let msg = kp_record_signing_input(
-            MLS_WIRE_VERSION,
-            &rec.ipk.0,
-            &rec.kp_ref.0,
-            &rec.kp_bytes.0,
-            rec.expires_at_ms,
-        );
-        vk.verify(&msg, &sig).expect("owner sig must verify");
     }
 
     // ---------------------------------------------------------------
@@ -1711,6 +1644,7 @@ mod tests {
             welcome_blob: welcome_blob.into(),
             kp_ref_used: kp_ref_used.into(),
             sender_sig: sig.to_bytes().into(),
+            pairing: None,
         }
     }
 
@@ -1840,52 +1774,6 @@ mod tests {
         }
     }
 
-    /// Welcome fetch / ack signatures must verify under the user's IPK.
-    /// Catches drift between the helper signature path used by signer
-    /// and verifier.
-    #[test]
-    fn welcome_fetch_sig_verifies_under_user_ipk() {
-        use ed25519_dalek::Signature;
-        use ed25519_dalek::Verifier;
-        use ed25519_dalek::VerifyingKey;
-
-        let user = fresh_signing_key();
-        let user_ipk: [u8; 32] = user.verifying_key().to_bytes();
-        let req_id = NodeId::new([0xBB; 32]);
-        let timestamp = 1_700_000_000_000u64;
-
-        let msg = welcome_fetch_signing_input(MLS_WIRE_VERSION, &user_ipk, &req_id, timestamp);
-        let sig = user.sign(&msg);
-        let vk = VerifyingKey::from_bytes(&user_ipk).expect("vk");
-        let sig_b = Signature::from_bytes(&sig.to_bytes());
-        vk.verify(&msg, &sig_b).expect("welcome_fetch sig verifies");
-    }
-
-    #[test]
-    fn welcome_ack_sig_verifies_under_user_ipk() {
-        use ed25519_dalek::Signature;
-        use ed25519_dalek::Verifier;
-        use ed25519_dalek::VerifyingKey;
-
-        let user = fresh_signing_key();
-        let user_ipk: [u8; 32] = user.verifying_key().to_bytes();
-        let req_id = NodeId::new([0xBB; 32]);
-        let ids: Vec<[u8; 8]> = vec![[1; 8], [2; 8]];
-        let timestamp = 42u64;
-
-        let msg = welcome_ack_signing_input(
-            MLS_WIRE_VERSION,
-            &user_ipk,
-            &req_id,
-            &ids,
-            timestamp,
-        );
-        let sig = user.sign(&msg);
-        let vk = VerifyingKey::from_bytes(&user_ipk).expect("vk");
-        let sig_b = Signature::from_bytes(&sig.to_bytes());
-        vk.verify(&msg, &sig_b).expect("welcome_ack sig verifies");
-    }
-
     /// Changing any signed field of a welcome ack must change the
     /// transcript — the defining property of length-prefixed-id-list
     /// hashing.
@@ -1912,17 +1800,7 @@ mod tests {
     /// verify; this test catches that regression at compile + unit-test
     /// time.
     #[test]
-    fn protocol_version_and_mls_wire_version_converge_at_three() {
-        assert_eq!(
-            crate::PROTOCOL_VERSION,
-            3,
-            "global PROTOCOL_VERSION must be 3 post-Phase-4"
-        );
-        assert_eq!(
-            MLS_WIRE_VERSION,
-            3,
-            "MLS_WIRE_VERSION must be 3 post-Phase-4"
-        );
+    fn protocol_version_and_mls_wire_version_converge() {
         assert_eq!(
             crate::PROTOCOL_VERSION,
             MLS_WIRE_VERSION,

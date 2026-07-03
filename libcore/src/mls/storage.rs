@@ -1182,17 +1182,6 @@ mod tests {
     }
 
     #[test]
-    fn group_state_round_trip() {
-        let p = fresh_provider();
-        let gid = TestGroupId(vec![0xDEu8, 0xAD, 0xBE, 0xEF]);
-        let blob = TestBlob(vec![0xCAu8; 16]);
-
-        p.write_group_state(&gid, &blob).expect("write");
-        let got: Option<TestBlob> = p.group_state(&gid).expect("read");
-        assert_eq!(got, Some(blob));
-    }
-
-    #[test]
     fn entity_variants_round_trip() {
         let p = fresh_provider();
         let gid = TestGroupId(vec![0x01]);

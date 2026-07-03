@@ -260,38 +260,32 @@ mod tests {
         assert_eq!(err, DrainAuthError::BadSig);
     }
 
-    /// Stale timestamp (more than 60 s in the past).
+    /// Freshness window: a timestamp more than 60 s off in either
+    /// direction is rejected with the direction-specific variant. The
+    /// stale/future split drives distinct telemetry, so each row pins
+    /// its exact variant rather than just `is_err`. The signature is
+    /// always valid over the given timestamp, proving the rejection
+    /// comes from the freshness check, not signature verification.
     #[test]
-    fn handle_drain_auth_rejects_stale_timestamp() {
+    fn handle_drain_auth_rejects_out_of_window_timestamp() {
         let user = fresh_signing_key();
         let user_ipk = user_ipk_pubkey(&user);
         let relay_id = fresh_node_id();
         let now_ms: u64 = 1_700_000_000_000;
-        let stale_ts = now_ms - 5 * 60_000; // 5 minutes ago
 
-        let msg = queue_fetch_signing_input(user_ipk.as_bytes(), &relay_id, stale_ts);
-        let sig = user.sign(&msg).to_bytes();
+        let cases: [(u64, DrainAuthError); 2] = [
+            (now_ms - 5 * 60_000, DrainAuthError::StaleTimestamp), // 5 min past
+            (now_ms + 5 * 60_000, DrainAuthError::FutureTimestamp), // 5 min future
+        ];
 
-        let err = verify_drain_auth(&user_ipk, &relay_id, now_ms, stale_ts, sig)
-            .expect_err("stale ts must be rejected");
-        assert_eq!(err, DrainAuthError::StaleTimestamp);
-    }
+        for (timestamp, expected) in cases {
+            let msg = queue_fetch_signing_input(user_ipk.as_bytes(), &relay_id, timestamp);
+            let sig = user.sign(&msg).to_bytes();
 
-    /// Future timestamp (more than 60 s in the future).
-    #[test]
-    fn handle_drain_auth_rejects_future_timestamp() {
-        let user = fresh_signing_key();
-        let user_ipk = user_ipk_pubkey(&user);
-        let relay_id = fresh_node_id();
-        let now_ms: u64 = 1_700_000_000_000;
-        let future_ts = now_ms + 5 * 60_000;
-
-        let msg = queue_fetch_signing_input(user_ipk.as_bytes(), &relay_id, future_ts);
-        let sig = user.sign(&msg).to_bytes();
-
-        let err = verify_drain_auth(&user_ipk, &relay_id, now_ms, future_ts, sig)
-            .expect_err("future ts must be rejected");
-        assert_eq!(err, DrainAuthError::FutureTimestamp);
+            let err = verify_drain_auth(&user_ipk, &relay_id, now_ms, timestamp, sig)
+                .expect_err("out-of-window ts must be rejected");
+            assert_eq!(err, expected);
+        }
     }
 
     /// Inside-window edge: `now - timestamp == MAX_DHT_HELLO_SKEW_MS`

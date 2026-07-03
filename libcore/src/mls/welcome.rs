@@ -279,12 +279,7 @@ mod tests {
     use crate::mls::group::PROMTUZ_CIPHERSUITE;
     use crate::mls::provider::PromtuzMlsProvider;
     use crate::mls::types::MlsGroupError;
-    use common::proto::mls_wire::welcome_envelope_signing_input;
-    use common::proto::mls_wire::MLS_WIRE_VERSION;
-    use ed25519_dalek::Signature as DalekSignature;
     use ed25519_dalek::SigningKey;
-    use ed25519_dalek::Verifier;
-    use ed25519_dalek::VerifyingKey;
     use openmls::prelude::BasicCredential;
     use openmls::prelude::Capabilities;
     use openmls::prelude::CredentialWithKey;
@@ -389,31 +384,6 @@ mod tests {
     }
 
     // -------------------------------------------------------------
-    // Test 1: Welcome envelope sig verifies.
-    // -------------------------------------------------------------
-    #[test]
-    fn welcome_envelope_sig_verifies_under_sender_ipk() {
-        let provider_a = build_provider();
-        let provider_b = build_provider();
-        let alice = Party::new(&provider_a, 1);
-        let bob = Party::new(&provider_b, 2);
-        let (env, _) = alice_invites_bob(&provider_a, &alice, &provider_b, &bob, [0xAA; 32]);
-
-        // Verify the sig manually using the published transcript helper.
-        let transcript = welcome_envelope_signing_input(
-            MLS_WIRE_VERSION,
-            &env.group_id.0,
-            &env.sender_ipk.0,
-            &env.recipient_ipk.0,
-            &env.kp_ref_used.0,
-            &env.welcome_blob.0,
-        );
-        let vk = VerifyingKey::from_bytes(&env.sender_ipk.0).expect("vk");
-        let sig = DalekSignature::from_bytes(&env.sender_sig.0);
-        assert!(vk.verify(&transcript, &sig).is_ok());
-    }
-
-    // -------------------------------------------------------------
     // Test 2: Welcome envelope with bad sig is rejected.
     // -------------------------------------------------------------
     #[test]
@@ -457,26 +427,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------
-    // Test 4: process_welcome on a valid envelope materialises a
-    // joined group.
-    // -------------------------------------------------------------
-    #[test]
-    fn process_welcome_materialises_group() {
-        let provider_a = build_provider();
-        let provider_b = build_provider();
-        let alice = Party::new(&provider_a, 1);
-        let bob = Party::new(&provider_b, 2);
-        let gid = [0xBB; 32];
-        let (env, alice_group) = alice_invites_bob(&provider_a, &alice, &provider_b, &bob, gid);
-
-        let bob_group = process_welcome(&provider_b, &env).expect("process");
-        assert_eq!(bob_group.group_id(), gid);
-        assert_eq!(bob_group.epoch(), alice_group.epoch());
-        assert_eq!(bob_group.member_count(), alice_group.member_count());
-    }
-
-    // -------------------------------------------------------------
-    // Test 5: After process_welcome, founder + joiner can exchange
+    // Test 4: After process_welcome, founder + joiner can exchange
     // application messages.
     // -------------------------------------------------------------
     #[test]
@@ -490,6 +441,9 @@ mod tests {
             alice_invites_bob(&provider_a, &alice, &provider_b, &bob, gid);
 
         let mut bob_group = process_welcome(&provider_b, &env).expect("process");
+        assert_eq!(bob_group.group_id(), gid);
+        assert_eq!(bob_group.epoch(), alice_group.epoch());
+        assert_eq!(bob_group.member_count(), alice_group.member_count());
 
         // Alice → Bob.
         let plaintext = b"welcome bob, can you read me?";

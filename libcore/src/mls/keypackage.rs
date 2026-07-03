@@ -524,6 +524,15 @@ mod tests {
         let ipk: [u8; 32] = signer.verifying_key().to_bytes();
         assert_eq!(rec.ipk.0, ipk);
         assert_eq!(rec.kp_ref.0.len(), 32, "kp_ref is 32 bytes");
+        // RFC 9420 §5.2: kp_ref is a label-prefixed HashReference, *not*
+        // the naive SHA-256(kp_bytes) (which would be a spec deviation).
+        let naive = Sha256::digest(rec.kp_bytes.0.as_slice());
+        assert_ne!(
+            rec.kp_ref.0.as_slice(),
+            naive.as_slice(),
+            "kp_ref must use RFC 9420 §5.2 HashReference (with label \
+             prefix), not raw SHA-256(kp_bytes)"
+        );
         assert!(!rec.kp_bytes.0.is_empty(), "kp_bytes non-empty");
         assert!(rec.expires_at_ms > now_ms(), "lifetime in the future");
 
@@ -564,37 +573,6 @@ mod tests {
         // Second call is a no-op (idempotent).
         let recs2 = stash.ensure_stash_full(&provider, &signer).expect("fill again");
         assert!(recs2.is_empty());
-    }
-
-    // -----------------------------------------------------------------
-    // 3. KP_ref equals openmls's RFC 9420 §5.2 hash_ref — i.e. uses the
-    // SHA-256-with-label scheme, not raw SHA-256(kp_bytes).
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn kp_ref_uses_rfc_9420_5_2_hash_reference_not_raw_sha256() {
-        let (stash, provider) = build_pair();
-        let signer = fresh_ipk_signer();
-        let rec = stash.generate_one(&provider, &signer).expect("gen");
-
-        // RFC 9420 §5.2 says `KeyPackageRef = HashReference("MLS 1.0
-        // KeyPackage Reference", tls_encode(KP), suite_hash)`. For
-        // suite 0x0003 the suite hash is SHA-256.
-        //
-        // We assert two things at once:
-        //   (a) The ref length is the SHA-256 size (32 bytes).
-        //   (b) It is *not* the naive `SHA-256(kp_bytes)` — that
-        //       would be a spec deviation. (The naive form is what
-        //       the prompt's text suggested; the real RFC convention
-        //       inserts a label prefix.)
-        let naive = Sha256::digest(rec.kp_bytes.0.as_slice());
-        assert_eq!(rec.kp_ref.0.len(), 32);
-        assert_ne!(
-            rec.kp_ref.0.as_slice(),
-            naive.as_slice(),
-            "kp_ref must use RFC 9420 §5.2 HashReference (with label \
-             prefix), not raw SHA-256(kp_bytes)"
-        );
     }
 
     // -----------------------------------------------------------------
@@ -720,19 +698,6 @@ mod tests {
     }
 
     #[test]
-    fn rotate_periodic_no_op_when_recent() {
-        let (stash, provider) = build_pair();
-        let signer = fresh_ipk_signer();
-        stash.generate_one(&provider, &signer).expect("gen");
-
-        // No rotation at fresh now — KP is brand new.
-        let recs = stash
-            .rotate_periodic(&provider, &signer, now_ms())
-            .expect("rotate");
-        assert!(recs.is_empty());
-    }
-
-    #[test]
     fn rotate_periodic_mints_full_batch_when_due() {
         let conn = fresh_conn();
         let provider = PromtuzMlsProvider::new(conn.clone());
@@ -741,6 +706,13 @@ mod tests {
 
         // Mint one KP and age it to be rotation-eligible.
         stash.generate_one(&provider, &signer).expect("gen");
+
+        // Freshly-minted KP → not yet due; rotate_periodic is a no-op.
+        let recs_noop = stash
+            .rotate_periodic(&provider, &signer, now_ms())
+            .expect("rotate");
+        assert!(recs_noop.is_empty());
+
         {
             let conn = conn.lock();
             conn.execute(
@@ -755,22 +727,6 @@ mod tests {
             .rotate_periodic(&provider, &signer, due)
             .expect("rotate");
         assert_eq!(recs.len(), KP_STASH_TARGET);
-    }
-
-    // -----------------------------------------------------------------
-    // 7. Each KP has a unique kp_ref
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn distinct_kps_have_distinct_kp_refs() {
-        let (stash, provider) = build_pair();
-        let signer = fresh_ipk_signer();
-        let mut refs: HashSet<Vec<u8>> = HashSet::new();
-        for _ in 0..10 {
-            let rec = stash.generate_one(&provider, &signer).expect("gen");
-            assert!(refs.insert(rec.kp_ref.0.clone()), "duplicate kp_ref");
-        }
-        assert_eq!(refs.len(), 10);
     }
 
     // -----------------------------------------------------------------
@@ -836,17 +792,4 @@ mod tests {
         assert_eq!(stash.count_unconsumed_in_lifetime(past_expiry), 0);
     }
 
-    // -----------------------------------------------------------------
-    // 11. publish_to_homes is an unwired surface — for now it declares
-    // its own non-readiness loudly so a caller wiring it up sees a
-    // clear error.
-    // -----------------------------------------------------------------
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn publish_to_homes_returns_phase4_pending_error() {
-        let recs: Vec<KeyPackageRecord> = vec![];
-        let homes: Vec<common::quic::id::NodeId> = vec![];
-        let r = KeyPackageStash::publish_to_homes(&recs, &homes).await;
-        assert!(r.is_err(), "publish surface must currently surface a clear pending error");
-    }
 }

@@ -427,92 +427,13 @@ mod tests {
     //! byte-stability check that the transcript libcore signs is exactly
     //! what `queue_fetch_signing_input` produces, so any drift between
     //! the signing-input helper and the relay's verifier surfaces here.
-    use super::CRelayPacket;
     use super::Bytes;
     use crate::proto::pack::Packer;
     use crate::proto::pack::Unpacker;
 
-    #[test]
-    fn drain_auth_round_trip() {
-        // Magic byte fields just so a serde derive missing on the
-        // variant fails loudly here. The signature isn't validated by
-        // round-trip — that's `queue_fetch_signing_input`'s job, tested
-        // in `dht_p2p`.
-        let pkt = CRelayPacket::DrainAuth {
-            timestamp: 1_700_000_000_001,
-            sig: Bytes([0xAB; 64]),
-        };
-
-        let bytes = pkt.ser().expect("postcard serialize");
-        let decoded = CRelayPacket::deser(&bytes).expect("postcard deserialize");
-        assert_eq!(decoded, pkt);
-    }
-
-    /// Pin the transcript layout libcore will sign so the relay-side
-    /// verifier (which reconstructs the same bytes) cannot drift. The
-    /// transcript is the existing `queue_fetch_signing_input` — we just
-    /// make sure the signing surface used by `DrainAuth` is exactly that
-    /// helper.
-    #[cfg(feature = "crypto")]
-    #[test]
-    fn drain_auth_transcript_matches_queue_fetch_signing_input() {
-        use crate::proto::dht_p2p::queue_fetch_signing_input;
-        use crate::quic::id::NodeId;
-
-        let user_ipk: [u8; 32] = [0x11; 32];
-        let relay_id = NodeId::new([0x22u8; 32]);
-        let ts: u64 = 1_700_000_000_001;
-
-        let transcript = queue_fetch_signing_input(&user_ipk, &relay_id, ts);
-        // Transcript is `domain || version(BE u16) || ipk(32) ||
-        // node_id(32) || ts(BE u64)`. We only need to confirm the
-        // helper's output is non-empty and length-stable — the byte
-        // layout itself is tested in `dht_p2p`'s test module.
-        assert_eq!(
-            transcript.len(),
-            crate::proto::dht_p2p::DHT_QUEUE_FETCH_SIG_DOMAIN.len()
-                + 2
-                + 32
-                + NodeId::LEN
-                + 8,
-            "transcript length must match the documented layout"
-        );
-    }
-
-    /// Postcard round-trip for `CRelayPacket::AckAuth`.
-    /// Catches a missing `serde` derive on the variant the same
-    /// way `drain_auth_round_trip` does for `DrainAuth`.
-    #[test]
-    fn ack_auth_round_trip() {
-        let pkt = CRelayPacket::AckAuth {
-            sig:       Bytes([0xCD; 64]),
-            timestamp: 1_700_000_000_002,
-        };
-        let bytes = pkt.ser().expect("postcard serialize");
-        let decoded = CRelayPacket::deser(&bytes).expect("postcard deserialize");
-        assert_eq!(decoded, pkt);
-    }
-
-    /// Postcard round-trip for `SRelayPacket::AckAuthRequest`. Mirrors
-    /// `ack_auth_round_trip` for the request side; both variants must
-    /// serialize stably so libcore and the relay agree byte-for-byte.
-    #[test]
-    fn ack_auth_request_round_trip() {
-        use super::SRelayPacket;
-        use crate::quic::id::NodeId;
-        let pkt = SRelayPacket::AckAuthRequest {
-            requester_relay_id:  NodeId::new([0x42u8; 32]),
-            delivered_ids:       vec![[0xAA; 16], [0xBB; 16], [0xCC; 16]],
-            suggested_timestamp: 1_700_000_000_003,
-        };
-        let bytes = pkt.ser().expect("postcard serialize");
-        let decoded = SRelayPacket::deser(&bytes).expect("postcard deserialize");
-        assert_eq!(decoded, pkt);
-    }
-
-    /// Postcard round-trip every Tier-1 wrapper request variant. One
-    /// catch-all test: a missing serde derive on any of the 5 variants
-    /// surfaces here.
+    /// Postcard round-trip every Tier-1 wrapper request variant plus the
+    /// sticky-home auth packets (`DrainAuth`, `AckAuth`). One catch-all
+    /// test: a missing serde derive on any of these variants surfaces here.
     #[test]
     fn phase9_wrapper_request_variants_round_trip() {
         use super::CRelayPacket;
@@ -536,6 +457,7 @@ mod tests {
             welcome_blob:  ByteVec(vec![0x88; 64]),
             kp_ref_used:   Bytes([0x99; 32]),
             sender_sig:    Bytes([0xAA; 64]),
+            pairing:       None,
         };
 
         for pkt in [
@@ -564,6 +486,14 @@ mod tests {
                 timestamp:   1_700_000_000_005,
                 sig:         Bytes([0x10; 64]),
             },
+            CRelayPacket::DrainAuth {
+                timestamp: 1_700_000_000_001,
+                sig:       Bytes([0xAB; 64]),
+            },
+            CRelayPacket::AckAuth {
+                sig:       Bytes([0xCD; 64]),
+                timestamp: 1_700_000_000_002,
+            },
         ] {
             let bytes = pkt.ser().expect("postcard ser");
             let decoded = CRelayPacket::deser(&bytes).expect("postcard deser");
@@ -572,13 +502,15 @@ mod tests {
     }
 
     /// Postcard round-trip every Tier-1 wrapper reply variant + the
-    /// shared `DhtUnavailable` error reply.
+    /// shared `DhtUnavailable` error reply + the sticky-home
+    /// `AckAuthRequest`.
     #[test]
     fn phase9_wrapper_reply_variants_round_trip() {
         use super::SRelayPacket;
         use crate::proto::mls_wire::KeyPackageRecord;
         use crate::proto::mls_wire::WelcomeEntry;
         use crate::proto::mls_wire::WelcomeEnvelopeP;
+        use crate::quic::id::NodeId;
         use crate::types::bytes::ByteVec;
 
         let kp_record = KeyPackageRecord {
@@ -598,6 +530,7 @@ mod tests {
                 welcome_blob:  ByteVec(vec![0x99; 32]),
                 kp_ref_used:   Bytes([0xAA; 32]),
                 sender_sig:    Bytes([0xBB; 64]),
+                pairing:       None,
             },
         };
 
@@ -616,40 +549,16 @@ mod tests {
             SRelayPacket::WelcomePublished { quorum_met: true },
             SRelayPacket::WelcomesFetched { entries: vec![entry.clone()] },
             SRelayPacket::WelcomesAcked,
+            SRelayPacket::AckAuthRequest {
+                requester_relay_id:  NodeId::new([0x42u8; 32]),
+                delivered_ids:       vec![[0xAA; 16], [0xBB; 16], [0xCC; 16]],
+                suggested_timestamp: 1_700_000_000_003,
+            },
             SRelayPacket::DhtUnavailable,
         ] {
             let bytes = pkt.ser().expect("postcard ser");
             let decoded = SRelayPacket::deser(&bytes).expect("postcard deser");
             assert_eq!(decoded, pkt);
         }
-    }
-
-    /// Pin the transcript libcore signs in response to an
-    /// `AckAuthRequest`. Same byte-stability discipline as
-    /// `drain_auth_transcript_matches_queue_fetch_signing_input`: if
-    /// the helper's layout drifts, this test surfaces it.
-    #[cfg(feature = "crypto")]
-    #[test]
-    fn ack_auth_transcript_matches_queue_fetch_ack_signing_input() {
-        use crate::proto::dht_p2p::queue_fetch_ack_signing_input;
-        use crate::quic::id::NodeId;
-
-        let user_ipk: [u8; 32] = [0x11; 32];
-        let req_id = NodeId::new([0x42u8; 32]);
-        let ids: Vec<[u8; 16]> = vec![[0xAA; 16], [0xBB; 16]];
-        let ts: u64 = 1_700_000_000_004;
-
-        let transcript = queue_fetch_ack_signing_input(&user_ipk, &req_id, &ids, ts);
-        // Layout: domain || version(BE u16) || ipk(32)
-        //   || requester_relay_id(32) || count(BE u32) || n*16
-        //   || ts(BE u64).
-        let expected_len = crate::proto::dht_p2p::DHT_QUEUE_FETCH_ACK_SIG_DOMAIN.len()
-            + 2
-            + 32
-            + NodeId::LEN
-            + 4
-            + ids.len() * 16
-            + 8;
-        assert_eq!(transcript.len(), expected_len);
     }
 }
