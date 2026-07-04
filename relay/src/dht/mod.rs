@@ -51,13 +51,10 @@ use self::metrics::Metrics;
 use self::mls_kp::KpFetchLimiters;
 use self::mls_welcome::WelcomeLimiters;
 use self::routing::RoutingTable;
-use self::sync::MerkleState;
-
 /// Top-level DHT runtime state.
 ///
 /// Lock granularity:
 /// - [`routing`] — `RwLock<RoutingTable>`, read-mostly.
-/// - [`merkle`] — `RwLock<MerkleState>`, write-heavy.
 /// - [`peer_conns`] — `RwLock<HashMap<NodeId, Connection>>`, mirroring
 ///   the existing `Relay::clients` pattern.
 ///
@@ -66,7 +63,7 @@ use self::sync::MerkleState;
 /// project-wide rule documented at
 /// `relay/src/quic/handler/client/events/forward.rs:59`).
 ///
-/// `routing`/`merkle`/`peer_conns` are `pub(crate)` because only
+/// `routing`/`peer_conns` are `pub(crate)` because only
 /// in-relay code holds an `Arc<Dht>`; `node_id`/`signing_key`/`cfg`/
 /// `metrics` are `pub` so admin tools (`bin/ldb.rs` and friends) can read
 /// without going through accessor stubs.
@@ -78,11 +75,8 @@ pub struct Dht {
     /// Shared fjall store (the *same* store the relay's message queue uses —
     /// keyspaces, not databases, separate the two domains). Keyspace handles
     /// are cheap `Clone`s held on [`Store`], so DHT code reaches them as
-    /// `dht.store.presence` / `.queue` / `.keypackage` / `.welcome` directly.
+    /// `dht.store.queue` / `.keypackage` / `.welcome` directly.
     pub(crate) store: Arc<Store>,
-
-    /// Per-slice Merkle anti-entropy state.
-    pub(crate) merkle: RwLock<MerkleState>,
 
     /// Hot relay-to-relay connections, keyed by remote `NodeId`. Strong
     /// reference held here; routing-table entries hold a `Weak`.
@@ -220,7 +214,6 @@ impl Dht {
         Ok(Self {
             routing: RwLock::new(RoutingTable::empty(node_id)),
             store,
-            merkle: RwLock::new(MerkleState::empty()),
             peer_conns: RwLock::new(HashMap::new()),
             resolver: parking_lot::RwLock::new(None),
             node_id,

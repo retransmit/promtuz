@@ -11,8 +11,7 @@
 //!
 //! The cost of an RPC drives the quota:
 //!
-//! - **Cheap** (`Ping`, `FindNode`, `FindValue`, `MerkleSummary`,
-//!   `MerkleDiff`): zero crypto verification, only routing-table
+//! - **Cheap** (`FindNode`, `QueueFetchAck`): zero crypto verification, only routing-table
 //!   reads. 100/s sustained, burst 50.
 //! - **Expensive verify** (`Store`, `Tombstone`): each does an
 //!   Ed25519 verify (~100 µs) + a sync fjall write. 20/s sustained,
@@ -113,34 +112,24 @@ impl RpcClass {
     pub(crate) fn for_request(req: &common::proto::dht_p2p::DhtRequest) -> Self {
         use common::proto::dht_p2p::DhtRequest;
         match req {
-            DhtRequest::Ping(_)
-            | DhtRequest::FindNode(_)
-            | DhtRequest::FindValue(_)
-            | DhtRequest::MerkleSummary(_)
-            | DhtRequest::MerkleDiff(_)
-            // Sticky-home: ack is a small bookkeeping write (delete by
-            // id), no signature-heavy work beyond the bounded id-list
-            // verify. Slot it in the cheap bucket.
+            // `FindNode` is a routing-table read; the sticky-home ack is
+            // a small bounded-id-list verify + delete-by-id.
+            DhtRequest::FindNode(_)
             | DhtRequest::QueueFetchAck(_) => RpcClass::Cheap,
-            DhtRequest::Store(_)
-            | DhtRequest::Tombstone(_)
             // Sticky-home: `Forward` does an outer-sig verify plus a
             // disk write (queue) or stream open (deliver).
             // `QueueFetch` does a user-sig verify plus a per-recipient
-            // prefix iterator over `cf_dht_queue`. Both belong in the
-            // expensive bucket.
-            | DhtRequest::Forward(_)
-            | DhtRequest::QueueFetch(_)
-            // MLS KeyPackage publish / fetch / refill all do Ed25519
-            // verifies plus fjall I/O — same cost shape as Store /
-            // Forward; expensive class. A separate per-pair
+            // prefix iterator over `cf_dht_queue`. MLS KeyPackage
+            // publish / fetch / refill do Ed25519 verifies plus fjall
+            // I/O — same cost shape. A separate per-pair
             // `(target_ipk, requester_relay_id)` quota lives inside
             // `mls_kp.rs` for the anti-pinning policy; this per-peer
             // bucket is the coarser first line.
+            DhtRequest::Forward(_)
+            | DhtRequest::QueueFetch(_)
             | DhtRequest::KeyPackagePublish(_)
             | DhtRequest::KeyPackageFetch(_)
             | DhtRequest::KeyPackageRefill(_) => RpcClass::Expensive,
-            DhtRequest::FetchRecord(_) => RpcClass::Bulk,
             // MLS welcome publish carries up to a few KB of
             // `welcome_blob` plus envelope metadata; fetch returns up
             // to `MAX_WELCOMES_PER_RECIPIENT = 32` rows in a single
@@ -183,85 +172,18 @@ mod tests {
     #[test]
     fn per_peer_limiters_classify_rpcs_correctly() {
         use common::proto::dht_p2p::DhtRequest;
-        use common::proto::dht_p2p::FetchRecord;
         use common::proto::dht_p2p::FindNode;
-        use common::proto::dht_p2p::FindValue;
-        use common::proto::dht_p2p::MerkleDiff;
-        use common::proto::dht_p2p::MerkleSummary;
-        use common::proto::dht_p2p::Ping;
-        use common::proto::dht_p2p::PresenceRecord;
-        use common::proto::dht_p2p::Store;
-        use common::proto::dht_p2p::Tombstone;
-        use common::proto::dht_p2p::TombstoneRecord;
 
-        // Stub records — we don't care about validity, just classification.
         let dummy_id = NodeId::from_bytes([0u8; 32]);
-        let dummy_record = PresenceRecord {
-            user_ipk:     [0u8; 32].into(),
-            relay_id:     dummy_id,
-            relay_pubkey: [0u8; 32].into(),
-            not_before:   0,
-            not_after:    1,
-            generation:   0,
-            capabilities: 0,
-            user_sig:     [0u8; 64].into(),
-            relay_sig:    [0u8; 64].into(),
-        };
-        let dummy_tomb = TombstoneRecord {
-            user_ipk:     [0u8; 32].into(),
-            relay_id:     dummy_id,
-            relay_pubkey: [0u8; 32].into(),
-            generation:   0,
-            deleted_at:   0,
-            relay_sig:    [0u8; 64].into(),
-        };
-
-        let cases = [
-            (
-                DhtRequest::Ping(Ping {
-                    nonce:     [0u8; 16].into(),
-                    timestamp: 0,
-                }),
-                RpcClass::Cheap,
-            ),
-            (
-                DhtRequest::FindNode(FindNode {
-                    target:    [0u8; 32].into(),
-                    requester: dummy_id,
-                }),
-                RpcClass::Cheap,
-            ),
-            (
-                DhtRequest::FindValue(FindValue {
-                    user_ipk:  [0u8; 32].into(),
-                    requester: dummy_id,
-                }),
-                RpcClass::Cheap,
-            ),
-            (
-                DhtRequest::MerkleSummary(MerkleSummary { slices: [0u8; 32].into() }),
-                RpcClass::Cheap,
-            ),
-            (
-                DhtRequest::MerkleDiff(MerkleDiff { slice_id: 0, path: vec![] }),
-                RpcClass::Cheap,
-            ),
-            (
-                DhtRequest::Store(Store { record: dummy_record }),
-                RpcClass::Expensive,
-            ),
-            (
-                DhtRequest::Tombstone(Tombstone { record: dummy_tomb }),
-                RpcClass::Expensive,
-            ),
-            (
-                DhtRequest::FetchRecord(FetchRecord { user_ipks: vec![] }),
-                RpcClass::Bulk,
-            ),
-        ];
-        for (req, expected) in cases {
-            assert_eq!(RpcClass::for_request(&req), expected, "req={req:?}");
-        }
+        let find_node = DhtRequest::FindNode(FindNode {
+            target:    [0u8; 32].into(),
+            requester: dummy_id,
+        });
+        // FindNode is a routing-table read → Cheap. The signature-heavy
+        // sticky-home / MLS RPCs need signed fixtures to construct, so
+        // their classification is covered by the integration paths; here
+        // we pin the one variant buildable without crypto.
+        assert_eq!(RpcClass::for_request(&find_node), RpcClass::Cheap);
     }
 
     #[test]

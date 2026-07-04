@@ -2,7 +2,6 @@
 //!
 //! Keyspaces (fjall's column-family equivalent — each its own LSM-tree):
 //! - `messages`       sender-relay local fallback queue (`MessageKey` -> DispatchP).
-//! - `dht_presence`   replica presence records + tombstones (point lookups).
 //! - `dht_queue`      home-replica offline queue (`MessageKey`, per-recipient prefix).
 //! - `dht_keypackage` MLS KeyPackage stash (per-IPK prefix).
 //! - `dht_welcome`    MLS Welcome stash (per-recipient prefix).
@@ -23,18 +22,16 @@ use fjall::UserKey;
 use fjall::UserValue;
 
 pub const KS_MESSAGES: &str = "messages";
-pub const KS_DHT_PRESENCE: &str = "dht_presence";
 pub const KS_DHT_QUEUE: &str = "dht_queue";
 pub const KS_DHT_KEYPACKAGE: &str = "dht_keypackage";
 pub const KS_DHT_WELCOME: &str = "dht_welcome";
 
 /// Owns the relay's fjall `Database` and its keyspace handles. Shared as
-/// `Arc<Store>` between the `Relay` (message queue) and the `Dht` (presence,
-/// home queue, MLS stashes) — both point at the same on-disk store.
+/// `Arc<Store>` between the `Relay` (message queue) and the `Dht` (home
+/// queue, MLS stashes) — both point at the same on-disk store.
 pub struct Store {
     db:             Database,
     pub messages:   Keyspace,
-    pub presence:   Keyspace,
     pub queue:      Keyspace,
     pub keypackage: Keyspace,
     pub welcome:    Keyspace,
@@ -54,9 +51,6 @@ impl Store {
         let db = Database::builder(path).open().context("open fjall database")?;
         let messages =
             db.keyspace(KS_MESSAGES, KeyspaceCreateOptions::default).context("open `messages`")?;
-        let presence = db
-            .keyspace(KS_DHT_PRESENCE, KeyspaceCreateOptions::default)
-            .context("open `dht_presence`")?;
         let queue =
             db.keyspace(KS_DHT_QUEUE, KeyspaceCreateOptions::default).context("open `dht_queue`")?;
         let keypackage = db
@@ -65,7 +59,7 @@ impl Store {
         let welcome = db
             .keyspace(KS_DHT_WELCOME, KeyspaceCreateOptions::default)
             .context("open `dht_welcome`")?;
-        Ok(Self { db, messages, presence, queue, keypackage, welcome })
+        Ok(Self { db, messages, queue, keypackage, welcome })
     }
 
     /// Insert then fsync the journal — the durability contract the old
