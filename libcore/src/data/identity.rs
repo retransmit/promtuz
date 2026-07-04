@@ -6,6 +6,7 @@ use common::crypto::get_signing_key;
 use common::crypto::sign::derive_p2p_tls_key;
 use common::proto::mls_wire::Invite;
 use common::proto::mls_wire::MLS_WIRE_VERSION;
+use common::proto::mls_wire::WELCOME_LIFETIME_MS;
 use common::proto::mls_wire::invite_signing_input;
 use ed25519_dalek::Signature;
 use ed25519_dalek::Signer;
@@ -108,7 +109,15 @@ impl Identity {
         let Some(our_ipk) = Identity::get().map(|i| i.ipk()) else {
             return false;
         };
-        if systime().as_millis() as u64 >= invite.expiry_ms {
+        // The ~10-min `expiry_ms` is scan-time freshness UX (surfaced by
+        // `preview_invite`); the ACCEPT gate must tolerate the delivery
+        // channel's latency — a pairing Welcome can legitimately sit in
+        // the home stash up to WELCOME_LIFETIME_MS before we reconnect
+        // and fetch it. Rejecting here on the scan window permanently
+        // killed pairings whose Welcome arrived after 10 minutes.
+        if systime().as_millis() as u64
+            >= invite.expiry_ms.saturating_add(WELCOME_LIFETIME_MS)
+        {
             return false;
         }
         let Ok(vk) = VerifyingKey::from_bytes(&our_ipk) else {
