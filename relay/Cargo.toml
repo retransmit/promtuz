@@ -67,12 +67,14 @@ priority = "optional"
 # remaining runtime dep is glibc. Pinned explicitly (not "$auto") so the deb
 # builds on any host without dpkg-shlibdeps. Floor 2.28 = the zig glibc target.
 depends = "libc6 (>= 2.28)"
+recommends = "unattended-upgrades"
 extended-description = "Promtuz relay node: Kademlia DHT, client auth, presence + MLS handshake replication, store-and-forward."
 assets = [
     ["target/release/relay", "usr/bin/pzrelay", "755"],
     ["pkg/relay.toml", "etc/promtuz/relay.toml", "644"],
     ["../.tls/RootCA.pem", "etc/promtuz/ca.pem", "644"],
     ["pkg/pzrelay.service", "lib/systemd/system/pzrelay.service", "644"],
+    ["pkg/51pzrelay-unattended", "etc/apt/apt.conf.d/51pzrelay-unattended", "644"],
 ]
-conf-files = ["/etc/promtuz/relay.toml"]
+conf-files = ["/etc/promtuz/relay.toml", "/etc/apt/apt.conf.d/51pzrelay-unattended"]
 maintainer-scripts = "pkg/scripts/"

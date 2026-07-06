@@ -35,13 +35,16 @@ curl -fsSL "$BASE/promtuz-archive-keyring.asc" -o "$KEYRING"
 # Source list, pinned to the keyring so only this key is trusted for this repo.
 echo "deb [signed-by=$KEYRING] $BASE $CHANNEL main" > "$LIST"
 
+# unattended-upgrades named explicitly: the deb only Recommends it, and
+# minimal server images skip Recommends. The package ships an apt.conf.d
+# fragment that lets it auto-upgrade promtuz packages daily.
 apt-get update
-apt-get install -y pzrelay
+apt-get install -y pzrelay unattended-upgrades
 
 cat <<EOF
 
 pzrelay installed from the '$CHANNEL' channel.
 Next: edit /etc/pzrelay/relay.toml, provision certs, then
       systemctl enable --now pzrelay
-Updates later: apt update && apt upgrade   (your config is preserved)
+Updates apply automatically (unattended-upgrades, daily); config is preserved.
 EOF
