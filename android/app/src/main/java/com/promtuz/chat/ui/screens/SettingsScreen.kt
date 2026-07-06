@@ -74,7 +74,7 @@ fun SettingsScreen(
             SettingGroup(
                 "Network", listOf(
                     SettingItem("Resolvers", R.drawable.i_dns) {},
-                    SettingItem("Relay Nodes", R.drawable.i_hub) {},
+                    SettingItem("Relay Nodes", R.drawable.i_hub) { navigate(Routes.Relays) },
                 )
             ),
             SettingGroup(

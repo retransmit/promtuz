@@ -21,6 +21,7 @@
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::AtomicU64;
 
+use parking_lot::Mutex;
 use parking_lot::RwLock;
 
 use crate::data::relay::Relay;
@@ -43,3 +44,19 @@ pub static CONNECTION_STATE: AtomicI32 = AtomicI32::new(ConnectionState::Idle as
 /// Wall-clock seconds when the current connection was established.
 /// Not reset on disconnect — it's the start time of the *last* connection.
 pub static CONNECTION_START_TIME: AtomicU64 = AtomicU64::new(0);
+
+/// A user-requested relay id the relay loop should connect to on its next
+/// pick, bypassing weighted-random selection. Set by `api::relays::connect_relay`
+/// (the per-relay Connect/Reconnect action); taken (and cleared) by the loop.
+/// `None` = normal automatic selection.
+pub static PREFERRED_RELAY: Mutex<Option<String>> = Mutex::new(None);
+
+/// Queue a specific relay for the next connection pick.
+pub fn set_preferred_relay(id: String) {
+    *PREFERRED_RELAY.lock() = Some(id);
+}
+
+/// Take the queued relay id, if any, clearing it.
+pub fn take_preferred_relay() -> Option<String> {
+    PREFERRED_RELAY.lock().take()
+}

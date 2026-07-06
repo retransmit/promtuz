@@ -356,6 +356,34 @@ impl Relay {
         })
     }
 
+    /// Loads one relay by id, bypassing scoring and circuit state — for a
+    /// user-requested manual connect. `NoneAvailable` if the id is unknown.
+    pub fn fetch_by_id(id: &str) -> Result<Self, RelayError> {
+        let conn = NETWORK_DB.lock();
+        conn.query_row(
+            "SELECT id, host, port, pubkey FROM relays WHERE id = ?1",
+            params![id],
+            |row| {
+                let pubkey: Option<[u8; 32]> = row
+                    .get::<_, Option<Vec<u8>>>(3)?
+                    .and_then(|v| v.try_into().ok());
+                Ok(Self {
+                    id:           Arc::from(row.get::<_, String>(0)?.as_str()),
+                    host:         Arc::from(row.get::<_, String>(1)?.as_str()),
+                    port:         row.get::<_, i64>(2)? as u16,
+                    connection:   None,
+                    dht_client:   None,
+                    pubkey,
+                    home_node_id: None,
+                })
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => RelayError::NoneAvailable,
+            other => RelayError::Db(other),
+        })
+    }
+
     /// Upserts relays from a resolver response.
     ///
     /// Only updates addressing and version — does not touch circuit state or window stats.
@@ -391,9 +419,13 @@ impl Relay {
         Ok(())
     }
 
-    /// Records a successful connection. Closes circuit, resets failure streak,
-    /// stores latency, rolls the stats window if expired, trims sample history.
-    pub fn record_success(&self, latency_ms: u64) -> Result<(), RelayError> {
+    /// Records a successful connection: closes the circuit, resets the
+    /// failure streak, stamps `last_connect`, and rolls the stats window.
+    /// Latency is NOT recorded here — that's live RTT via [`record_rtt`],
+    /// not the one-shot handshake time.
+    ///
+    /// [`record_rtt`]: Relay::record_rtt
+    pub fn record_success(&self) -> Result<(), RelayError> {
         let conn = NETWORK_DB.lock();
         let now = systime().as_millis() as i64;
         let window_threshold = now - WINDOW_DURATION_MS as i64;
@@ -403,22 +435,39 @@ impl Relay {
                    circuit_state        = 'closed',
                    backoff_until        = NULL,
                    consecutive_failures = 0,
-                   last_latency         = ?1,
-                   last_connect         = ?2,
-                   window_attempts      = CASE WHEN window_start < ?3 THEN 1 ELSE window_attempts + 1 END,
-                   window_successes     = CASE WHEN window_start < ?3 THEN 1 ELSE window_successes + 1 END,
-                   window_start         = CASE WHEN window_start < ?3 THEN ?2 ELSE window_start END
-                 WHERE id = ?4",
-            params![latency_ms as i64, now, window_threshold, self.id.as_ref()],
+                   last_connect         = ?1,
+                   window_attempts      = CASE WHEN window_start < ?2 THEN 1 ELSE window_attempts + 1 END,
+                   window_successes     = CASE WHEN window_start < ?2 THEN 1 ELSE window_successes + 1 END,
+                   window_start         = CASE WHEN window_start < ?2 THEN ?1 ELSE window_start END
+                 WHERE id = ?3",
+            params![now, window_threshold, self.id.as_ref()],
         )?;
+
+        Ok(())
+    }
+
+    /// Records a live RTT sample (quinn's smoothed `Connection::rtt`) — the
+    /// real round-trip "ping" shown on the relays page and scored by
+    /// `fetch_best`. Updates `last_latency`, appends to the sample buffer,
+    /// and trims to the last `LATENCY_SAMPLE_LIMIT`.
+    pub fn record_rtt(&self, rtt_ms: u64) -> Result<(), RelayError> {
+        let conn = NETWORK_DB.lock();
+        let now = systime().as_millis() as i64;
 
         conn.execute(
-            "INSERT INTO relay_latency_samples (relay_id, measured_at, latency)
-         VALUES (?1, ?2, ?3)",
-            params![self.id.as_ref(), now, latency_ms as i64],
+            "UPDATE relays SET last_latency = ?1 WHERE id = ?2",
+            params![rtt_ms as i64, self.id.as_ref()],
         )?;
 
-        // Trim to last LATENCY_SAMPLE_LIMIT samples using rowid to handle duplicate timestamps
+        // OR IGNORE: two samples in the same millisecond would collide on the
+        // (relay_id, measured_at) PK — harmless to drop the duplicate.
+        conn.execute(
+            "INSERT OR IGNORE INTO relay_latency_samples (relay_id, measured_at, latency)
+             VALUES (?1, ?2, ?3)",
+            params![self.id.as_ref(), now, rtt_ms as i64],
+        )?;
+
+        // Trim to last LATENCY_SAMPLE_LIMIT samples (rowid handles dup timestamps).
         conn.execute(
             "DELETE FROM relay_latency_samples
             WHERE relay_id = ?1

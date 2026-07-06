@@ -10,14 +10,19 @@ import uniffi.core.ContactInfo
 import uniffi.core.InvitePreview
 import uniffi.core.MessageEvent
 import uniffi.core.MessageRecord
+import uniffi.core.RelayStat
 import uniffi.core.computeQrMask as ffiComputeQrMask
+import uniffi.core.connectRelay as ffiConnectRelay
 import uniffi.core.enroll as ffiEnroll
+import uniffi.core.forgetRelay as ffiForgetRelay
 import uniffi.core.getContacts as ffiGetContacts
 import uniffi.core.getConversations as ffiGetConversations
 import uniffi.core.getMessages as ffiGetMessages
+import uniffi.core.getRelays as ffiGetRelays
 import uniffi.core.makeInviteQr as ffiMakeInviteQr
 import uniffi.core.pairFromQr as ffiPairFromQr
 import uniffi.core.previewInvite as ffiPreviewInvite
+import uniffi.core.resetRelayCircuit as ffiResetRelayCircuit
 import uniffi.core.sendMessage as ffiSendMessage
 import uniffi.core.shouldLaunchApp as ffiShouldLaunchApp
 
@@ -56,6 +61,18 @@ object CoreBridge {
 
     /** Pure render helper; safe on any thread (used from the QR View). */
     fun computeQrMask(grid: ByteArray, size: Int): ByteArray = ffiComputeQrMask(grid, size.toUInt())
+
+    /** All stored relays with health + latency history (diagnostics page). */
+    suspend fun relays(): List<RelayStat> = withContext(Dispatchers.IO) { ffiGetRelays() }
+
+    /** Un-trip a relay's circuit breaker so it's reconsidered immediately. */
+    suspend fun resetRelayCircuit(id: String) = withContext(Dispatchers.IO) { ffiResetRelayCircuit(id) }
+
+    /** Delete a relay locally; the resolver re-adds it on the next fetch. */
+    suspend fun forgetRelay(id: String) = withContext(Dispatchers.IO) { ffiForgetRelay(id) }
+
+    /** Connect (or reconnect) to a specific relay by id. */
+    suspend fun connectRelay(id: String) = withContext(Dispatchers.IO) { ffiConnectRelay(id) }
 
     /** Latest connection state, mapped to the app enum (carries @StringRes). */
     val connection: StateFlow<ConnectionState> get() = CoreEventBus.connection

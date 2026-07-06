@@ -74,6 +74,8 @@ where
 /// rolls to the next one, instead of hanging on quinn's default idle timeout.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONCURRENT_STREAMS: usize = 16;
+/// Cadence for sampling the live connection RTT into the latency graph.
+const RTT_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Classifies a `quinn::ConnectionError` as terminal-for-this-relay
 /// (TLS / cert / auth failure that won't resolve without external
@@ -176,14 +178,12 @@ impl Relay {
             return Err(RelayConnError::Error(anyhow!("Handshake Packet Order Mismatch")));
         };
 
-        let (timestamp, latency_ms) = match result {
+        let timestamp = match result {
             SHSRP::Accept { timestamp, relay_node_id } => {
-                let latency_ms = systime().as_millis() as u64 - connect_start;
-                _ = self.record_success(latency_ms);
                 // Stash the home's advertised DHT NodeId for the
                 // RelayDhtClient to bind in welcome fetch/ack sigs.
                 self.home_node_id = relay_node_id.map(|b| b.0);
-                (timestamp, latency_ms)
+                timestamp
             },
             SHSRP::Reject { reason } => {
                 warn!("relay handshake failed : {reason}");
@@ -192,11 +192,23 @@ impl Relay {
             },
         };
 
-        info!("authenticated with relay({}) at {timestamp}", self.id);
+        let connect_ms = systime().as_millis() as u64 - connect_start;
+        info!("authenticated with relay({}) in {connect_ms}ms at {timestamp}", self.id);
         CONNECTION_START_TIME.store(timestamp, Ordering::Relaxed);
         ConnectionState::Connected.emit();
 
-        self.record_success(latency_ms).map_err(|e| RelayConnError::Error(e.into()))?;
+        self.record_success().map_err(|e| RelayConnError::Error(e.into()))?;
+
+        // Live RTT sampler — quinn's smoothed round-trip estimate, sampled
+        // while the connection lives. This is the "ping" the relays page
+        // graphs and the latency term `fetch_best` scores on; it ends itself
+        // when the connection closes.
+        tokio::spawn({
+            let relay = self.clone();
+            let conn = conn.clone();
+            async move { relay.sample_rtt(&conn).await }
+        });
+
         self.connection = Some(conn);
 
         // Build the production DHT-RPC dialer once the relay/1 connection
@@ -220,6 +232,20 @@ impl Relay {
         *RELAY.write() = Some(self);
 
         Ok(handle)
+    }
+
+    /// Samples `conn.rtt()` (quinn's smoothed round-trip estimate) every
+    /// [`RTT_SAMPLE_INTERVAL`] and records it, until the connection closes.
+    /// Runs as a detached task spawned at connect; `close_reason()` turning
+    /// `Some` is the exit signal, so it needs no external cancellation.
+    async fn sample_rtt(&self, conn: &quinn::Connection) {
+        while conn.close_reason().is_none() {
+            let rtt_ms = conn.rtt().as_millis() as u64;
+            if let Err(e) = self.record_rtt(rtt_ms) {
+                warn!("relay({}) rtt sample failed: {e}", self.id);
+            }
+            tokio::time::sleep(RTT_SAMPLE_INTERVAL).await;
+        }
     }
 
     /// Build and send a one-shot `CRelayPacket::DrainAuth` permit so this relay

@@ -6,7 +6,7 @@
 //! explicit `connect()`, no online/offline toggle (the OS provides
 //! airplane mode; the loop already no-ops on a dead network).
 
-use std::net::UdpSocket;
+use std::net::Ipv6Addr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,9 +19,7 @@ use log::debug;
 use log::error;
 use log::trace;
 use quinn::Endpoint;
-use quinn::EndpointConfig;
 use quinn::TransportConfig;
-use quinn::default_runtime;
 
 use crate::ENDPOINT;
 use crate::RUNTIME;
@@ -73,12 +71,14 @@ fn init_inner(
     let seeds = ResolverSeeds::from_str(&resolver_seeds)?;
 
     let _guard = RUNTIME.enter();
-    let socket = UdpSocket::bind("0.0.0.0:0")?;
 
-    // Client-only endpoint: pairing is async over the DHT now, so there
-    // is no incoming peer-to-peer to accept — no server config needed.
-    let mut endpoint =
-        Endpoint::new(EndpointConfig::default(), None, socket, default_runtime().unwrap())?;
+    // Client-only endpoint (pairing is async over the DHT, so nothing to
+    // accept — no server config). Bound to the IPv6 wildcard, which quinn
+    // makes dual-stack: it dials both IPv6 *and* IPv4 relays/resolvers
+    // (v4 destinations are sent v4-mapped). A `0.0.0.0` bind would refuse
+    // any IPv6 destination — the reason libcore couldn't reach an
+    // IPv6-resolving relay/resolver.
+    let mut endpoint = Endpoint::client((Ipv6Addr::UNSPECIFIED, 0).into())?;
 
     let roots = load_root_ca_bytes(ROOT_CA)?;
     let mut client_cfg = build_client_cfg(ProtoRole::Client, &roots)?;
@@ -134,7 +134,15 @@ fn start_relay_loop(seeds: Vec<ResolverSeed>) {
                 continue;
             }
 
-            match Relay::fetch_best() {
+            // A user-picked relay (Connect/Reconnect action) preempts the
+            // weighted-random pick for this iteration; fall back to normal
+            // selection if it was forgotten in the meantime.
+            let selected = match crate::state::take_preferred_relay() {
+                Some(id) => Relay::fetch_by_id(&id).or_else(|_| Relay::fetch_best()),
+                None => Relay::fetch_best(),
+            };
+
+            match selected {
                 Ok(relay) => {
                     let id = relay.id.clone();
                     trace!("connecting to relay({id})");
