@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.times
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.ChatVM
+import com.promtuz.chat.ui.util.freezeOnExit
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.HazeStyle
 import dev.chrisbanes.haze.HazeTint
@@ -83,6 +84,7 @@ fun ChatBottomBar(haze: HazeState, viewModel: ChatVM, interactionSource: Mutable
 
     Row(
         Modifier
+            .freezeOnExit()
             .background(
                 Brush.verticalGradient(
                     listOf(

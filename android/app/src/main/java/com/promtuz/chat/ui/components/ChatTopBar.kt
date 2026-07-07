@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.sp
 import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.Chat
 import com.promtuz.chat.presentation.viewmodel.ChatVM
+import com.promtuz.chat.ui.util.freezeOnExit
 import dev.chrisbanes.haze.HazeDefaults
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.HazeStyle
@@ -54,6 +55,7 @@ fun ChatTopBar(chat: Chat, viewModel: ChatVM, haze: HazeState) {
             Text("Last seen 2 min ago")
         },
         modifier = Modifier
+            .freezeOnExit()
             .fillMaxWidth()
             .hazeEffect(haze, hazeStyle),
         navigationIcon = {

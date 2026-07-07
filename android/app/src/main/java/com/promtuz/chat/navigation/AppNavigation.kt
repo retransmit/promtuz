@@ -1,22 +1,17 @@
 package com.promtuz.chat.navigation
 
-import androidx.compose.animation.SizeTransform
 import androidx.compose.foundation.background
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDecorator
 import androidx.navigation3.runtime.entryProvider
-import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
-import androidx.navigation3.ui.NavDisplay
 import com.promtuz.chat.domain.model.Chat
 import com.promtuz.chat.domain.model.LastMessage
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.presentation.viewmodel.WelcomeVM
-import com.promtuz.chat.ui.constants.Naviganimation
 import com.promtuz.chat.ui.screens.AboutScreen
 import com.promtuz.chat.ui.screens.ChatScreen
 import com.promtuz.chat.ui.screens.ContactsScreen
@@ -36,14 +31,10 @@ fun AppNavigation(
 ) {
     val backStack = appViewModel.backStack
 
-    NavDisplay(
+    NavStage(
         backStack,
         onBack = { backStack.removeLastOrNull() },
         modifier = Modifier.background(MaterialTheme.colorScheme.background),
-        entryDecorators = listOf(
-            rememberSaveableStateHolderNavEntryDecorator(),
-            rememberViewModelStoreNavEntryDecorator()
-        ),
         entryProvider = entryProvider {
             entry<Routes.App> { HomeScreen(appViewModel) }
             entry<Routes.Welcome> {
@@ -64,8 +55,5 @@ fun AppNavigation(
             entry<Routes.Logs> { LogsScreen() }
             entry<Routes.Relays> { RelaysScreen() }
         },
-        sizeTransform = SizeTransform(clip = false),
-        transitionSpec = { Naviganimation.transitionSpec() },
-        popTransitionSpec = { Naviganimation.popTransitionSpec() },
     )
 }

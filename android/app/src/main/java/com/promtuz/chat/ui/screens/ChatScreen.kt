@@ -9,12 +9,15 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListPrefetchStrategy
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.platform.*
 import androidx.compose.ui.unit.*
@@ -53,11 +56,13 @@ fun ChatScreen(
     val messages by viewModel.messages.collectAsState()
 
     val ctx = LocalContext.current
-    val drawablePattern = AppCompatResources.getDrawable(ctx, R.drawable.pattern_chat_topography)!!
-    val bgPattern = drawablePattern.toBitmap(1200, 1200)
-        .asImageBitmap()
-    val shader = ImageShader(bgPattern, TileMode.Repeated, TileMode.Repeated)
-    val brush = ShaderBrush(shader)
+    // Built once — a 1200² bitmap + shader per recomposition would jank every nav animation.
+    val brush = remember {
+        val pattern = AppCompatResources.getDrawable(ctx, R.drawable.pattern_chat_topography)!!
+            .toBitmap(1200, 1200)
+            .asImageBitmap()
+        ShaderBrush(ImageShader(pattern, TileMode.Repeated, TileMode.Repeated))
+    }
 
     Scaffold(
         Modifier
