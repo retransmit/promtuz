@@ -11,7 +11,10 @@ object Routes : NavKey {
     data object Welcome : NavKey
 
     @Serializable
-    data object Chat : NavKey
+    data class Chat(val user: String, val name: String) : NavKey
+
+    @Serializable
+    data object ShareIdentity : NavKey
 
     @Serializable
     data object Contacts : NavKey

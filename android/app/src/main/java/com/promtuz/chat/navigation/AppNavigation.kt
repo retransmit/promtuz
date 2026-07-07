@@ -2,24 +2,31 @@ package com.promtuz.chat.navigation
 
 import androidx.compose.animation.SizeTransform
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDecorator
 import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.ui.NavDisplay
+import com.promtuz.chat.domain.model.Chat
+import com.promtuz.chat.domain.model.LastMessage
 import com.promtuz.chat.presentation.viewmodel.AppVM
+import com.promtuz.chat.presentation.viewmodel.ChatVM
 import com.promtuz.chat.presentation.viewmodel.WelcomeVM
 import com.promtuz.chat.ui.constants.Naviganimation
 import com.promtuz.chat.ui.screens.AboutScreen
+import com.promtuz.chat.ui.screens.ChatScreen
 import com.promtuz.chat.ui.screens.ContactsScreen
 import com.promtuz.chat.ui.screens.HomeScreen
 import com.promtuz.chat.ui.screens.LogsScreen
 import com.promtuz.chat.ui.screens.RelaysScreen
 import com.promtuz.chat.ui.screens.SettingsScreen
+import com.promtuz.chat.ui.screens.ShareIdentityScreen
 import com.promtuz.chat.ui.screens.WelcomeScreen
+import com.promtuz.chat.utils.extensions.fromHex
 import org.koin.androidx.compose.koinViewModel
 
 
@@ -29,34 +36,34 @@ fun AppNavigation(
 ) {
     val backStack = appViewModel.backStack
 
-    SwipeBackContainer(
-        enabled = backStack.size > 1,
-        modifier = Modifier.fillMaxSize(),
-    ) {
-        NavDisplay(
-            backStack,
-            onBack = { backStack.removeLastOrNull() },
-            modifier = Modifier.background(MaterialTheme.colorScheme.background),
-            entryDecorators = listOf(
-                rememberSaveableStateHolderNavEntryDecorator(),
-                rememberViewModelStoreNavEntryDecorator()
-            ),
-            entryProvider = entryProvider {
-                entry<Routes.App> { HomeScreen(appViewModel) }
-                entry<Routes.Welcome> {
-                    WelcomeScreen(koinViewModel<WelcomeVM>(), onEnrolled = { appViewModel.completeOnboarding() })
-                }
-                //entry<Routes.Chat> { key -> ChatScreen(appViewModel) }
-                entry<Routes.Contacts> { ContactsScreen() }
-                entry<Routes.Settings> { SettingsScreen(appViewModel) }
-                entry<Routes.About> { AboutScreen() }
-                entry<Routes.Logs> { LogsScreen() }
-                entry<Routes.Relays> { RelaysScreen() }
-            },
-            sizeTransform = SizeTransform(clip = false),
-            transitionSpec = { Naviganimation.transitionSpec() },
-            popTransitionSpec = { Naviganimation.popTransitionSpec() },
-            predictivePopTransitionSpec = { Naviganimation.predictivePopSpec() },
-        )
-    }
+    NavDisplay(
+        backStack,
+        onBack = { backStack.removeLastOrNull() },
+        modifier = Modifier.background(MaterialTheme.colorScheme.background),
+        entryDecorators = listOf(
+            rememberSaveableStateHolderNavEntryDecorator(),
+            rememberViewModelStoreNavEntryDecorator()
+        ),
+        entryProvider = entryProvider {
+            entry<Routes.App> { HomeScreen(appViewModel) }
+            entry<Routes.Welcome> {
+                WelcomeScreen(koinViewModel<WelcomeVM>(), onEnrolled = { appViewModel.completeOnboarding() })
+            }
+            entry<Routes.Chat> { key ->
+                val chatVM = koinViewModel<ChatVM>()
+                val identity = remember(key.user) { key.user.fromHex() }
+                LaunchedEffect(identity) { chatVM.init(identity) }
+                ChatScreen(Chat(identity = identity, nickname = key.name, lastMessage = LastMessage(null, 0)), chatVM)
+            }
+            entry<Routes.ShareIdentity> { ShareIdentityScreen(koinViewModel()) }
+            entry<Routes.Contacts> { ContactsScreen() }
+            entry<Routes.Settings> { SettingsScreen(appViewModel) }
+            entry<Routes.About> { AboutScreen() }
+            entry<Routes.Logs> { LogsScreen() }
+            entry<Routes.Relays> { RelaysScreen() }
+        },
+        sizeTransform = SizeTransform(clip = false),
+        transitionSpec = { Naviganimation.transitionSpec() },
+        popTransitionSpec = { Naviganimation.popTransitionSpec() },
+    )
 }

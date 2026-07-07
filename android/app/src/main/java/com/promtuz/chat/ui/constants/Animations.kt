@@ -3,7 +3,6 @@ package com.promtuz.chat.ui.constants
 import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.EaseInOutCirc
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.TweenSpec
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -45,14 +44,6 @@ object Naviganimation {
     fun popTransitionSpec() = ContentTransform(
         targetContentEnter = slideInHorizontally(tween(DUR, easing = ease)) { -it / 4 },
         initialContentExit = slideOutHorizontally(tween(DUR, easing = ease)) { it },
-        targetContentZIndex = 0f,
-    )
-
-    // Interactive swipe-back: same arrangement as pop, but LINEAR so nav3's seek tracks the
-    // finger 1:1 (an eased curve would run the screen ahead of the finger during the drag).
-    fun predictivePopSpec() = ContentTransform(
-        targetContentEnter = slideInHorizontally(tween(DUR, easing = LinearEasing)) { -it / 4 },
-        initialContentExit = slideOutHorizontally(tween(DUR, easing = LinearEasing)) { it },
         targetContentZIndex = 0f,
     )
 }

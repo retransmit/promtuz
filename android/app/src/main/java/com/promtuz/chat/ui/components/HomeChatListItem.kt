@@ -1,6 +1,5 @@
 package com.promtuz.chat.ui.components
 
-import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -15,15 +14,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.utils.common.parseMessageDate
 import com.promtuz.chat.domain.model.Chat as ChatModel
-import com.promtuz.chat.ui.activities.Chat as ChatActivity
 
 @Composable
-fun HomeChatListItem(chat: ChatModel, roundShape: Shape) {
-    val context = LocalContext.current
+fun HomeChatListItem(chat: ChatModel, roundShape: Shape, onOpen: () -> Unit) {
     val textTheme = MaterialTheme.typography
     val colors = MaterialTheme.colorScheme
 
@@ -34,12 +30,7 @@ fun HomeChatListItem(chat: ChatModel, roundShape: Shape) {
             .fillMaxWidth()
             .clip(roundShape)
             .background(colors.surfaceContainer.copy(0.75f))
-            .combinedClickable(onClick = {
-                context.startActivity(Intent(context, ChatActivity::class.java).apply {
-                    putExtra("user", chat.identity)
-                    putExtra("name", chat.nickname)
-                })
-            }, onLongClick = {
+            .combinedClickable(onClick = { onOpen() }, onLongClick = {
 
             })
             .padding(vertical = 10.dp, horizontal = 12.dp),

@@ -54,7 +54,7 @@ fun HomeChatList(
             }
 
             itemsIndexed(chats) { index, chat ->
-                HomeChatListItem(chat, groupedRoundShape(index, chats.size))
+                HomeChatListItem(chat, groupedRoundShape(index, chats.size)) { appViewModel.openChat(chat) }
             }
 
             item {

@@ -1,6 +1,5 @@
 package com.promtuz.chat.ui.components
 
-import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -22,8 +21,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.presentation.state.InviteSheet
+import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.viewmodel.AppVM
-import com.promtuz.chat.ui.activities.Chat
+import com.promtuz.chat.utils.extensions.toHex
 import kotlinx.coroutines.delay
 
 /**
@@ -86,11 +86,7 @@ fun InviteBottomSheet(vm: AppVM) {
                         )
                         Button(
                             onClick = {
-                                context.startActivity(
-                                    Intent(context, Chat::class.java)
-                                        .putExtra("user", s.ipk)
-                                        .putExtra("name", s.name)
-                                )
+                                vm.navigator.push(Routes.Chat(s.ipk.toHex(), s.name))
                                 vm.dismissInvite()
                             },
                             Modifier.fillMaxWidth(),

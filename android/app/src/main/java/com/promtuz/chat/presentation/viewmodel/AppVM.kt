@@ -12,6 +12,7 @@ import com.promtuz.chat.domain.model.LastMessage
 import com.promtuz.chat.navigation.AppNavigator
 import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.state.InviteSheet
+import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.core.CoreBridge
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -91,7 +92,7 @@ class AppVM(
 
     fun openChat(identityKey: Chat) {
         activeChatUser = identityKey
-        navigator.push(Routes.Chat)
+        navigator.push(Routes.Chat(identityKey.identity.toHex(), identityKey.nickname))
     }
 
     /** A `/pair` deeplink arrived: decode it and raise the confirmation sheet. */
