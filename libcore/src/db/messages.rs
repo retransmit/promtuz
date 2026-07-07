@@ -27,7 +27,7 @@ pub struct MessageRow {
     /// Sender-minted monotonic id (16 bytes); NULL on legacy rows.
     /// Cross-device dedup + convergence key — the ULID `id` stays the
     /// row PK / ordering key.
-    pub dispatch_id: Vec<u8>,
+    pub dispatch_id: Option<Vec<u8>>,
 }
 
 from_row!(MessageRow { id, peer_ipk, content, outgoing, timestamp, status, dispatch_id });

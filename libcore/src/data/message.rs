@@ -56,7 +56,7 @@ impl Message {
                 outgoing: true,
                 timestamp,
                 status: STATUS_PENDING,
-                dispatch_id: dispatch_id.to_vec(),
+                dispatch_id: Some(dispatch_id.to_vec()),
             },
         })
     }
@@ -87,7 +87,7 @@ impl Message {
                 outgoing: false,
                 timestamp,
                 status: STATUS_SENT,
-                dispatch_id: dispatch_id.to_vec(),
+                dispatch_id: Some(dispatch_id.to_vec()),
             },
         }))
     }
@@ -201,5 +201,22 @@ mod tests {
 
         assert_eq!(first, 1, "first insert must land");
         assert_eq!(dup, 0, "same (peer, dispatch_id) must not double-insert");
+    }
+
+    /// A row written before the `dispatch_id` column existed has NULL there.
+    /// `MessageRow::from_row` must decode NULL → `None`, not error — otherwise
+    /// the `filter_map(Result::ok)` readers silently drop every legacy row.
+    #[test]
+    fn legacy_null_dispatch_id_row_reads_back() {
+        let conn = crate::db::messages::open_in_memory();
+        conn.execute(
+            "INSERT INTO messages (id, peer_ipk, content, outgoing, timestamp, status) \
+             VALUES (?1, ?2, ?3, 0, ?4, ?5)",
+            (Ulid::new().to_string(), [9u8; 32].as_slice(), "legacy", 42u64, STATUS_SENT),
+        )
+        .unwrap();
+
+        let row = conn.query_row("SELECT * FROM messages", [], MessageRow::from_row).unwrap();
+        assert_eq!(row.dispatch_id, None, "NULL dispatch_id must decode to None");
     }
 }
