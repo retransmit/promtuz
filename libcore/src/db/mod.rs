@@ -6,6 +6,7 @@ pub mod identity;
 pub mod messages;
 pub mod mls;
 pub mod network;
+pub mod outbox;
 pub mod peers;
 pub mod utils;
 
