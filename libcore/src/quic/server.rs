@@ -21,6 +21,7 @@ use common::proto::client_rel::ServerHandshakeResultP as SHSRP;
 use common::proto::dht_p2p::MAX_FETCH_QUEUE_ACK_IDS;
 use common::proto::dht_p2p::queue_fetch_ack_signing_input;
 use common::proto::dht_p2p::queue_fetch_signing_input;
+use common::proto::mls_wire::AppPayload;
 use common::proto::pack::Unpacker;
 use common::proto::pack::unpack;
 use common::quic::id::NodeId;
@@ -597,34 +598,37 @@ async fn process_deliver(
 
     match result {
         Ok(Some(crate::messaging::InboundDecoded::Application { plaintext, group_id: _ })) => {
-            // Surface as a UTF-8 message. Future structured payloads
-            // (read receipts, attachments, etc.) will arrive as their
-            // own MlsEnvelopeP sub-variants; until then any non-UTF-8
-            // application data is dropped.
-            let Ok(content) = String::from_utf8(plaintext) else {
-                warn!("MESSAGE: invalid UTF-8 from {}", hex::encode(&msg.from[..4]));
-                bail!("invalid UTF-8");
-            };
-            let timestamp = systime().as_secs();
-            match Message::save_incoming(*msg.from, &msg.id.0, &content, timestamp) {
-                Ok(Some(saved)) => {
-                    info!("MESSAGE: received from {}", hex::encode(&msg.from[..4]));
-                    MessageEv::Received {
-                        id: saved.inner.id,
-                        from: *msg.from,
-                        content,
-                        timestamp,
+            match AppPayload::deser(&plaintext) {
+                Ok(AppPayload::Text(content)) => {
+                    let timestamp = systime().as_secs();
+                    match Message::save_incoming(*msg.from, &msg.id.0, &content, timestamp) {
+                        Ok(Some(saved)) => {
+                            info!("MESSAGE: received from {}", hex::encode(&msg.from[..4]));
+                            MessageEv::Received {
+                                id: saved.inner.id,
+                                from: *msg.from,
+                                content,
+                                timestamp,
+                            }
+                            .emit();
+                        },
+                        // Relay redelivered a dispatch_id we already stored: no
+                        // re-emit, but still Ok so the caller acks and the relay GCs.
+                        Ok(None) => {
+                            debug!("MESSAGE: duplicate from {}, already stored", hex::encode(&msg.from[..4]));
+                        },
+                        Err(e) => {
+                            warn!("MESSAGE: failed to save incoming: {e}");
+                            bail!("save failed: {e}");
+                        },
                     }
-                    .emit();
                 },
-                // Relay redelivered a dispatch_id we already stored: no
-                // re-emit, but still Ok so the caller acks and the relay GCs.
-                Ok(None) => {
-                    debug!("MESSAGE: duplicate from {}, already stored", hex::encode(&msg.from[..4]));
+                Ok(AppPayload::Receipt { .. }) => {
+                    info!("MESSAGE: receipt received (handler lands in Task 10)");
                 },
                 Err(e) => {
-                    warn!("MESSAGE: failed to save incoming: {e}");
-                    bail!("save failed: {e}");
+                    warn!("MESSAGE: undecodable AppPayload from {}: {e}", hex::encode(&msg.from[..4]));
+                    bail!("bad AppPayload");
                 },
             }
         },

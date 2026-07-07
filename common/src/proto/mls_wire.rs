@@ -31,8 +31,8 @@
 //!
 //! MLS-specific transcripts mix in the dedicated [`MLS_WIRE_VERSION`]
 //! constant rather than [`crate::PROTOCOL_VERSION`] directly. The two
-//! are kept equal, but routing every signing helper here through a
-//! single MLS-owned constant means the version marker survives in the
+//! now diverge (see [`MLS_WIRE_VERSION`]); routing every signing helper
+//! here through a single MLS-owned constant means the version marker survives in the
 //! on-wire transcripts so an endpoint refuses to verify a
 //! lower-version signature even if the byte layout happens to match
 //! (mirrors the [`crate::PROTOCOL_VERSION`] discipline elsewhere).
@@ -59,14 +59,31 @@ use crate::types::bytes::Bytes;
 //===:===:===:===:==:  CONSTANTS  :==:===:===:===:===||
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
 
-/// MLS-layer protocol version field mixed into every signing transcript
-/// here.
+/// MLS-layer, peer-facing protocol version. Mixed into every MLS
+/// signing transcript here and gates the app-plaintext format
+/// ([`AppPayload`]).
 ///
-/// Held equal to [`crate::PROTOCOL_VERSION`] (= 4). Version 4 makes the
-/// Tier-1 wrapper variants (`PublishKeyPackage`, `FetchKeyPackage`,
-/// `PublishWelcome`, `FetchWelcomes`, `AckWelcomes`) wire-incompatible
-/// with any earlier endpoint.
-pub const MLS_WIRE_VERSION: u16 = 4;
+/// Diverges from [`crate::PROTOCOL_VERSION`] (= 4): that constant
+/// governs the relay-auth handshake and is intentionally left at 4
+/// (bumping it is a wider flag day). This one is peer-to-peer only, so
+/// bumping it to 5 for the typed `AppPayload` seam is a client-only
+/// coordinated redeploy.
+pub const MLS_WIRE_VERSION: u16 = 5;
+
+/// The decrypted MLS application plaintext. Was raw UTF-8; now a tagged
+/// union so receipts/attachments ride the same encrypted channel. The
+/// relay never sees this (it's inside the MLS ciphertext).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum AppPayload {
+    Text(String),
+    Receipt { kind: ReceiptKind, upto: [u8; 16] },
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ReceiptKind {
+    Delivered,
+    Read,
+}
 
 /// Inner envelope-version byte stamped into every
 /// [`MlsApplicationEnvelopeP`] / [`WelcomeEnvelopeP`]. Distinct from
@@ -1792,21 +1809,12 @@ mod tests {
         assert_ne!(a, c, "different timestamp must produce different transcripts");
     }
 
-    /// **PROTOCOL_VERSION bump regression.** The global
-    /// `crate::PROTOCOL_VERSION` and the MLS-layer `MLS_WIRE_VERSION`
-    /// must stay converged. If a future commit accidentally diverges
-    /// them (e.g. bumps one but not the other), every signing transcript
-    /// ever exchanged between two MLS-aware endpoints would fail to
-    /// verify; this test catches that regression at compile + unit-test
-    /// time.
     #[test]
-    fn protocol_version_and_mls_wire_version_converge() {
-        assert_eq!(
-            crate::PROTOCOL_VERSION,
-            MLS_WIRE_VERSION,
-            "the two version fields must converge so signing-input \
-             helpers parameterised on `MLS_WIRE_VERSION` produce the \
-             same transcripts a global-bumped verifier would expect"
-        );
+    fn app_payload_round_trips() {
+        use crate::proto::pack::{Packer, Unpacker};
+        let t = AppPayload::Text("hello".into());
+        assert_eq!(AppPayload::deser(&t.ser().unwrap()).unwrap(), t);
+        let r = AppPayload::Receipt { kind: ReceiptKind::Delivered, upto: [9u8; 16] };
+        assert_eq!(AppPayload::deser(&r.ser().unwrap()).unwrap(), r);
     }
 }

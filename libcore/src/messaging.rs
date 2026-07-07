@@ -611,13 +611,16 @@ pub async fn send_message_inner<C: DhtClient>(
     let leaf_kp = leaf_signer_for_group(ctx.provider, &group, &our_ipk)?;
 
     // 5. Build the application envelope.
+    let payload_bytes = common::proto::mls_wire::AppPayload::Text(content.clone())
+        .ser()
+        .map_err(|e| anyhow!("encode AppPayload: {e}"))?;
     let payload = build_application_envelope_bytes(
         ctx,
         &mut group,
         &leaf_kp,
         &our_ipk,
         &to,
-        content.as_bytes(),
+        &payload_bytes,
         &ipk_signer,
     )
     .map_err(|e| {
