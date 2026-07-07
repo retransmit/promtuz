@@ -106,6 +106,25 @@ impl Message {
             .ok();
     }
 
+    /// Set an outgoing message's status by its `dispatch_id`, returning the
+    /// updated row. The async reconciler holds the `dispatch_id` (the outbox
+    /// key), not the local ULID, so this is how it reflects a
+    /// delivered/failed outcome back onto the message the UI reads.
+    pub fn mark_by_dispatch_id(dispatch_id: &[u8], status: u8) -> Option<MessageRow> {
+        let conn = MESSAGES_DB.lock();
+        conn.execute(
+            "UPDATE messages SET status = ?1 WHERE dispatch_id = ?2",
+            (status, dispatch_id),
+        )
+        .ok()?;
+        conn.query_row(
+            "SELECT * FROM messages WHERE dispatch_id = ?1",
+            [dispatch_id],
+            MessageRow::from_row,
+        )
+        .ok()
+    }
+
     /// Get messages for a conversation, paginated.
     /// Returns messages in ascending order (oldest first).
     /// `before_id` if non-empty, fetches messages before that ULID.

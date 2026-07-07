@@ -4,9 +4,14 @@ use common::proto::mls_wire::KeyPackageRecord;
 use common::proto::pack::Unpacker;
 use rusqlite::params;
 
+use crate::data::message::Message;
+use crate::data::message::STATUS_FAILED;
+use crate::data::message::STATUS_SENT;
 use crate::db::outbox::OUTBOX_DB;
 use crate::db::outbox::OpType;
 use crate::db::outbox::OutboxRow;
+use crate::events::Emittable;
+use crate::events::messaging::MessageEv;
 use crate::quic::dht_client::DhtClient;
 use crate::quic::dht_client::KpOutcomeFilter;
 
@@ -180,10 +185,48 @@ pub async fn reconcile() {
 
         let age = now.saturating_sub(row.created_at);
         match classify(op, outcome, row.attempts, age) {
-            Next::Retire => retire(&row.id),
-            Next::Dead => mark_dead(&row.id),
+            Next::Retire => {
+                retire(&row.id);
+                // Mirror the live send path onto the message the UI reads: a
+                // row retired on the async path must leave its message `sent`
+                // (Durable/Queued) or `failed` (Terminal), else an
+                // offline-then-delivered message stays pending forever and a
+                // rejected one fails silently. KpPublish has no message row.
+                if matches!(op, OpType::Message) {
+                    if matches!(outcome, LastOutcome::Terminal) {
+                        mark_message_failed(&row.id, "relay rejected the message");
+                    } else {
+                        mark_message_sent(&row.id);
+                    }
+                }
+            },
+            Next::Dead => {
+                mark_dead(&row.id);
+                if matches!(op, OpType::Message) {
+                    mark_message_failed(&row.id, "undeliverable (offline past retention)");
+                }
+            },
             Next::KeepRetrying => record_attempt(&row.id, now + next_backoff(row.attempts)),
         }
+    }
+}
+
+/// Flip the message keyed by `dispatch_id` (the outbox row id) to `sent` and
+/// emit the UI event, mirroring the live send path's Durable arm. No-op if no
+/// such message (e.g. a non-Message op).
+fn mark_message_sent(dispatch_id: &[u8]) {
+    if let Some(m) = Message::mark_by_dispatch_id(dispatch_id, STATUS_SENT) {
+        MessageEv::Sent { id: m.id, to: m.peer_ipk, content: m.content, timestamp: m.timestamp }
+            .emit();
+    }
+}
+
+/// Flip the message keyed by `dispatch_id` to `failed` and emit `Failed`,
+/// mirroring the live send path's Terminal arm so a rejected/undeliverable
+/// message doesn't fail silently.
+fn mark_message_failed(dispatch_id: &[u8], reason: &str) {
+    if let Some(m) = Message::mark_by_dispatch_id(dispatch_id, STATUS_FAILED) {
+        MessageEv::Failed { id: m.id, to: m.peer_ipk, reason: reason.into() }.emit();
     }
 }
 
