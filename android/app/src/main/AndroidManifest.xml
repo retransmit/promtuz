@@ -86,10 +86,6 @@
             android:name=".ui.activities.ManageSpace"
             android:exported="false"
             android:label="@string/title_activity_manage_space" />
-        <activity
-            android:name=".ui.activities.QrScanner"
-            android:configChanges="orientation|screenSize|screenLayout"
-            android:exported="false" />
     </application>
 
 </manifest>

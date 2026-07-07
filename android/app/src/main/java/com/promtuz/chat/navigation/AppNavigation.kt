@@ -55,7 +55,9 @@ fun AppNavigation(
                 LaunchedEffect(identity) { chatVM.init(identity) }
                 ChatScreen(Chat(identity = identity, nickname = key.name, lastMessage = LastMessage(null, 0)), chatVM)
             }
-            entry<Routes.ShareIdentity> { ShareIdentityScreen(koinViewModel()) }
+            entry<Routes.ShareIdentity> {
+                ShareIdentityScreen(koinViewModel(), onScanned = { appViewModel.showInvite(it) })
+            }
             entry<Routes.Contacts> { ContactsScreen() }
             entry<Routes.Settings> { SettingsScreen(appViewModel) }
             entry<Routes.About> { AboutScreen() }

@@ -1,7 +1,6 @@
 package com.promtuz.chat.ui.screens
 
 import android.content.Intent
-import androidx.camera.core.ExperimentalGetImage
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,6 +19,10 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -28,16 +31,17 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.ShareIdentityVM
-import com.promtuz.chat.ui.activities.QrScanner
 import com.promtuz.chat.ui.components.BackTopBar
 import com.promtuz.chat.ui.components.IdentityQrCode
 import com.promtuz.chat.utils.InviteLink
 
 @Composable
 fun ShareIdentityScreen(
-    viewModel: ShareIdentityVM
+    viewModel: ShareIdentityVM,
+    onScanned: (ByteArray) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
+    var showScanner by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = { BackTopBar("Share Identity") }
@@ -66,10 +70,17 @@ fun ShareIdentityScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     ShareLinkButton(viewModel.qrData.collectAsState().value)
-                    ScanQRButton()
+                    ScanQRButton(onClick = { showScanner = true })
                 }
             }
         }
+    }
+
+    if (showScanner) {
+        QrScannerSheet(
+            onResult = { showScanner = false; onScanned(it) },
+            onDismiss = { showScanner = false },
+        )
     }
 }
 
@@ -112,15 +123,10 @@ private fun ColumnScope.ShareLinkButton(inviteBytes: ByteArray?, modifier: Modif
 }
 
 
-@androidx.annotation.OptIn(ExperimentalGetImage::class)
 @Composable
-private fun ColumnScope.ScanQRButton(modifier: Modifier = Modifier) {
-    val context = LocalContext.current
-
+private fun ColumnScope.ScanQRButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
     Button(
-        onClick = {
-            context.startActivity(Intent(context, QrScanner::class.java))
-        },
+        onClick = onClick,
         modifier = modifier
             .fillMaxWidth(0.8f)
             .align(Alignment.CenterHorizontally),

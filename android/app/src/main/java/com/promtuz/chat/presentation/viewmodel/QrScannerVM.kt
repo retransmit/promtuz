@@ -1,12 +1,21 @@
+@file:androidx.annotation.OptIn(ExperimentalGetImage::class)
+
 package com.promtuz.chat.presentation.viewmodel
 
 import android.app.Application
 import android.content.Context
+import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.google.mlkit.vision.barcode.BarcodeScanner
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
+import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.common.InputImage
 import com.promtuz.chat.presentation.state.PermissionState
 import com.promtuz.core.CoreBridge
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,12 +27,12 @@ import uniffi.core.CoreException
 class QrScannerVM(
     private val application: Application
 ) : ViewModel() {
-    private val context: Context get() = application.applicationContext
     private val log = Timber.tag("QrScannerVM")
 
-    var imageAnalysis =
-        ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .build()
+    var imageAnalysis = newAnalysis()
+        private set
+
+    private var barcodeScanner: BarcodeScanner? = null
 
     private val _isCameraAvailable = MutableStateFlow(false)
     val isCameraAvailable = _isCameraAvailable.asStateFlow()
@@ -37,29 +46,66 @@ class QrScannerVM(
     private val _scanError = MutableStateFlow<String?>(null)
     val scanError = _scanError.asStateFlow()
 
-    /** Validated invite bytes to hand to the shared confirm sheet; set once. */
+    /** Validated invite bytes to hand back to the opener; set once. */
     private val _scanned = MutableStateFlow<ByteArray?>(null)
     val scanned = _scanned.asStateFlow()
 
-    // Guards against the analyzer re-firing while a validation is in flight.
-    // The ML Kit analyzer delivers frames serially, so a plain flag suffices.
+    // ML Kit delivers frames serially, so a plain flag guards against re-firing mid-validation.
     @Volatile
     private var processing = false
+
+    private fun newAnalysis() =
+        ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
+
+    /** Spin up the camera provider + QR analyzer. Idempotent while a session is live. */
+    fun initScanner(context: Context) {
+        if (_cameraProviderState.value != null) return
+        barcodeScanner = BarcodeScanning.getClient(
+            BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
+        )
+        val future = ProcessCameraProvider.getInstance(context)
+        future.addListener({
+            _cameraProviderState.value = future.get()
+            imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(context)) { analyze(it) }
+        }, ContextCompat.getMainExecutor(context))
+    }
+
+    private fun analyze(imageProxy: ImageProxy) {
+        val scanner = barcodeScanner
+        val media = imageProxy.image
+        if (scanner == null || media == null) {
+            imageProxy.close()
+            return
+        }
+        // rotationDegrees keeps decoding correct across orientations (the old activity hardcoded 90).
+        val input = InputImage.fromMediaImage(media, imageProxy.imageInfo.rotationDegrees)
+        scanner.process(input)
+            .addOnSuccessListener { handleScannedBarcodes(it) }
+            .addOnFailureListener { log.e(it, "scan failed") }
+            .addOnCompleteListener { imageProxy.close() }
+    }
+
+    /** Tear down camera + state so the next open starts a clean session (VM outlives the sheet). */
+    fun reset() {
+        _cameraProviderState.value?.unbindAll()
+        imageAnalysis.clearAnalyzer()
+        barcodeScanner?.close()
+        barcodeScanner = null
+        imageAnalysis = newAnalysis()
+        _cameraProviderState.value = null
+        _isCameraAvailable.value = false
+        _cameraPermissionState.value = PermissionState.NotRequested
+        _scanError.value = null
+        _scanned.value = null
+        processing = false
+    }
 
     fun clearScanError() {
         _scanError.value = null
     }
 
-    fun setCameraProvider(provider: ProcessCameraProvider) {
-        _cameraProviderState.value = provider
-    }
-
     fun handleCameraPermissionRequest(isGranted: Boolean) {
-        if (isGranted) {
-            _cameraPermissionState.value = PermissionState.Granted
-        } else {
-            _cameraPermissionState.value = PermissionState.Denied
-        }
+        _cameraPermissionState.value = if (isGranted) PermissionState.Granted else PermissionState.Denied
     }
 
     fun makeCameraAvailable() {
@@ -67,10 +113,8 @@ class QrScannerVM(
     }
 
     fun handleScannedBarcodes(barcodes: List<Barcode>) {
-        // One capture per scan session: ignore re-detections of the same QR
-        // held in frame (analyzer ticks ~2x/s). We only VALIDATE here (decode
-        // as a promtuz invite); the confirm-and-pair happens in the shared
-        // invite sheet, exactly like an opened link. A non-invite QR re-arms.
+        // One capture per session: validate as a promtuz invite here; the confirm-and-pair happens
+        // in the shared invite sheet. A non-invite QR re-arms via processing/_scanned guards.
         if (processing || _scanned.value != null) return
         val bytes = barcodes.firstNotNullOfOrNull { it.rawBytes } ?: return
         processing = true
@@ -78,7 +122,7 @@ class QrScannerVM(
             try {
                 CoreBridge.previewInvite(bytes) // throws if it isn't an invite
                 imageAnalysis.clearAnalyzer()
-                _scanned.value = bytes          // screen hands this to the sheet
+                _scanned.value = bytes
             } catch (e: CoreException) {
                 log.e(e, "not a promtuz invite")
                 _scanError.value = "Not a Promtuz invite"
