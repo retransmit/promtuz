@@ -32,8 +32,10 @@ use ed25519_dalek::SigningKey;
 
 use super::keypackage::KeyPackageStash;
 use super::provider::PromtuzMlsProvider;
+use crate::db::outbox::OpType;
 use crate::quic::dht_client::DhtClient;
 use crate::quic::dht_client::KpOutcomeFilter;
+use common::proto::pack::Packer;
 
 /// Outcome of one scheduler tick. Surfaced to the caller (a UI metric
 /// or log line) without exposing the internal fan-out detail.
@@ -81,10 +83,18 @@ pub async fn run_once<C: DhtClient>(
         if recs.is_empty() {
             return Ok(SchedulerOutcome::NoOp);
         }
-        dht.publish_keypackages(&recs, KpOutcomeFilter::Default)
-            .await
-            .map_err(|e| anyhow!("publish_keypackages: {e}"))?;
-        return Ok(SchedulerOutcome::Refilled { count: recs.len() });
+        let count = recs.len();
+        let payload = recs.ser().map_err(|e| anyhow!("ser kp records: {e}"))?;
+        let kp_id = blake3::hash(&payload).as_bytes()[..16].to_vec(); // deterministic per-batch dedup key
+        crate::delivery::enqueue(&kp_id, OpType::KpPublish, None, &payload);
+        // Best-effort immediate publish; on ANY error leave the op in the outbox
+        // for the reconciler to retry on reconnect. NEVER propagate — a failed
+        // publish used to be lost forever because should_refill then went false.
+        match dht.publish_keypackages(&recs, KpOutcomeFilter::Default).await {
+            Ok(()) => crate::delivery::retire(&kp_id),
+            Err(e) => log::warn!("KP publish failed ({e}); left in outbox, reconciler will retry"),
+        }
+        return Ok(SchedulerOutcome::Refilled { count });
     }
 
     if stash.should_rotate(now_ms) {

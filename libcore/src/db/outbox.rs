@@ -16,6 +16,17 @@ pub enum OpType {
     KpPublish = 2,
 }
 
+impl OpType {
+    pub fn from_u8(v: u8) -> Option<OpType> {
+        match v {
+            0 => Some(OpType::Message),
+            1 => Some(OpType::Welcome),
+            2 => Some(OpType::KpPublish),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OutboxRow {
     pub id: Vec<u8>,

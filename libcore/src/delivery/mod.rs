@@ -1,11 +1,14 @@
 use common::proto::client_rel::DispatchAckP;
 use common::proto::client_rel::SRelayPacket;
+use common::proto::mls_wire::KeyPackageRecord;
 use common::proto::pack::Unpacker;
 use rusqlite::params;
 
 use crate::db::outbox::OUTBOX_DB;
 use crate::db::outbox::OpType;
 use crate::db::outbox::OutboxRow;
+use crate::quic::dht_client::DhtClient;
+use crate::quic::dht_client::KpOutcomeFilter;
 
 /// Durability verdict for a dispatch attempt. `outcome_for_ack` is the single
 /// ack→durability mapping shared by the live send path (Task 6) and the
@@ -130,33 +133,53 @@ fn next_backoff(attempts: u32) -> u64 {
 /// simply never opened.
 pub async fn reconcile() {
     let now = crate::utils::systime().as_millis() as u64;
-    let conn = {
+    let (conn, dht_client) = {
         let g = crate::state::RELAY.read();
-        g.as_ref().and_then(|r| r.connection.clone())
+        (
+            g.as_ref().and_then(|r| r.connection.clone()),
+            g.as_ref().and_then(|r| r.dht_client.clone()),
+        )
     };
     let Some(conn) = conn else { return };
 
     for row in due(now) {
-        // Re-send the STORED framed bytes verbatim — already a `.pack()`-framed
-        // CRelayPacket from Task 6. Any open/write/finish/read error, or a
-        // non-DispatchAck reply, reads as Silence (transport drop / no answer).
-        let outcome = match conn.open_bi().await {
-            Ok((mut send, mut recv)) => {
-                if send.write_all(&row.payload).await.is_ok()
-                    && send.finish().is_ok()
-                    && let Ok(SRelayPacket::DispatchAck(ack)) = SRelayPacket::unpack(&mut recv).await
-                {
-                    outcome_for_ack(&ack)
-                } else {
-                    LastOutcome::Silence
+        let op = OpType::from_u8(row.op_type).unwrap_or(OpType::Message);
+        let outcome = match op {
+            OpType::KpPublish => {
+                let Some(dht) = dht_client.clone() else { continue }; // no dht client → retry next reconnect
+                let Ok(recs) = Vec::<KeyPackageRecord>::deser(&row.payload) else {
+                    retire(&row.id); // poison payload can never publish — drop it
+                    continue;
+                };
+                match dht.publish_keypackages(&recs, KpOutcomeFilter::Default).await {
+                    Ok(()) => LastOutcome::Durable,
+                    // Relay answered but the DHT isn't ready — Reachable keeps
+                    // retrying forever, never dies. This is THE KP-bug fix.
+                    Err(_) => LastOutcome::Reachable,
                 }
             },
-            Err(_) => LastOutcome::Silence,
+            // Message/Welcome ride the framed-Dispatch stream. Re-send the STORED
+            // framed bytes verbatim (already `.pack()`-framed from Task 6). Any
+            // open/write/finish/read error, or a non-DispatchAck reply, reads as
+            // Silence (transport drop / no answer).
+            _ => match conn.open_bi().await {
+                Ok((mut send, mut recv)) => {
+                    if send.write_all(&row.payload).await.is_ok()
+                        && send.finish().is_ok()
+                        && let Ok(SRelayPacket::DispatchAck(ack)) =
+                            SRelayPacket::unpack(&mut recv).await
+                    {
+                        outcome_for_ack(&ack)
+                    } else {
+                        LastOutcome::Silence
+                    }
+                },
+                Err(_) => LastOutcome::Silence,
+            },
         };
 
         let age = now.saturating_sub(row.created_at);
-        // op ignored by classify in Part 1; placeholder until Task 8.
-        match classify(OpType::Message, outcome, row.attempts, age) {
+        match classify(op, outcome, row.attempts, age) {
             Next::Retire => retire(&row.id),
             Next::Dead => mark_dead(&row.id),
             Next::KeepRetrying => record_attempt(&row.id, now + next_backoff(row.attempts)),
@@ -230,34 +253,50 @@ mod tests {
     }
 
     #[test]
-    fn outbox_enqueue_due_retire() {
-        // db() calls process::exit(1) if PROMTUZ_DATA_DIR is unset; point it
-        // at a scratch dir and wipe any prior run's db (incl. WAL siblings)
-        // so `due` counts are deterministic.
+    fn kp_publish_stays_pending_when_dht_unavailable() {
         let dir = std::env::temp_dir().join("promtuz-outbox-test");
         std::fs::create_dir_all(&dir).unwrap();
-        for f in ["outbox.db", "outbox.db-wal", "outbox.db-shm"] {
-            let _ = std::fs::remove_file(dir.join(f));
-        }
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+        let id = b"kp-stays-pending"; // unique id → robust to the other outbox test's rows
+        retire(id); // clean slate for this id
+        enqueue(id, OpType::KpPublish, None, b"records");
+        record_attempt(id, 0); // a failed publish attempt — still due-now
+        assert_eq!(
+            due(u64::MAX).iter().filter(|r| r.id == id).count(),
+            1,
+            "KpPublish must stay pending after a failed attempt"
+        );
+        retire(id); // cleanup
+    }
+
+    #[test]
+    fn outbox_enqueue_due_retire() {
+        // db() calls process::exit(1) if PROMTUZ_DATA_DIR is unset; point it at a
+        // scratch dir. OUTBOX_DB is a process-global shared connection, so other
+        // tests write to it concurrently — filter every assertion by this id.
+        let dir = std::env::temp_dir().join("promtuz-outbox-test");
+        std::fs::create_dir_all(&dir).unwrap();
         unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
 
         let id = [1u8; 16];
+        let mine = |now: u64| due(now).into_iter().filter(|r| r.id == id).count();
+        retire(&id); // clean slate for this id
         enqueue(&id, OpType::Message, Some([2u8; 32]), b"payload");
-        assert_eq!(due(u64::MAX).len(), 1);
+        assert_eq!(mine(u64::MAX), 1);
 
         // Re-enqueue of the same id is a silent no-op — still one row.
         enqueue(&id, OpType::Message, Some([2u8; 32]), b"payload");
-        assert_eq!(due(u64::MAX).len(), 1);
+        assert_eq!(mine(u64::MAX), 1);
 
         // Future backoff excludes the row from due-now.
         record_attempt(&id, u64::MAX);
-        assert!(due(0).is_empty());
+        assert_eq!(mine(0), 0);
 
         // Dead rows never surface.
         mark_dead(&id);
-        assert!(due(u64::MAX).is_empty());
+        assert_eq!(mine(u64::MAX), 0);
 
         retire(&id);
-        assert!(due(u64::MAX).is_empty());
+        assert_eq!(mine(u64::MAX), 0);
     }
 }
