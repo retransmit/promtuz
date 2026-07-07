@@ -358,6 +358,11 @@ impl Relay {
             warn!("relay({}) drain-auth send failed: {err}", self.id);
         }
 
+        // Re-dispatch durably-queued outbox rows (enqueued while offline, or
+        // whose ack was lost) now that a live relay connection exists.
+        // Spawned so it never blocks the welcome-poll / drain / accept loop.
+        tokio::spawn(async { crate::delivery::reconcile().await });
+
         //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
 
         // Re-use the production peer/1 dialer that `connect()` built

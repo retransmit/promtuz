@@ -1,4 +1,6 @@
 use common::proto::client_rel::DispatchAckP;
+use common::proto::client_rel::SRelayPacket;
+use common::proto::pack::Unpacker;
 use rusqlite::params;
 
 use crate::db::outbox::OUTBOX_DB;
@@ -85,6 +87,83 @@ pub fn mark_dead(id: &[u8]) {
     OUTBOX_DB.lock().execute("UPDATE outbox SET state = 1 WHERE id = ?1", params![id]).ok();
 }
 
+// ponytail: calibration knobs — retry cadence and death thresholds, tuned by
+// feel not measurement. Adjust when real relay behaviour is observed.
+const BASE_BACKOFF_MS: u64 = 1_000; // first retry after ~1s
+const CAP_BACKOFF_MS: u64 = 300_000; // backoff capped at 5 min
+const QUEUED_ESCALATION_MAX: u32 = 5; // Queued IS delivery in single-relay/dev; retire after N reconnects
+const DEAD_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1_000; // only TOTAL silence past 7d dies
+
+/// What a pending row does after this attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Next {
+    KeepRetrying,
+    Retire,
+    Dead,
+}
+
+/// The terminal-decision policy — the whole reliability contract. Never fails a
+/// message prematurely; never lets a persistently-`Reachable` op die (the
+/// original KP-publish bug).
+pub fn classify(_op: OpType, last: LastOutcome, attempts: u32, age_ms: u64) -> Next {
+    // _op is reserved: Task 8 gives KpPublish its own Durable=Stored-quorum policy.
+    match last {
+        LastOutcome::Durable | LastOutcome::Terminal => Next::Retire,
+        LastOutcome::Queued =>
+            if attempts >= QUEUED_ESCALATION_MAX { Next::Retire } else { Next::KeepRetrying },
+        LastOutcome::Reachable => Next::KeepRetrying, // a NEGATIVE response still proves reachability — never kill
+        LastOutcome::Silence =>
+            if age_ms > DEAD_TTL_MS { Next::Dead } else { Next::KeepRetrying },
+    }
+}
+
+// Exponential backoff. A plain `BASE << attempts` overflows u64 for large
+// `attempts`; cap the shift AND the value.
+fn next_backoff(attempts: u32) -> u64 {
+    let shift = attempts.min(32); // 1000<<32 fits u64; caps well above CAP anyway
+    (BASE_BACKOFF_MS << shift).min(CAP_BACKOFF_MS)
+}
+
+/// Re-dispatch every durably-queued `due` row over the live relay connection.
+/// Called once per reconnect from `quic::server::handle`. No connection →
+/// return (next reconnect retries); never marks a row Silence for a stream we
+/// simply never opened.
+pub async fn reconcile() {
+    let now = crate::utils::systime().as_millis() as u64;
+    let conn = {
+        let g = crate::state::RELAY.read();
+        g.as_ref().and_then(|r| r.connection.clone())
+    };
+    let Some(conn) = conn else { return };
+
+    for row in due(now) {
+        // Re-send the STORED framed bytes verbatim — already a `.pack()`-framed
+        // CRelayPacket from Task 6. Any open/write/finish/read error, or a
+        // non-DispatchAck reply, reads as Silence (transport drop / no answer).
+        let outcome = match conn.open_bi().await {
+            Ok((mut send, mut recv)) => {
+                if send.write_all(&row.payload).await.is_ok()
+                    && send.finish().is_ok()
+                    && let Ok(SRelayPacket::DispatchAck(ack)) = SRelayPacket::unpack(&mut recv).await
+                {
+                    outcome_for_ack(&ack)
+                } else {
+                    LastOutcome::Silence
+                }
+            },
+            Err(_) => LastOutcome::Silence,
+        };
+
+        let age = now.saturating_sub(row.created_at);
+        // op ignored by classify in Part 1; placeholder until Task 8.
+        match classify(OpType::Message, outcome, row.attempts, age) {
+            Next::Retire => retire(&row.id),
+            Next::Dead => mark_dead(&row.id),
+            Next::KeepRetrying => record_attempt(&row.id, now + next_backoff(row.attempts)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +178,55 @@ mod tests {
         assert!(matches!(outcome_for_ack(&DispatchAckP::Error { reason: String::new() }), Reachable));
         assert!(matches!(outcome_for_ack(&DispatchAckP::NotFound), Terminal));
         assert!(matches!(outcome_for_ack(&DispatchAckP::InvalidSig), Terminal));
+    }
+
+    #[test]
+    fn reachable_never_dies_even_when_ancient() {
+        // THE KP-bug guard: a DhtUnavailable kp_publish, however old or
+        // however many attempts, keeps retrying — never Dead, never Retire.
+        assert!(matches!(
+            classify(OpType::KpPublish, LastOutcome::Reachable, 9999, u64::MAX),
+            Next::KeepRetrying
+        ));
+    }
+
+    #[test]
+    fn only_silence_past_ttl_dies() {
+        assert!(matches!(
+            classify(OpType::Message, LastOutcome::Silence, 0, DEAD_TTL_MS + 1),
+            Next::Dead
+        ));
+        assert!(matches!(
+            classify(OpType::Message, LastOutcome::Silence, 0, 0),
+            Next::KeepRetrying
+        ));
+    }
+
+    #[test]
+    fn queued_retires_after_bounded_escalation() {
+        assert!(matches!(
+            classify(OpType::Message, LastOutcome::Queued, QUEUED_ESCALATION_MAX, 0),
+            Next::Retire
+        ));
+        assert!(matches!(
+            classify(OpType::Message, LastOutcome::Queued, 0, 0),
+            Next::KeepRetrying
+        ));
+    }
+
+    #[test]
+    fn durable_retires() {
+        assert!(matches!(classify(OpType::Message, LastOutcome::Durable, 0, 0), Next::Retire));
+    }
+
+    #[test]
+    fn next_backoff_is_monotonic_and_capped() {
+        assert_eq!(next_backoff(0), BASE_BACKOFF_MS);
+        // Large attempts saturate to the cap with no panic/overflow.
+        assert_eq!(next_backoff(100), CAP_BACKOFF_MS);
+        for a in 0..64 {
+            assert!(next_backoff(a) <= CAP_BACKOFF_MS);
+        }
     }
 
     #[test]

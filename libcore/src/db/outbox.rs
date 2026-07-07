@@ -24,11 +24,12 @@ pub struct OutboxRow {
     // errors decoding a NULL blob into a non-Option `Vec<u8>`.
     pub target_ipk: Option<Vec<u8>>,
     pub payload: Vec<u8>,
+    pub created_at: u64,
     pub attempts: u32,
     pub next_attempt: u64,
 }
 
-from_row!(OutboxRow { id, op_type, target_ipk, payload, attempts, next_attempt });
+from_row!(OutboxRow { id, op_type, target_ipk, payload, created_at, attempts, next_attempt });
 
 const MIGRATION_ARRAY: &[M] = &[M::up(
     r#"--sql
