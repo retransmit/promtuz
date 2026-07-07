@@ -626,7 +626,14 @@ pub async fn send_message_inner<C: DhtClient>(
     })?;
 
     // 6. Outer DispatchP, signed under the sender's IPK.
-    let id: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+    // Reuse the persisted dispatch_id so a retry re-sends the same id and the recipient dedups it.
+    let id: [u8; 16] = msg
+        .inner
+        .dispatch_id
+        .as_deref()
+        .expect("save_outgoing always mints a dispatch_id")
+        .try_into()
+        .expect("dispatch_id is 16 bytes");
     let sig_message = dispatch_sig_message(&to, &our_ipk, &id, &payload);
     let sig = IdentitySigner::sign(&sig_message)?.to_bytes();
     let fwd = DispatchP {
