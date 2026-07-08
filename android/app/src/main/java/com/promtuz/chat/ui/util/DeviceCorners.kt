@@ -1,6 +1,5 @@
 package com.promtuz.chat.ui.util
 
-import android.os.Build
 import android.view.RoundedCorner
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -10,16 +9,15 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 /**
- * The physical top-left screen corner radius, so a scaled-down card matches the device's own
- * curvature (what the predictive-back card wants). Falls back to [fallback] pre-S or when the
- * window hasn't reported its insets yet.
+ * The physical top-left screen corner radius — so a card can match the device's own curvature.
+ * Returns [fallback] (0 = square) when the screen has flat corners or hasn't reported insets yet;
+ * a flat-corner device should read as 0 at rest, and get rounded only mid-gesture.
  */
 @Composable
-fun deviceCornerRadius(fallback: Dp = 20.dp): Dp {
+fun deviceCornerRadius(fallback: Dp = 0.dp): Dp {
     val view = LocalView.current
     val density = LocalDensity.current
     return remember(view) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return@remember fallback
         val radiusPx = view.rootWindowInsets
             ?.getRoundedCorner(RoundedCorner.POSITION_TOP_LEFT)
             ?.radius
