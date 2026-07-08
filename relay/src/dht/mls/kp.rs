@@ -541,7 +541,18 @@ pub(crate) fn handle_keypackage_publish(
         }
     }
 
-    // 5. Insert.
+    // 5. Replace: Publish carries the client's full snapshot, so evict any
+    //    stored kp_ref absent from it (a rotated-away orphan). Refill stays
+    //    additive.
+    let incoming: std::collections::HashSet<&[u8]> =
+        req.records.iter().map(|r| r.kp_ref.0.as_slice()).collect();
+    for (key, rec) in iterate_stash(dht, &req.ipk.0) {
+        if !incoming.contains(rec.kp_ref.0.as_slice()) {
+            let _ = dht.store.keypackage.remove(key);
+        }
+    }
+
+    // 6. Insert.
     for rec in &req.records {
         match insert_record(dht, rec) {
             Ok(()) => {}
@@ -1182,12 +1193,9 @@ mod tests {
         );
     }
 
-    /// Anti-pinning rotation: clients periodically rotate their stash
-    /// even with no consumption. A Publish for a fresh batch with new
-    /// `kp_ref`s does *not* lose the old records — they remain
-    /// consumable until natural expiry. This test pins that property.
+    /// Publish replaces: a fresh batch evicts the old records.
     #[test]
-    fn fresh_publish_does_not_evict_old_records() {
+    fn fresh_publish_replaces_old_records() {
         let owner = fresh_signing_key();
         let self_id = NodeId::new([0u8; 32]);
         let dht = fresh_dht(self_id);
@@ -1201,21 +1209,20 @@ mod tests {
             KeyPackagePublishOutcome::Stored
         );
 
-        // Publish batch B (different kp_refs). Spec says: additive,
-        // not replacing. The publisher just pushed a fresh "rotation"
-        // batch; the old in-lifetime KP_a is still consumable.
+        // Publish batch B (different kp_refs) — a full snapshot. Replace
+        // semantics: A is evicted, only B survives.
         let rec_b = build_record(&owner, [0xB1; 32], b"beta".to_vec(), now + 60_000);
         assert_eq!(
             handle_keypackage_publish(&dht, build_publish(&owner, vec![rec_b.clone()], now), auth_peer, now),
             KeyPackagePublishOutcome::Stored
         );
 
-        // Both records survive in the stash.
+        // Only batch B survives; the stale A record is gone.
         let stash = iterate_stash(&dht, &rec_a.ipk.0);
-        assert_eq!(stash.len(), 2, "rotation must not evict in-lifetime old records");
+        assert_eq!(stash.len(), 1, "publish replaces: old records evicted");
         let kp_refs: std::collections::HashSet<Vec<u8>> =
             stash.iter().map(|(_, r)| r.kp_ref.0.clone()).collect();
-        assert!(kp_refs.contains(&rec_a.kp_ref.0));
+        assert!(!kp_refs.contains(&rec_a.kp_ref.0), "old record must be evicted");
         assert!(kp_refs.contains(&rec_b.kp_ref.0));
     }
 

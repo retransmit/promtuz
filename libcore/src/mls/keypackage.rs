@@ -312,11 +312,16 @@ impl KeyPackageStash {
     /// record); such clients re-mint a full stash on their next connect.
     pub fn unconsumed_records(&self, now_ms: u64) -> Result<Vec<KeyPackageRecord>> {
         let conn = self.db.lock();
+        // Cap at KP_STASH_TARGET: the home rejects a larger batch (TooMany),
+        // and rotation can leave >target unconsumed locally.
         let mut stmt = conn.prepare(
             "SELECT record_blob FROM mls_keypackage_stash \
-             WHERE consumed = 0 AND expires_at_ms > ?1 AND record_blob IS NOT NULL",
+             WHERE consumed = 0 AND expires_at_ms > ?1 AND record_blob IS NOT NULL \
+             ORDER BY generated_at_ms DESC LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![now_ms as i64], |r| r.get::<_, Vec<u8>>(0))?;
+        let rows = stmt.query_map(params![now_ms as i64, KP_STASH_TARGET as i64], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })?;
         let mut out = Vec::new();
         for blob in rows {
             out.push(

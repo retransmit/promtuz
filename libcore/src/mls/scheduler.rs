@@ -80,9 +80,13 @@ pub async fn run_once<C: DhtClient>(
     dht: &C, now_ms: u64,
 ) -> Result<SchedulerOutcome> {
     if stash.should_refill(now_ms) {
-        let recs = stash
+        stash
             .ensure_stash_full(provider, ipk_signer)
             .map_err(|e| anyhow!("ensure_stash_full: {e}"))?;
+        // Full snapshot, not the delta: Publish replaces at the home.
+        let recs = stash
+            .unconsumed_records(now_ms)
+            .map_err(|e| anyhow!("unconsumed_records: {e}"))?;
         if recs.is_empty() {
             return Ok(SchedulerOutcome::NoOp);
         }
