@@ -48,26 +48,41 @@ pub fn cert_is_valid(
     if !cert_path.try_exists().with_context(|| format!("failed to check file '{cert_path:?}'"))? {
         bail!("certificate missing")
     }
-
     let leaf = first_cert_der(cert_path)?;
+    verify_leaf(&leaf, ca_path, node_id, key_pub)?;
+    Ok(true)
+}
 
-    // It must certify *our* key, not just any CA-signed key.
+/// Validate a signed cert supplied as PEM bytes (e.g. pasted on stdin) against
+/// our key + CA, without touching disk. Used by `pzrelay enroll`.
+pub fn validate_cert_pem(
+    pem: &[u8], ca_path: &Path, node_id: &NodeId, key_pub: &[u8; 32],
+) -> anyhow::Result<()> {
+    let mut rd = std::io::BufReader::new(pem);
+    let leaf = rustls_pemfile::certs(&mut rd)
+        .flatten()
+        .next()
+        .context("no certificate found in pasted input")?;
+    verify_leaf(&leaf, ca_path, node_id, key_pub)
+}
+
+/// The cert must chain to `ca_path`, be unexpired, name `node_id`, and certify
+/// *our* `key_pub` — not just any CA-signed key.
+fn verify_leaf(
+    leaf: &CertificateDer, ca_path: &Path, node_id: &NodeId, key_pub: &[u8; 32],
+) -> anyhow::Result<()> {
     if spki_ed25519(leaf.as_ref()).as_ref() != Some(key_pub) {
         bail!("provided certificate does not certify own key");
     }
-
     let roots = load_root_ca(&ca_path.to_path_buf()).context("failed to load root ca")?;
-
     let verifier = WebPkiServerVerifier::builder(Arc::new(roots))
         .build()
         .with_context(|| "failed to forge verified with root ca")?;
-
     let server_name = ServerName::try_from(node_id.to_string())
         .with_context(|| "failed to forge server name from node id")?;
-
     verifier
-        .verify_server_cert(&leaf, &[], &server_name, &[], UnixTime::now())
-        .map(|_| true)
+        .verify_server_cert(leaf, &[], &server_name, &[], UnixTime::now())
+        .map(|_| ())
         .map_err(|e| anyhow!(e).context("webpki server verifier failed"))
 }
 
@@ -126,13 +141,17 @@ fn pem_wrap(label: &str, der: &[u8]) -> String {
     out
 }
 
-/// Write a PKCS#10 CSR (PEM) for `signing`'s key, `CN = base32(node_id)`.
-pub fn emit_csr(csr_path: &Path, signing: &SigningKey, node_id: &NodeId) -> std::io::Result<()> {
+/// PKCS#10 CSR as PEM for `signing`'s key, `CN = base32(node_id)`.
+pub fn csr_pem(signing: &SigningKey, node_id: &NodeId) -> String {
     let pubkey = signing.verifying_key().to_bytes();
     let info = csr_info(&pubkey, &node_id.to_string());
     let sig = signing.sign(&info).to_bytes();
-    let der = csr_der(&info, &sig);
-    std::fs::write(csr_path, pem_wrap("CERTIFICATE REQUEST", &der))
+    pem_wrap("CERTIFICATE REQUEST", &csr_der(&info, &sig))
+}
+
+/// Write a PKCS#10 CSR (PEM) for `signing`'s key to `csr_path`.
+pub fn emit_csr(csr_path: &Path, signing: &SigningKey, node_id: &NodeId) -> std::io::Result<()> {
+    std::fs::write(csr_path, csr_pem(signing, node_id))
 }
 
 #[cfg(test)]

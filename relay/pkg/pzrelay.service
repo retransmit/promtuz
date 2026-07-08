@@ -24,6 +24,8 @@ ProtectControlGroups=true
 ProtectKernelTunables=true
 RestrictAddressFamilies=AF_INET AF_INET6
 StateDirectory=pzrelay
+RuntimeDirectory=pzrelay
+RuntimeDirectoryMode=0700
 ConfigurationDirectory=promtuz
 ReadWritePaths=/var/lib/pzrelay /etc/promtuz
 

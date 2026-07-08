@@ -15,6 +15,8 @@ use crate::relay::Relay;
 use crate::util::config::AppConfig;
 
 mod cli;
+mod cmd;
+mod control;
 mod dht;
 mod quic;
 mod relay;
@@ -24,8 +26,17 @@ mod util;
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = cli::Cli::get();
+    // Clear the screen only for the daemon; a subcommand must not wipe the
+    // user's terminal before printing its CSR / reply.
+    let cfg = AppConfig::load(&cli.config, cli.command.is_none());
 
-    let cfg = AppConfig::load(&cli.config, true);
+    // Utility subcommands run instead of the daemon (no endpoint, no wait).
+    match cli.command {
+        Some(cli::Command::ClearDb) => return control::clear_db_client(&cfg.control_socket).await,
+        Some(cli::Command::Enroll) => return cmd::enroll(&cfg),
+        None => {},
+    }
+
     common::server::log::init(cfg.log.level.as_deref());
     info!("pzrelay {} ({})", env!("CARGO_PKG_VERSION"), env!("PZ_GIT_SHA"));
 
@@ -45,6 +56,7 @@ async fn main() -> Result<()> {
     let (shutdown, shutdown_rx) = tokio::sync::watch::channel(());
     let cancel = CancellationToken::new();
 
+    let control_sock = cfg.control_socket.clone();
     // let relay: RelayRef = Arc::new(Mutex::new(Relay::new(cfg)));
     let relay = Arc::new(Relay::new(cfg));
     let acceptor = Acceptor::new(relay.endpoint.clone());
@@ -54,6 +66,9 @@ async fn main() -> Result<()> {
         let cancel = cancel.clone();
         async move { acceptor.run(relay, cancel).await }
     });
+
+    // Control socket for `pzrelay clear-db` (and future subcommands).
+    tokio::spawn(control::serve(relay.store.clone(), control_sock, cancel.clone()));
 
     // Construct the resolver link, but capture its `client_handle` for
     // ad-hoc RPCs (DHT bootstrap) *before* `attach()` consumes the

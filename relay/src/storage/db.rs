@@ -76,4 +76,55 @@ impl Store {
     pub fn batch(&self) -> fjall::OwnedWriteBatch {
         self.db.batch()
     }
+
+    /// Delete every entry in all keyspaces and fsync. Live-safe: the relay owns
+    /// the fjall writer, so no lock fight — the `pzrelay clear-db` reset path.
+    /// Leaves the daemon's in-memory routing/connections intact.
+    pub fn clear_all(&self) -> Result<usize> {
+        let mut n = 0usize;
+        for ks in [&self.messages, &self.queue, &self.keypackage, &self.welcome] {
+            let keys: Vec<UserKey> = ks
+                .iter()
+                .map(|g| g.into_inner().map(|(k, _)| k))
+                .collect::<fjall::Result<_>>()
+                .context("iterate keyspace")?;
+            for k in keys {
+                ks.remove(k).context("remove key")?;
+                n += 1;
+            }
+        }
+        self.db.persist(PersistMode::SyncAll).context("persist after clear")?;
+        Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+
+    fn fresh_store() -> Store {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let id = SEQ.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!("pz-cleardb-test-{}-{id}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        Store::open(&path).expect("open store")
+    }
+
+    #[test]
+    fn clear_all_empties_every_keyspace() {
+        let store = fresh_store();
+        store.messages.insert("a".as_bytes(), "1".as_bytes()).unwrap();
+        store.queue.insert("b".as_bytes(), "2".as_bytes()).unwrap();
+        store.keypackage.insert("c".as_bytes(), "3".as_bytes()).unwrap();
+        store.welcome.insert("d".as_bytes(), "4".as_bytes()).unwrap();
+
+        let n = store.clear_all().expect("clear");
+        assert_eq!(n, 4, "must report every deleted entry");
+        for ks in [&store.messages, &store.queue, &store.keypackage, &store.welcome] {
+            assert_eq!(ks.iter().count(), 0, "keyspace must be empty after clear");
+        }
+    }
 }

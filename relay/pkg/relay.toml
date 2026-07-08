@@ -3,6 +3,11 @@
 # to /etc/promtuz/keys/relay/relay.csr, and waits. Sign it (`certgen sign`) and drop the
 # cert at /etc/promtuz/certs/relay.crt — it then starts automatically.
 
+# Control socket for `pzrelay clear-db`. Matches the unit's RuntimeDirectory
+# (/run/pzrelay, mode 0700). The `pzrelay clear-db` client reads the same path
+# from this file, so keep them in sync if you move it.
+control_socket = "/run/pzrelay/control.sock"
+
 [network]
 # Bind. 0.0.0.0:<port> is fine on a single-public-IP box. Default port 40432.
 address = "0.0.0.0:40432"
