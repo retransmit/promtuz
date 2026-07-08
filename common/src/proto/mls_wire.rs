@@ -96,7 +96,11 @@ pub const MLS_ENVELOPE_VERSION: u8 = 1;
 /// [`MlsApplicationEnvelopeP::mls_message`]. The cap is enforced at
 /// construction time by the producer (libcore client) and at deser
 /// time by the consumer.
-pub const MAX_FRAMED_MLS_BYTES: usize = 64 * 1024;
+///
+/// Derived from the transport frame cap minus headroom for the DispatchP +
+/// envelope + postcard framing that wraps these bytes, so a valid MLS message
+/// always fits one [`super::pack::MAX_FRAME_BYTES`] frame.
+pub const MAX_FRAMED_MLS_BYTES: usize = super::pack::MAX_FRAME_BYTES - 16 * 1024;
 
 /// Ceiling on `(env.epoch - group.epoch())` before the recipient drops
 /// an incoming envelope as "implausibly far ahead." A malicious member
@@ -424,7 +428,7 @@ pub struct PairingP {
 /// We hash `mls_message_bytes` rather than carrying it in-line so the
 /// signing-input vector is bounded at ~80 bytes regardless of the
 /// underlying MLS frame (which can be up to
-/// [`MAX_FRAMED_MLS_BYTES`] = 64 KiB). Plain `blake3::hash` (not
+/// [`MAX_FRAMED_MLS_BYTES`]). Plain `blake3::hash` (not
 /// keyed) — this is a plain-domain hash, not a MAC.
 ///
 /// Both the sender's libcore and the recipient's libcore call this
