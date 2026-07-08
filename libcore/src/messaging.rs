@@ -265,6 +265,94 @@ pub async fn send(to: [u8; 32], content: String) -> Result<()> {
     }
 }
 
+/// Edit a prior message to `to` and apply the change locally. Best-effort on
+/// the wire — the relay queues it for an offline peer; a mid-send failure while
+/// WE are offline leaves the local edit applied but unpropagated (MVP).
+pub async fn edit(to: [u8; 32], target: [u8; 16], content: String) -> Result<()> {
+    if let Some(row) = Message::apply_edit(&to, &target, &content) {
+        MessageEv::Edited { id: row.id, peer: to, content: content.clone() }.emit();
+    }
+    send_control(to, AppPayload::Edit { target, content }).await
+}
+
+/// Delete a prior message. `for_everyone` tombstones both sides (sends a
+/// Delete); otherwise it's a local-only removal, no wire signal.
+pub async fn delete(to: [u8; 32], target: [u8; 16], for_everyone: bool) -> Result<()> {
+    let row = if for_everyone {
+        Message::apply_delete(&to, &target)
+    } else {
+        Message::hard_delete(&to, &target)
+    };
+    if let Some(row) = row {
+        MessageEv::Deleted { id: row.id, peer: to }.emit();
+    }
+    if for_everyone {
+        send_control(to, AppPayload::Delete { target }).await
+    } else {
+        Ok(())
+    }
+}
+
+/// Send a control `AppPayload` (Edit/Delete) into the existing 1:1 group as an
+/// MLS application message. The group must already exist — you're mutating a
+/// message you already exchanged. Best-effort dispatch, no outbox row (MVP):
+/// the relay queues it for an offline peer; if WE are offline it's dropped.
+async fn send_control(to: [u8; 32], payload: AppPayload) -> Result<()> {
+    let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
+    let ipk_signer = crate::data::identity::secret_key_signing(&our_ipk)?;
+
+    let provider = PromtuzMlsProvider::shared();
+    let gid = Contact::get(&to)
+        .and_then(|c| c.inner.mls_group_id)
+        .ok_or_else(|| anyhow!("no group with {}", hex::encode(&to[..4])))?;
+    let mut group = MlsGroupHandle::load(&provider, &gid)
+        .map_err(|e| anyhow!("load group: {e}"))?
+        .ok_or_else(|| anyhow!("no local group state for {}", hex::encode(&to[..4])))?;
+    let leaf_kp = leaf_signer_for_group(&provider, &group, &our_ipk)?;
+
+    let payload_bytes = payload.ser().map_err(|e| anyhow!("encode AppPayload: {e}"))?;
+
+    // build_application_envelope_bytes only touches ctx.provider; a stub dht is fine.
+    let stash = KeyPackageStash::new(stash_db_handle());
+    let buffer = EpochCatchupBuffer::new(stash_db_handle());
+    let dht = crate::quic::dht_client::NotWiredDhtClient;
+    let ctx = MlsContext { provider: &provider, stash: &stash, buffer: &buffer, dht: &dht };
+    let env_bytes = build_application_envelope_bytes(
+        &ctx, &mut group, &leaf_kp, &our_ipk, &to, &payload_bytes, &ipk_signer,
+    )
+    .map_err(|e| anyhow!("build envelope: {e}"))?;
+
+    let id = crate::data::message::next_dispatch_id();
+    let sig_message = dispatch_sig_message(&to, &our_ipk, &id, &env_bytes);
+    let sig = {
+        use ed25519_dalek::Signer;
+        ipk_signer.sign(&sig_message).to_bytes()
+    };
+    let fwd = DispatchP {
+        to:      Bytes(to),
+        from:    Bytes(our_ipk),
+        id:      Bytes(id),
+        payload: ByteVec(env_bytes),
+        sig:     Bytes(sig),
+    };
+    let bytes = CRelayPacket::Dispatch(fwd).pack().map_err(|e| anyhow!("pack dispatch: {e}"))?;
+
+    let conn = {
+        let relay = RELAY.read();
+        relay.as_ref().and_then(|r| r.connection.clone())
+    };
+    let Some(conn) = conn else {
+        info!("MESSAGE: offline — control dispatch to {} not sent (local change stands)", hex::encode(&to[..4]));
+        return Ok(());
+    };
+    if let Ok((mut tx, mut rx)) = conn.open_bi().await {
+        let _ = tx.write_all(&bytes).await;
+        let _ = tx.finish();
+        let _ = SRelayPacket::unpack(&mut rx).await; // drain ack, ignore
+    }
+    Ok(())
+}
+
 /// Eager pairing: create the implicit 1:1 group with `to` and publish a
 /// Welcome carrying `pairing` (the inviter's invite + our display name),
 /// so a not-yet-contact recipient can gate-accept us. Persists the

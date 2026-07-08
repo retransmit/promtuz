@@ -28,9 +28,13 @@ pub struct MessageRow {
     /// Cross-device dedup + convergence key — the ULID `id` stays the
     /// row PK / ordering key.
     pub dispatch_id: Option<Vec<u8>>,
+    /// Sender edited this message's text after sending.
+    pub edited: bool,
+    /// Tombstoned by delete-for-everyone; `content` is cleared.
+    pub deleted: bool,
 }
 
-from_row!(MessageRow { id, peer_ipk, content, outgoing, timestamp, status, dispatch_id });
+from_row!(MessageRow { id, peer_ipk, content, outgoing, timestamp, status, dispatch_id, edited, deleted });
 
 const MIGRATION_ARRAY: &[M] = &[
     M::up(
@@ -49,6 +53,8 @@ const MIGRATION_ARRAY: &[M] = &[
     M::up(
         "CREATE UNIQUE INDEX idx_messages_dedup ON messages(peer_ipk, dispatch_id) WHERE dispatch_id IS NOT NULL;",
     ),
+    M::up("ALTER TABLE messages ADD COLUMN edited INTEGER NOT NULL DEFAULT 0;"),
+    M::up("ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;"),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

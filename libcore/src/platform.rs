@@ -54,6 +54,8 @@ pub enum MessageEvent {
     Received { id: String, from: Vec<u8>, content: String, timestamp: u64 },
     Sent { id: String, to: Vec<u8>, content: String, timestamp: u64 },
     Failed { id: String, to: Vec<u8>, reason: String },
+    Edited { id: String, peer: Vec<u8>, content: String },
+    Deleted { id: String, peer: Vec<u8> },
 }
 
 impl From<MessageEv> for MessageEvent {
@@ -67,6 +69,12 @@ impl From<MessageEv> for MessageEvent {
             },
             MessageEv::Failed { id, to, reason } => {
                 MessageEvent::Failed { id: id.to_string(), to: to.to_vec(), reason }
+            },
+            MessageEv::Edited { id, peer, content } => {
+                MessageEvent::Edited { id: id.to_string(), peer: peer.to_vec(), content }
+            },
+            MessageEv::Deleted { id, peer } => {
+                MessageEvent::Deleted { id: id.to_string(), peer: peer.to_vec() }
             },
         }
     }

@@ -15,6 +15,12 @@ pub struct MessageRecord {
     pub timestamp: u64,
     /// 0 = pending, 1 = sent, 2 = failed.
     pub status: u8,
+    /// 16-byte shared id — the target for edit/delete. None on legacy rows.
+    pub dispatch_id: Option<Vec<u8>>,
+    /// Sender edited this message's text.
+    pub edited: bool,
+    /// Tombstoned by delete-for-everyone; `content` is cleared.
+    pub deleted: bool,
 }
 
 /// An address-book entry, projected for the client.
@@ -35,6 +41,36 @@ pub fn send_message(to_ipk: Vec<u8>, content: String) -> Result<(), CoreError> {
     crate::RUNTIME.spawn(async move {
         if let Err(e) = crate::messaging::send(to, content).await {
             log::error!("MESSAGE: send failed: {e}");
+        }
+    });
+    Ok(())
+}
+
+/// Edit a prior message (targets it by its 16-byte `dispatch_id`). Fire-and-
+/// forget; the change is applied locally and surfaces via `on_message(Edited)`.
+#[uniffi::export]
+pub fn edit_message(peer_ipk: Vec<u8>, dispatch_id: Vec<u8>, content: String) -> Result<(), CoreError> {
+    let to = to_ipk32(&peer_ipk)?;
+    let target = to_did16(&dispatch_id)?;
+    crate::RUNTIME.spawn(async move {
+        if let Err(e) = crate::messaging::edit(to, target, content).await {
+            log::error!("MESSAGE: edit failed: {e}");
+        }
+    });
+    Ok(())
+}
+
+/// Delete a prior message. `for_everyone` tombstones both sides; otherwise it's
+/// a local-only removal. Surfaces via `on_message(Deleted)`.
+#[uniffi::export]
+pub fn delete_message(
+    peer_ipk: Vec<u8>, dispatch_id: Vec<u8>, for_everyone: bool,
+) -> Result<(), CoreError> {
+    let to = to_ipk32(&peer_ipk)?;
+    let target = to_did16(&dispatch_id)?;
+    crate::RUNTIME.spawn(async move {
+        if let Err(e) = crate::messaging::delete(to, target, for_everyone).await {
+            log::error!("MESSAGE: delete failed: {e}");
         }
     });
     Ok(())
@@ -148,6 +184,9 @@ impl From<MessageRow> for MessageRecord {
             outgoing: r.outgoing,
             timestamp: r.timestamp,
             status: r.status,
+            dispatch_id: r.dispatch_id,
+            edited: r.edited,
+            deleted: r.deleted,
         }
     }
 }
@@ -155,4 +194,9 @@ impl From<MessageRow> for MessageRecord {
 /// Validate a client-supplied IPK is exactly 32 bytes.
 fn to_ipk32(bytes: &[u8]) -> Result<[u8; 32], CoreError> {
     bytes.try_into().map_err(|_| CoreError::Internal { msg: "ipk must be 32 bytes".into() })
+}
+
+/// Validate a client-supplied dispatch_id is exactly 16 bytes.
+fn to_did16(bytes: &[u8]) -> Result<[u8; 16], CoreError> {
+    bytes.try_into().map_err(|_| CoreError::Internal { msg: "dispatch_id must be 16 bytes".into() })
 }

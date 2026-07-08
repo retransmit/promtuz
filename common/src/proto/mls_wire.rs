@@ -67,16 +67,21 @@ use crate::types::bytes::Bytes;
 /// governs the relay-auth handshake and is intentionally left at 4
 /// (bumping it is a wider flag day). This one is peer-to-peer only, so
 /// bumping it to 5 for the typed `AppPayload` seam is a client-only
-/// coordinated redeploy.
-pub const MLS_WIRE_VERSION: u16 = 5;
+/// coordinated redeploy. Bumped to 6 for the Edit/Delete variants.
+pub const MLS_WIRE_VERSION: u16 = 6;
 
 /// The decrypted MLS application plaintext. Was raw UTF-8; now a tagged
-/// union so receipts/attachments ride the same encrypted channel. The
-/// relay never sees this (it's inside the MLS ciphertext).
+/// union so receipts/edits/etc. ride the same encrypted channel. The
+/// relay never sees this (it's inside the MLS ciphertext). Edit/Delete
+/// name their target message by its 16-byte `dispatch_id`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum AppPayload {
     Text(String),
     Receipt { kind: ReceiptKind, upto: [u8; 16] },
+    /// Replace the text of the message with dispatch_id `target`.
+    Edit { target: [u8; 16], content: String },
+    /// Tombstone the message with dispatch_id `target` (delete-for-everyone).
+    Delete { target: [u8; 16] },
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

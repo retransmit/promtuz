@@ -655,6 +655,32 @@ async fn process_deliver(
                 Ok(AppPayload::Receipt { .. }) => {
                     info!("MESSAGE: receipt received (handler lands in Task 10)");
                 },
+                Ok(AppPayload::Edit { target, content }) => {
+                    match Message::apply_edit(&msg.from, &target, &content) {
+                        Some(row) => {
+                            info!("MESSAGE: edit from {}", hex::encode(&msg.from[..4]));
+                            MessageEv::Edited { id: row.id, peer: *msg.from, content }.emit();
+                        },
+                        // Out-of-order: target not stored yet. Rare in 1:1
+                        // same-epoch (the original precedes) — drop.
+                        None => debug!(
+                            "MESSAGE: edit for unknown target from {}",
+                            hex::encode(&msg.from[..4])
+                        ),
+                    }
+                },
+                Ok(AppPayload::Delete { target }) => {
+                    match Message::apply_delete(&msg.from, &target) {
+                        Some(row) => {
+                            info!("MESSAGE: delete from {}", hex::encode(&msg.from[..4]));
+                            MessageEv::Deleted { id: row.id, peer: *msg.from }.emit();
+                        },
+                        None => debug!(
+                            "MESSAGE: delete for unknown target from {}",
+                            hex::encode(&msg.from[..4])
+                        ),
+                    }
+                },
                 Err(e) => {
                     warn!("MESSAGE: undecodable AppPayload from {}: {e}", hex::encode(&msg.from[..4]));
                     bail!("bad AppPayload");

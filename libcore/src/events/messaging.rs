@@ -27,6 +27,19 @@ pub enum MessageEv {
         to: [u8; 32],
         reason: String,
     },
+    /// A message's text changed (our edit, or an inbound peer Edit).
+    Edited {
+        id: ULID,
+        #[serde(with = "serde_bytes")]
+        peer: [u8; 32],
+        content: String,
+    },
+    /// A message was deleted (tombstoned for-everyone, or removed for-me).
+    Deleted {
+        id: ULID,
+        #[serde(with = "serde_bytes")]
+        peer: [u8; 32],
+    },
 }
 
 impl Emittable for MessageEv {

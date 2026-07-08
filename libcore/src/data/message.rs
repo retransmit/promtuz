@@ -57,6 +57,8 @@ impl Message {
                 timestamp,
                 status: STATUS_PENDING,
                 dispatch_id: Some(dispatch_id.to_vec()),
+                edited: false,
+                deleted: false,
             },
         })
     }
@@ -88,6 +90,8 @@ impl Message {
                 timestamp,
                 status: STATUS_SENT,
                 dispatch_id: Some(dispatch_id.to_vec()),
+                edited: false,
+                deleted: false,
             },
         }))
     }
@@ -126,6 +130,72 @@ impl Message {
             MessageRow::from_row,
         )
         .ok()
+    }
+
+    /// Apply an edit — our own (optimistic) or an inbound peer `Edit`: replace
+    /// the target's text and flag it edited. Keyed on the shared
+    /// `(peer_ipk, dispatch_id)` so it hits the one row regardless of direction.
+    /// A no-op on an already-deleted target. Returns the updated row (for the UI
+    /// event), or `None` if the target isn't present.
+    pub fn apply_edit(peer_ipk: &[u8; 32], dispatch_id: &[u8], content: &str) -> Option<MessageRow> {
+        let conn = MESSAGES_DB.lock();
+        let n = conn
+            .execute(
+                "UPDATE messages SET content = ?1, edited = 1 \
+                 WHERE peer_ipk = ?2 AND dispatch_id = ?3 AND deleted = 0",
+                (content, peer_ipk.as_slice(), dispatch_id),
+            )
+            .ok()?;
+        if n == 0 {
+            return None;
+        }
+        conn.query_row(
+            "SELECT * FROM messages WHERE peer_ipk = ?1 AND dispatch_id = ?2",
+            (peer_ipk.as_slice(), dispatch_id),
+            MessageRow::from_row,
+        )
+        .ok()
+    }
+
+    /// Tombstone a message (delete-for-everyone): clear its text, flag deleted.
+    /// Keyed on `(peer_ipk, dispatch_id)`. Returns the updated row.
+    pub fn apply_delete(peer_ipk: &[u8; 32], dispatch_id: &[u8]) -> Option<MessageRow> {
+        let conn = MESSAGES_DB.lock();
+        let n = conn
+            .execute(
+                "UPDATE messages SET content = '', deleted = 1, edited = 0 \
+                 WHERE peer_ipk = ?1 AND dispatch_id = ?2",
+                (peer_ipk.as_slice(), dispatch_id),
+            )
+            .ok()?;
+        if n == 0 {
+            return None;
+        }
+        conn.query_row(
+            "SELECT * FROM messages WHERE peer_ipk = ?1 AND dispatch_id = ?2",
+            (peer_ipk.as_slice(), dispatch_id),
+            MessageRow::from_row,
+        )
+        .ok()
+    }
+
+    /// Hard-delete a single message locally (delete-for-me; no wire signal).
+    /// Returns the row it removed (for the UI event), or `None` if absent.
+    pub fn hard_delete(peer_ipk: &[u8; 32], dispatch_id: &[u8]) -> Option<MessageRow> {
+        let conn = MESSAGES_DB.lock();
+        let row = conn
+            .query_row(
+                "SELECT * FROM messages WHERE peer_ipk = ?1 AND dispatch_id = ?2",
+                (peer_ipk.as_slice(), dispatch_id),
+                MessageRow::from_row,
+            )
+            .ok()?;
+        conn.execute(
+            "DELETE FROM messages WHERE peer_ipk = ?1 AND dispatch_id = ?2",
+            (peer_ipk.as_slice(), dispatch_id),
+        )
+        .ok()?;
+        Some(row)
     }
 
     /// Delete every message with this peer (forget-contact cascade).
