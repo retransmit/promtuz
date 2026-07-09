@@ -30,3 +30,19 @@ pub fn db(file_name: &'static str) -> String {
 
     format!("{db_dir}/{file_name}.db")
 }
+
+/// Ring the client's `on_db_changed` doorbell whenever `conn` commits a write —
+/// the reactive-UI trigger. `tables` is the coarse set this connection owns; the
+/// UI re-reads any observed query overlapping them. Content-free (the DB is the
+/// truth). No-op until the client installs its event sink, so startup migrations
+/// don't fire it. The hook runs on the writing thread with the conn locked, so
+/// the client impl must only wake a flow — never block or call back into core.
+pub(crate) fn register_change_hook(conn: &rusqlite::Connection, tables: &[&str]) {
+    let tables: Vec<String> = tables.iter().map(|s| (*s).to_string()).collect();
+    conn.commit_hook(Some(move || {
+        if let Some(ev) = crate::platform::EVENTS.get() {
+            ev.on_db_changed(tables.clone());
+        }
+        false // observe only — never roll back the commit
+    }));
+}

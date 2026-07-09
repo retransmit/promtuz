@@ -41,6 +41,12 @@ pub trait CoreEvents: Send + Sync {
     /// is the author's IPK — compare to self for "mine". `peer` is the
     /// conversation, `dispatch_id` the reacted message.
     fn on_reaction(&self, peer: Vec<u8>, dispatch_id: Vec<u8>, reactor: Vec<u8>, emoji: String, add: bool);
+    /// A UI-facing DB committed a write — the coarse "re-read" doorbell for the
+    /// reactive layer. `tables` names what moved (e.g. `["messages","reactions"]`);
+    /// the client re-runs any observed query overlapping them. Content-free —
+    /// truth stays in the DB. Fired on the writer thread, so the impl must not
+    /// block or re-enter the core (just wake a flow).
+    fn on_db_changed(&self, tables: Vec<String>);
 }
 
 /// The single error type crossing the FFI boundary.

@@ -92,6 +92,7 @@ pub static MESSAGES_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
     info!("DB: MESSAGES_DB CONNECTED");
 
     PRAGMA!(conn, MIGRATIONS);
+    super::register_change_hook(&conn, &["messages", "reactions"]);
 
     Mutex::new(conn)
 });

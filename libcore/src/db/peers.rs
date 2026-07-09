@@ -64,6 +64,7 @@ pub static CONTACTS_DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
     info!("DB: CONTACTS_DB CONNECTED");
 
     PRAGMA!(conn, MIGRATIONS);
+    super::register_change_hook(&conn, &["contacts"]);
 
     Mutex::new(conn)
 });
