@@ -1,0 +1,22 @@
+package com.promtuz.chat.domain.model
+
+/**
+ * A message shaped for rendering. Keyed on [key] — the shared dispatch id when
+ * present, else the local ULID — so edit / delete / reaction / receipt, which all
+ * mutate the same row in place, surface as updates to the *same* list item rather
+ * than churn. Built from libcore's MessageRecord joined with its reactions. Every
+ * field is value-equality-friendly (no raw ByteArray) so LazyColumn diffing is
+ * correct; the 16-byte dispatch id rides as hex and converts at the FFI boundary.
+ */
+data class UiMessage(
+    val key: String,
+    val localId: String,
+    val dispatchIdHex: String?,
+    val content: MessageContent,
+    val outgoing: Boolean,
+    val status: SendStatus,
+    val edited: Boolean,
+    val deleted: Boolean,
+    val timestampMs: Long,
+    val reactions: List<ReactionGroup>,
+)

@@ -9,8 +9,8 @@ import kotlinx.coroutines.withContext
 import uniffi.core.ContactDiag
 import uniffi.core.ContactInfo
 import uniffi.core.InvitePreview
-import uniffi.core.MessageEvent
 import uniffi.core.MessageRecord
+import uniffi.core.ReactionRecord
 import uniffi.core.RelayStat
 import uniffi.core.computeQrMask as ffiComputeQrMask
 import uniffi.core.connectRelay as ffiConnectRelay
@@ -28,6 +28,15 @@ import uniffi.core.previewInvite as ffiPreviewInvite
 import uniffi.core.resetRelayCircuit as ffiResetRelayCircuit
 import uniffi.core.sendMessage as ffiSendMessage
 import uniffi.core.shouldLaunchApp as ffiShouldLaunchApp
+import uniffi.core.deleteMessage as ffiDeleteMessage
+import uniffi.core.editMessage as ffiEditMessage
+import uniffi.core.markRead as ffiMarkRead
+import uniffi.core.reactMessage as ffiReactMessage
+import uniffi.core.reactionsFor as ffiReactionsFor
+import uniffi.core.setActivity as ffiSetActivity
+import uniffi.core.subscribePresence as ffiSubscribePresence
+import com.promtuz.core.adapter.ActivitySignal
+import com.promtuz.core.adapter.PresenceSignal
 
 /**
  * Idiomatic Kotlin facade over the uniffi-generated bindings — the single
@@ -72,6 +81,32 @@ object CoreBridge {
     suspend fun sendMessage(toIpk: ByteArray, content: String) =
         withContext(Dispatchers.IO) { ffiSendMessage(toIpk, content) }
 
+    suspend fun editMessage(peer: ByteArray, dispatchId: ByteArray, content: String) =
+        withContext(Dispatchers.IO) { ffiEditMessage(peer, dispatchId, content) }
+
+    /** Delete for everyone (tombstones both sides) or just locally. */
+    suspend fun deleteMessage(peer: ByteArray, dispatchId: ByteArray, forEveryone: Boolean) =
+        withContext(Dispatchers.IO) { ffiDeleteMessage(peer, dispatchId, forEveryone) }
+
+    /** Add/remove our own `emoji` reaction on a message. */
+    suspend fun react(peer: ByteArray, dispatchId: ByteArray, emoji: String, add: Boolean) =
+        withContext(Dispatchers.IO) { ffiReactMessage(peer, dispatchId, emoji, add) }
+
+    suspend fun reactions(peer: ByteArray): List<ReactionRecord> =
+        withContext(Dispatchers.IO) { ffiReactionsFor(peer) }
+
+    /** High-water-mark read receipt: mark everything from `peer` up to this dispatch id as read. */
+    suspend fun markRead(peer: ByteArray, uptoDispatchId: ByteArray) =
+        withContext(Dispatchers.IO) { ffiMarkRead(peer, uptoDispatchId) }
+
+    /** Ephemeral typing/recording signal (OR of Activity bits; 0 = idle). Fire-and-forget. */
+    suspend fun setActivity(peer: ByteArray, activityBits: Int) =
+        withContext(Dispatchers.IO) { ffiSetActivity(peer, activityBits.toUShort()) }
+
+    /** (Re)subscribe presence interest to these contacts. */
+    suspend fun subscribePresence(contacts: List<ByteArray>) =
+        withContext(Dispatchers.IO) { ffiSubscribePresence(contacts) }
+
     /** Pure render helper; safe on any thread (used from the QR View). */
     fun computeQrMask(grid: ByteArray, size: Int): ByteArray = ffiComputeQrMask(grid, size.toUInt())
 
@@ -90,6 +125,12 @@ object CoreBridge {
     /** Latest connection state, mapped to the app enum (carries @StringRes). */
     val connection: StateFlow<ConnectionState> get() = CoreEventBus.connection
 
-    /** Inbound/outbound message deltas (Received / Sent / Failed). */
-    val messageEvents: SharedFlow<MessageEvent> get() = CoreEventBus.messages
+    /** The reactive doorbell: "these tables changed, re-read." Drives [observeQuery]. */
+    val dbChanged: SharedFlow<Set<String>> get() = CoreEventBus.dbChanged
+
+    /** Ephemeral peer typing/recording signals (not stored; UI times them out). */
+    val activity: SharedFlow<ActivitySignal> get() = CoreEventBus.activity
+
+    /** Ephemeral peer presence changes (online / last-seen). */
+    val presence: SharedFlow<PresenceSignal> get() = CoreEventBus.presence
 }
