@@ -13,7 +13,7 @@ pub struct MessageRecord {
     pub content: String,
     pub outgoing: bool,
     pub timestamp: u64,
-    /// 0 = pending, 1 = sent, 2 = failed.
+    /// 0 = pending, 1 = sent, 2 = failed, 3 = delivered, 4 = read.
     pub status: u8,
     /// 16-byte shared id — the target for edit/delete. None on legacy rows.
     pub dispatch_id: Option<Vec<u8>>,
@@ -118,6 +118,26 @@ pub fn reactions_for(peer_ipk: Vec<u8>) -> Result<Vec<ReactionRecord>, CoreError
             timestamp: r.timestamp,
         })
         .collect())
+}
+
+/// Tell `peer` we've read their messages up to `upto_dispatch_id` (a 16-byte
+/// dispatch id). High-water-mark — one call clears the whole unread backlog.
+/// Sends a Read receipt; the peer sees it as a status bump via `on_message`
+/// (Receipt). Delivered receipts are automatic on message arrival.
+#[uniffi::export]
+pub fn mark_read(peer_ipk: Vec<u8>, upto_dispatch_id: Vec<u8>) -> Result<(), CoreError> {
+    let to = to_ipk32(&peer_ipk)?;
+    let upto = to_did16(&upto_dispatch_id)?;
+    crate::RUNTIME.spawn(async move {
+        if let Err(e) = crate::messaging::send_receipt(
+            to, common::proto::mls_wire::ReceiptKind::Read, upto,
+        )
+        .await
+        {
+            log::debug!("MESSAGE: mark_read failed: {e}");
+        }
+    });
+    Ok(())
 }
 
 /// Subscribe to presence for `contacts` (replaces the prior interest set).

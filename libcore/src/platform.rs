@@ -66,6 +66,9 @@ pub enum MessageEvent {
     Failed { id: String, to: Vec<u8>, reason: String },
     Edited { id: String, peer: Vec<u8>, content: String },
     Deleted { id: String, peer: Vec<u8> },
+    /// Peer acknowledged our messages up to `upto` (dispatch_id) at `status`
+    /// (3 = delivered, 4 = read). UI bumps all rendered messages ≤ upto.
+    Receipt { peer: Vec<u8>, upto: Vec<u8>, status: u8 },
 }
 
 impl From<MessageEv> for MessageEvent {
@@ -85,6 +88,9 @@ impl From<MessageEv> for MessageEvent {
             },
             MessageEv::Deleted { id, peer } => {
                 MessageEvent::Deleted { id: id.to_string(), peer: peer.to_vec() }
+            },
+            MessageEv::Receipt { peer, upto, status } => {
+                MessageEvent::Receipt { peer: peer.to_vec(), upto: upto.to_vec(), status }
             },
         }
     }

@@ -22,6 +22,7 @@ use common::proto::dht_p2p::MAX_FETCH_QUEUE_ACK_IDS;
 use common::proto::dht_p2p::queue_fetch_ack_signing_input;
 use common::proto::dht_p2p::queue_fetch_signing_input;
 use common::proto::mls_wire::AppPayload;
+use common::proto::mls_wire::ReceiptKind;
 use common::proto::pack::Unpacker;
 use common::proto::pack::unpack;
 use common::quic::id::NodeId;
@@ -680,6 +681,16 @@ async fn process_deliver(
                                 timestamp,
                             }
                             .emit();
+                            // Auto-Delivered receipt (high-water-mark = this id).
+                            // Spawned so we don't delay the relay's DeliverAck.
+                            let from = *msg.from;
+                            let upto = msg.id.0;
+                            crate::RUNTIME.spawn(async move {
+                                let _ = crate::messaging::send_receipt(
+                                    from, ReceiptKind::Delivered, upto,
+                                )
+                                .await;
+                            });
                         },
                         // Relay redelivered a dispatch_id we already stored: no
                         // re-emit, but still Ok so the caller acks and the relay GCs.
@@ -692,8 +703,14 @@ async fn process_deliver(
                         },
                     }
                 },
-                Ok(AppPayload::Receipt { .. }) => {
-                    info!("MESSAGE: receipt received (handler lands in Task 10)");
+                Ok(AppPayload::Receipt { kind, upto }) => {
+                    let status = match kind {
+                        ReceiptKind::Delivered => crate::data::message::STATUS_DELIVERED,
+                        ReceiptKind::Read => crate::data::message::STATUS_READ,
+                    };
+                    if Message::mark_receipt_upto(&msg.from, &upto, status) {
+                        MessageEv::Receipt { peer: *msg.from, upto, status }.emit();
+                    }
                 },
                 Ok(AppPayload::Edit { target, content }) => {
                     // own=false: a peer may only edit messages IT sent us (outgoing=0).

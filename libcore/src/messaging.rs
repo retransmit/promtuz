@@ -80,6 +80,7 @@ use common::proto::mls_wire::MLS_ENVELOPE_VERSION;
 use common::proto::mls_wire::MlsApplicationEnvelopeP;
 use common::proto::mls_wire::MlsEnvelopeP;
 use common::proto::mls_wire::PairingP;
+use common::proto::mls_wire::ReceiptKind;
 use common::proto::mls_wire::WelcomeEnvelopeP;
 use common::proto::mls_wire::envelope_signing_input;
 use common::proto::pack::Packer;
@@ -314,7 +315,14 @@ pub async fn react(to: [u8; 32], target: [u8; 16], emoji: String, add: bool) -> 
     send_control(to, AppPayload::React { target, emoji, add }).await
 }
 
-/// Send a control `AppPayload` (Edit/Delete/React) into the existing 1:1 group as an
+/// Send a read/delivered receipt: tell `to` we've received-or-read their
+/// messages up to `upto` (a 16-byte dispatch_id). High-water-mark — one
+/// receipt supersedes earlier ones. Best-effort, like the other control sends.
+pub async fn send_receipt(to: [u8; 32], kind: ReceiptKind, upto: [u8; 16]) -> Result<()> {
+    send_control(to, AppPayload::Receipt { kind, upto }).await
+}
+
+/// Send a control `AppPayload` (Edit/Delete/React/Receipt) into the existing 1:1 group as an
 /// MLS application message. The group must already exist — you're mutating a
 /// message you already exchanged. Best-effort dispatch, no outbox row (MVP):
 /// the relay queues it for an offline peer; if WE are offline it's dropped.

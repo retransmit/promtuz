@@ -6,10 +6,13 @@ use crate::db::messages::MESSAGES_DB;
 use crate::db::messages::MessageRow;
 use crate::utils::systime;
 
-/// Message status constants
+/// Message status constants. Higher = further along; receipts only ever
+/// upgrade (never downgrade) an outgoing message's status.
 pub const STATUS_PENDING: u8 = 0;
 pub const STATUS_SENT: u8 = 1;
 pub const STATUS_FAILED: u8 = 2;
+pub const STATUS_DELIVERED: u8 = 3;
+pub const STATUS_READ: u8 = 4;
 
 /// Strictly-monotonic 16-byte dispatch id. `Uuid::now_v7()` is only
 /// millisecond-monotonic (random tail), so two sends in the same ms don't
@@ -205,6 +208,24 @@ impl Message {
         Some(row)
     }
 
+    /// Apply a receipt high-water-mark: upgrade every outgoing message to
+    /// `peer` with `dispatch_id <= upto` to at-least `status` (never
+    /// downgrades). One receipt clears a whole backlog. `dispatch_id` is
+    /// 16-byte big-endian, so the BLOB `<=` compare matches send order.
+    /// Returns `true` if any row changed. Group note: 1:1 today — a group
+    /// would key this per member and aggregate.
+    pub fn mark_receipt_upto(peer_ipk: &[u8; 32], upto: &[u8; 16], status: u8) -> bool {
+        let conn = MESSAGES_DB.lock();
+        conn.execute(
+            "UPDATE messages SET status = ?1 \
+             WHERE peer_ipk = ?2 AND outgoing = 1 AND status < ?1 \
+             AND dispatch_id IS NOT NULL AND dispatch_id <= ?3",
+            (status, peer_ipk.as_slice(), upto.as_slice()),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false)
+    }
+
     /// Delete every message with this peer (forget-contact cascade).
     pub fn delete_by_peer(peer_ipk: &[u8; 32]) {
         let conn = MESSAGES_DB.lock();
@@ -343,6 +364,54 @@ mod tests {
 
         assert_eq!(first, 1, "first insert must land");
         assert_eq!(dup, 0, "same (peer, dispatch_id) must not double-insert");
+    }
+
+    /// The receipt high-water-mark: `dispatch_id <= upto` must order by the
+    /// 16-byte BE id (so one receipt covers the backlog), and `status < ?` must
+    /// never downgrade (a later Delivered can't undo a Read). Mirrors
+    /// `mark_receipt_upto`'s SQL against an in-memory DB (the method uses the
+    /// process-global connection).
+    #[test]
+    fn receipt_watermark_covers_backlog_without_downgrade() {
+        let conn = crate::db::messages::open_in_memory();
+        let peer = [7u8; 32];
+        let ids: [[u8; 16]; 3] = [[1u8; 16], [2u8; 16], [3u8; 16]];
+        for (i, did) in ids.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO messages (id, peer_ipk, content, outgoing, timestamp, status, dispatch_id) \
+                 VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6)",
+                (Ulid::new().to_string(), peer.as_slice(), "m", i as u64, STATUS_SENT, did.as_slice()),
+            )
+            .unwrap();
+        }
+        let mark = |upto: &[u8; 16], status: u8| {
+            conn.execute(
+                "UPDATE messages SET status = ?1 \
+                 WHERE peer_ipk = ?2 AND outgoing = 1 AND status < ?1 \
+                 AND dispatch_id IS NOT NULL AND dispatch_id <= ?3",
+                (status, peer.as_slice(), upto.as_slice()),
+            )
+            .unwrap()
+        };
+        let status_of = |did: &[u8; 16]| -> u8 {
+            conn.query_row(
+                "SELECT status FROM messages WHERE dispatch_id = ?1",
+                [did.as_slice()],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|s| s as u8)
+            .unwrap()
+        };
+
+        assert_eq!(mark(&ids[1], STATUS_DELIVERED), 2, "covers ids[0] and ids[1]");
+        assert_eq!(status_of(&ids[0]), STATUS_DELIVERED);
+        assert_eq!(status_of(&ids[1]), STATUS_DELIVERED);
+        assert_eq!(status_of(&ids[2]), STATUS_SENT, "beyond watermark, untouched");
+
+        mark(&ids[2], STATUS_READ); // read the lot
+        assert_eq!(status_of(&ids[2]), STATUS_READ);
+        mark(&ids[2], STATUS_DELIVERED); // stale Delivered must not downgrade
+        assert_eq!(status_of(&ids[0]), STATUS_READ, "no downgrade below current");
     }
 
     /// A row written before the `dispatch_id` column existed has NULL there.

@@ -40,6 +40,16 @@ pub enum MessageEv {
         #[serde(with = "serde_bytes")]
         peer: [u8; 32],
     },
+    /// The peer acknowledged our outgoing messages up to `upto` (a 16-byte
+    /// dispatch_id) at `status` (Delivered/Read). High-water-mark: the UI
+    /// bumps every rendered message with `dispatch_id <= upto` to `status`.
+    Receipt {
+        #[serde(with = "serde_bytes")]
+        peer: [u8; 32],
+        #[serde(with = "serde_bytes")]
+        upto: [u8; 16],
+        status: u8,
+    },
 }
 
 impl Emittable for MessageEv {
