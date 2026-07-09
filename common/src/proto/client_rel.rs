@@ -142,10 +142,11 @@ pub struct DeliverP {
 /// Activity bits for [`ActivityP::activity`]. OR them for "several at once".
 /// `0` = present-but-idle (a bare presence heartbeat).
 pub const ACTIVITY_TYPING: u16 = 1 << 0;
-pub const ACTIVITY_RECORDING: u16 = 1 << 1;
-pub const ACTIVITY_CHOOSING_STICKER: u16 = 1 << 2;
-pub const ACTIVITY_CHOOSING_EMOJI: u16 = 1 << 3;
-pub const ACTIVITY_UPLOADING: u16 = 1 << 4;
+/// Can be used for both emoji and sticker
+pub const ACTIVITY_CHOOSING_STICKER: u16 = 1 << 1;
+pub const ACTIVITY_UPLOADING_MEDIA: u16 = 1 << 2;
+pub const ACTIVITY_UPLOADING_DOCUMENT: u16 = 1 << 3;
+pub const ACTIVITY_RECORDING_VN: u16 = 1 << 4;
 
 /// Domain separator for the activity-signal signature.
 pub const ACTIVITY_SIG_DOMAIN: &[u8] = b"promtuz-activity-v1";
