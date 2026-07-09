@@ -32,14 +32,19 @@ import com.promtuz.chat.ui.appearance.outgoingContent
  * is a pure function of (message, group position, appearance).
  */
 @Composable
-fun MessageBubble(msg: UiMessage, mergedTop: Boolean = false, mergedBottom: Boolean = false) {
+fun MessageBubble(
+    msg: UiMessage,
+    mergedTop: Boolean = false,
+    mergedBottom: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
     val appearance = LocalChatAppearance.current
     val outgoing = msg.outgoing
     val shape = rememberBubbleShape(outgoing, mergedTop, mergedBottom, appearance.bubble)
     val bubbleColor = if (outgoing) appearance.colors.outgoingBubble() else appearance.colors.incomingBubble()
     val textColor = if (outgoing) appearance.colors.outgoingContent() else appearance.colors.incomingContent()
 
-    BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+    BoxWithConstraints(modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
         val maxBubble = maxWidth * appearance.layout.maxWidthFraction
         Column(
             Modifier
