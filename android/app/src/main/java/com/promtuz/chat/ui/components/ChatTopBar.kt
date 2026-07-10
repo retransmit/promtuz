@@ -9,20 +9,29 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.ChatVM
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.HazeStyle
+import dev.chrisbanes.haze.HazeTint
+import dev.chrisbanes.haze.hazeEffect
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatTopBar(name: String, viewModel: ChatVM) {
+fun ChatTopBar(name: String, viewModel: ChatVM, haze: HazeState) {
     val back = LocalOnBackPressedDispatcherOwner.current
     val colors = MaterialTheme.colorScheme
     val typing by viewModel.typing.collectAsState()
+    val hazeStyle = HazeStyle(colors.surface, HazeTint(colors.surface.copy(alpha = 0.5f)), 30.dp, 0f)
+
     TopAppBar(
         title = {
             Row(
@@ -45,5 +54,7 @@ fun ChatTopBar(name: String, viewModel: ChatVM) {
                 DrawableIcon(R.drawable.i_back_chevron)
             }
         },
+        modifier = Modifier.hazeEffect(haze, hazeStyle),
+        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
     )
 }

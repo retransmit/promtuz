@@ -25,15 +25,22 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.R
 import com.promtuz.chat.presentation.viewmodel.ChatVM
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.HazeStyle
+import dev.chrisbanes.haze.HazeTint
+import dev.chrisbanes.haze.hazeEffect
 
-/** Composer: a rounded input pill (grows to 6 lines) + an accent send button. Draft in the VM. */
+/** Composer: a rounded input pill (grows to 6 lines) + accent send, over a blurred bar. */
 @Composable
-fun ChatBottomBar(viewModel: ChatVM) {
+fun ChatBottomBar(viewModel: ChatVM, haze: HazeState) {
     val colors = MaterialTheme.colorScheme
     val input by viewModel.input.collectAsState()
+    val hazeStyle = HazeStyle(colors.surface, HazeTint(colors.surface.copy(alpha = 0.5f)), 30.dp, 0f)
+
     Row(
         Modifier
             .fillMaxWidth()
+            .hazeEffect(haze, hazeStyle)
             .navigationBarsPadding()
             .imePadding()
             .padding(horizontal = 10.dp, vertical = 8.dp),
@@ -44,7 +51,7 @@ fun ChatBottomBar(viewModel: ChatVM) {
             Modifier
                 .weight(1f)
                 .clip(RoundedCornerShape(24.dp))
-                .background(colors.surfaceContainerHigh)
+                .background(colors.surfaceContainerHigh.copy(alpha = 0.85f))
                 .padding(horizontal = 16.dp, vertical = 13.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
