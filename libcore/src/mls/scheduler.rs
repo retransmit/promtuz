@@ -139,6 +139,14 @@ async fn publish_kp_batch<C: DhtClient>(dht: &C, records: &[KeyPackageRecord]) {
 pub async fn ensure_kp_published<C: DhtClient>(
     provider: &PromtuzMlsProvider, stash: &KeyPackageStash, ipk_signer: &SigningKey, dht: &C,
 ) {
+    // Self-heal after an MLS_WIRE_VERSION bump: records minted under the old
+    // version fail every peer's sig check — purge so the fill below mints
+    // valid replacements and the snapshot Publish evicts them relay-side.
+    let purged =
+        stash.purge_invalid_records(crate::utils::systime().as_millis() as u64);
+    if purged > 0 {
+        log::info!("ensure_kp_published: purged {purged} stale-version KP records; re-minting");
+    }
     // Guarantee a full stash first (mints if low — covers a fresh or migration-wiped stash).
     if let Err(e) = stash.ensure_stash_full(provider, ipk_signer) {
         log::warn!("ensure_kp_published: ensure_stash_full failed: {e}");

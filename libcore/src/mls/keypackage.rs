@@ -332,6 +332,61 @@ impl KeyPackageStash {
         Ok(out)
     }
 
+    /// Drop unconsumed records whose `owner_sig` no longer verifies under the
+    /// CURRENT [`MLS_WIRE_VERSION`] — the transcript mixes the version in, so
+    /// a wire bump silently invalidates every previously-minted record. Left
+    /// in place they poison the stash twice over: they count toward the
+    /// stash target (suppressing re-mints) AND get republished verbatim on
+    /// every reconnect, so every peer's fetch fails with "owner_sig invalid".
+    /// The sig check IS the version check — no schema change needed. Returns
+    /// the number purged; `ensure_stash_full` then mints replacements and the
+    /// full-snapshot Publish evicts the stale copies relay-side.
+    pub fn purge_invalid_records(&self, now_ms: u64) -> usize {
+        use ed25519_dalek::Signature;
+        use ed25519_dalek::VerifyingKey;
+
+        let conn = self.db.lock();
+        let stale: Vec<Vec<u8>> = {
+            let Ok(mut stmt) = conn.prepare(
+                "SELECT kp_ref, record_blob FROM mls_keypackage_stash \
+                 WHERE consumed = 0 AND expires_at_ms > ?1 AND record_blob IS NOT NULL",
+            ) else {
+                return 0;
+            };
+            let Ok(rows) = stmt.query_map(params![now_ms as i64], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+            }) else {
+                return 0;
+            };
+            rows.flatten()
+                .filter_map(|(kp_ref, blob)| {
+                    let Ok(rec) = KeyPackageRecord::deser(&blob) else {
+                        return Some(kp_ref); // undecodable blob = stale too
+                    };
+                    let Ok(vk) = VerifyingKey::from_bytes(&rec.ipk.0) else {
+                        return Some(kp_ref);
+                    };
+                    let msg = kp_record_signing_input(
+                        MLS_WIRE_VERSION,
+                        &rec.ipk.0,
+                        &rec.kp_ref.0,
+                        &rec.kp_bytes.0,
+                        rec.expires_at_ms,
+                    );
+                    let sig = Signature::from_bytes(&rec.owner_sig.0);
+                    vk.verify_strict(&msg, &sig).is_err().then_some(kp_ref)
+                })
+                .collect()
+        };
+        let mut n = 0usize;
+        for kp_ref in &stale {
+            n += conn
+                .execute("DELETE FROM mls_keypackage_stash WHERE kp_ref = ?1", [kp_ref])
+                .unwrap_or(0);
+        }
+        n
+    }
+
     /// Fill the stash up to [`KP_STASH_TARGET`] unconsumed in-lifetime
     /// KPs. Returns the freshly-generated records (so the caller can
     /// publish them via [`Self::publish_to_homes`]).
@@ -543,6 +598,41 @@ mod tests {
     fn fresh_ipk_signer() -> SigningKey {
         // Deterministic-seeded for reproducibility.
         SigningKey::from_bytes(&[0x42u8; 32])
+    }
+
+    /// A record signed under the PREVIOUS wire version (what a pre-bump build
+    /// leaves behind) must be purged; a current-version record must survive.
+    /// Without the purge, stale records suppress re-minting and get
+    /// republished — every peer's pairing then fails with "owner_sig invalid".
+    #[test]
+    fn purge_invalid_records_drops_stale_version_signatures() {
+        let conn = fresh_conn();
+        let provider = PromtuzMlsProvider::new(conn.clone());
+        let stash = KeyPackageStash::new(conn.clone());
+        let signer = fresh_ipk_signer();
+
+        let good = stash.generate_one(&provider, &signer).expect("gen good");
+        let mut stale = stash.generate_one(&provider, &signer).expect("gen stale");
+        let old_msg = kp_record_signing_input(
+            MLS_WIRE_VERSION - 1,
+            &stale.ipk.0,
+            &stale.kp_ref.0,
+            &stale.kp_bytes.0,
+            stale.expires_at_ms,
+        );
+        stale.owner_sig = signer.sign(&old_msg).to_bytes().into();
+        let blob = stale.ser().expect("ser");
+        conn.lock()
+            .execute(
+                "UPDATE mls_keypackage_stash SET record_blob = ?1 WHERE kp_ref = ?2",
+                params![&blob, stale.kp_ref.0.as_slice()],
+            )
+            .expect("swap in stale blob");
+
+        assert_eq!(stash.purge_invalid_records(now_ms()), 1, "stale record purged");
+        let left = stash.unconsumed_records(now_ms()).expect("read");
+        assert_eq!(left.len(), 1, "exactly the valid record remains");
+        assert_eq!(left[0].kp_ref.0, good.kp_ref.0, "current-version record survives");
     }
 
     // -----------------------------------------------------------------
