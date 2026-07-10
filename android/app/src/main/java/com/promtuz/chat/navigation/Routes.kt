@@ -31,6 +31,9 @@ object Routes : NavKey {
     data object RecoveryPhrase : NavKey
 
     @Serializable
+    data object ChatAppearance : NavKey
+
+    @Serializable
     data object About : NavKey
 
     @Serializable

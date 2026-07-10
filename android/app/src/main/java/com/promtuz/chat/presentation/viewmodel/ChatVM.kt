@@ -40,6 +40,9 @@ class ChatVM(private val application: Application) : ViewModel() {
     /** Composer draft; two-way bound to the input field, cleared on [send]. */
     val input = MutableStateFlow("")
 
+    /** Reply/edit staging shown as a chip above the composer; consumed by [send]. */
+    val composerAction = MutableStateFlow<ComposerAction?>(null)
+
     private val _typing = MutableStateFlow(false)
     val typing: StateFlow<Boolean> = _typing.asStateFlow()
 
@@ -77,8 +80,35 @@ class ChatVM(private val application: Application) : ViewModel() {
     fun send() {
         val text = input.value.trim()
         if (text.isEmpty()) return
+        val action = composerAction.value
         input.value = ""
-        fire { CoreBridge.sendMessage(peer, text) }
+        composerAction.value = null
+        when (action) {
+            is ComposerAction.Edit -> action.msg.dispatchIdHex?.let { edit(it, text) }
+            // Reply metadata isn't on the wire yet; stage UX now, quote later.
+            else -> fire { CoreBridge.sendMessage(peer, text) }
+        }
+    }
+
+    fun beginReply(msg: UiMessage) {
+        composerAction.value = ComposerAction.Reply(msg)
+    }
+
+    fun beginEdit(msg: UiMessage) {
+        composerAction.value = ComposerAction.Edit(msg)
+        input.value = (msg.content as? MessageContent.Text)?.text.orEmpty()
+    }
+
+    fun cancelComposerAction() {
+        if (composerAction.value is ComposerAction.Edit) input.value = ""
+        composerAction.value = null
+    }
+
+    /** Tap on a quick-reaction or an existing chip: mine → remove, else add. */
+    fun toggleReaction(msg: UiMessage, emoji: String) {
+        val id = msg.dispatchIdHex ?: return
+        val mine = msg.reactions.any { it.emoji == emoji && it.mine }
+        react(id, emoji, add = !mine)
     }
 
     fun edit(dispatchIdHex: String, text: String) =
@@ -95,6 +125,14 @@ class ChatVM(private val application: Application) : ViewModel() {
     private companion object {
         const val TYPING_TTL_MS = 6_000L
     }
+}
+
+/** What the next [ChatVM.send] means: a staged reply or an in-place edit. */
+sealed interface ComposerAction {
+    val msg: UiMessage
+
+    data class Reply(override val msg: UiMessage) : ComposerAction
+    data class Edit(override val msg: UiMessage) : ComposerAction
 }
 
 private fun MessageRecord.toUi(reactionsByMsg: Map<String, List<ReactionRecord>>): UiMessage {
