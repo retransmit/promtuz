@@ -1000,8 +1000,53 @@ pub async fn process_inbound_envelope<C: DhtClient>(
         MlsEnvelopeP::Welcome(env) => process_welcome_inbound(ctx, sender_ipk, env)
             .map(|_| Some(InboundDecoded::Welcome)),
         MlsEnvelopeP::Application(env) => {
-            process_application_inbound(ctx, sender_ipk, env).map(Some)
+            let decoded = process_application_inbound(ctx, sender_ipk, env)?;
+            if let InboundDecoded::ApplicationNoGroup { group_id } = &decoded {
+                heal_dead_group(ctx, sender_ipk, group_id).await;
+            }
+            Ok(Some(decoded))
         },
+    }
+}
+
+/// Post-restore self-heal: a known contact sent into a group we hold no
+/// state for — mint a fresh group + Welcome toward them so the NEXT
+/// messages flow (the mirror of the send path's "no local state;
+/// recreating"). The lost ciphertext stays lost (FS, spec §9).
+///
+/// Mint-storm guard: a backlog of N dead-group messages must re-establish
+/// once, not N times. Under the per-recipient lock, recreate only while the
+/// contact row still points at the dead gid (or none); the first heal
+/// repoints it, so the rest of the backlog skips. Best-effort — a failure
+/// (e.g. KP stash miss) just waits for the peer's next message to retry.
+async fn heal_dead_group<C: DhtClient>(
+    ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], dead_gid: &[u8; 32],
+) {
+    if !Contact::exists(&sender_ipk) {
+        return;
+    }
+    let Some(our_ipk) = Identity::get().map(|i| i.ipk()) else { return };
+    let Ok(ipk_signer) = crate::data::identity::secret_key_signing(&our_ipk) else { return };
+
+    let lock = group_create_lock(&sender_ipk);
+    let _guard = lock.lock().await;
+
+    let current = Contact::get(&sender_ipk).and_then(|c| c.inner.mls_group_id);
+    if !(current.is_none() || current == Some(*dead_gid)) {
+        return; // already re-established since this envelope was queued
+    }
+    match lazy_create_group(ctx, &our_ipk, &ipk_signer, &sender_ipk).await {
+        Ok(g) => {
+            let _ = Contact::set_mls_group_id(&sender_ipk, &g.group_id());
+            info!(
+                "MLS: re-established group with {} after dead-group inbound",
+                hex::encode(&sender_ipk[..4])
+            );
+        },
+        Err(e) => warn!(
+            "MLS: dead-group re-establish with {} failed: {e}",
+            hex::encode(&sender_ipk[..4])
+        ),
     }
 }
 
@@ -1027,6 +1072,14 @@ pub enum InboundDecoded {
     ApplicationBuffered,
     /// Application message stale (epoch < current); dropped.
     ApplicationStale,
+    /// Application message for a group we hold no local state for (post-
+    /// restore, or state loss). The ciphertext is unrecoverable by
+    /// construction (FS) — the caller MUST ack so the relay GCs it instead
+    /// of redelivering forever; `process_inbound_envelope` fires the
+    /// re-establishment toward known contacts (see `heal_dead_group`).
+    ApplicationNoGroup {
+        group_id: [u8; 32],
+    },
 }
 
 fn process_welcome_inbound<C: DhtClient>(
@@ -1178,10 +1231,19 @@ pub fn process_application_inbound_for<C: DhtClient>(
     vk.verify_strict(&transcript, &sig)
         .map_err(|_| anyhow!("application envelope sig invalid"))?;
 
-    // 2. Look up the group.
-    let mut group = MlsGroupHandle::load(ctx.provider, &env.group_id.0)
+    // 2. Look up the group. No local state (post-restore / state loss) is a
+    //    typed outcome, not an error: an `Err` here meant the live path never
+    //    acked and the relay redelivered the same doomed envelope forever.
+    let Some(mut group) = MlsGroupHandle::load(ctx.provider, &env.group_id.0)
         .map_err(|e| anyhow!("load group: {e}"))?
-        .ok_or_else(|| anyhow!("no local state for group"))?;
+    else {
+        warn!(
+            "MLS: no local state for group {} (sender {})",
+            hex::encode(&env.group_id.0[..4]),
+            hex::encode(&sender_ipk[..4])
+        );
+        return Ok(InboundDecoded::ApplicationNoGroup { group_id: env.group_id.0 });
+    };
 
     // 3. Compare epoch.
     let current = group.epoch();
@@ -1898,6 +1960,78 @@ mod tests {
             buffered_before, buffered_after,
             "stale envelope must not grow the buffer"
         );
+    }
+
+    /// An Application envelope for a group the recipient holds NO state
+    /// for (post-restore) returns `ApplicationNoGroup`, not `Err` — an
+    /// `Err` meant `handle_deliver` never acked and the relay redelivered
+    /// the same doomed envelope forever.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dead_group_application_returns_typed_outcome_not_err() {
+        let alice = Node::new(0x91);
+        let bob = Node::new(0x92);
+        let dht = FakeDhtClient::new_arc();
+
+        let bob_kps = bob.stash.ensure_stash_full(&bob.provider, &bob.ipk_signer).unwrap();
+        dht.publish_keypackages(
+            &bob_kps[..1],
+            crate::quic::dht_client::KpOutcomeFilter::Default,
+        )
+        .await
+        .unwrap();
+
+        let mut alice_group = lazy_create_group(
+            &alice.ctx(dht.as_ref()),
+            &alice.ipk,
+            &alice.ipk_signer,
+            &bob.ipk,
+        )
+        .await
+        .unwrap();
+        // Bob never processes the Welcome — his provider holds no state for
+        // this group, exactly the post-restore shape.
+
+        let alice_leaf =
+            leaf_signer_for_group(&alice.provider, &alice_group, &alice.ipk).unwrap();
+        let mls_msg = alice_group
+            .create_application_message(&alice.provider, &alice_leaf, b"into the void")
+            .unwrap();
+        let mls_bytes =
+            openmls::prelude::tls_codec::Serialize::tls_serialize_detached(&mls_msg).unwrap();
+
+        use ed25519_dalek::Signer;
+        let epoch = alice_group.epoch();
+        let transcript = envelope_signing_input(
+            PROTOCOL_VERSION,
+            &bob.ipk,
+            &alice_group.group_id(),
+            epoch,
+            &mls_bytes,
+        );
+        let outer_sig = alice.ipk_signer.sign(&transcript);
+
+        let env = MlsApplicationEnvelopeP {
+            version:     MLS_ENVELOPE_VERSION,
+            group_id:    alice_group.group_id().into(),
+            epoch,
+            mls_message: ByteVec(mls_bytes),
+            sender_sig:  outer_sig.to_bytes().into(),
+        };
+
+        let result = process_application_inbound_for(
+            &bob.ctx(dht.as_ref()),
+            alice.ipk,
+            &bob.ipk,
+            env,
+        )
+        .expect("dead-group envelope must be a typed outcome, not Err");
+
+        match result {
+            InboundDecoded::ApplicationNoGroup { group_id } => {
+                assert_eq!(group_id, alice_group.group_id(), "must surface the dead gid");
+            },
+            other => panic!("expected ApplicationNoGroup, got {other:?}"),
+        }
     }
 
     /// An Application envelope claiming an epoch > current +

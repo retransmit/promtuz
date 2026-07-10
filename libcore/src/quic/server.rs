@@ -768,6 +768,16 @@ async fn process_deliver(
             // Buffered for a future epoch / staged commit merged.
             // Terminal-good: the caller acks so the relay GCs the entry.
         },
+        Ok(Some(crate::messaging::InboundDecoded::ApplicationNoGroup { .. })) => {
+            // No local group state (post-restore): the ciphertext is
+            // unrecoverable, so ack and let the relay GC it — refusing to
+            // ack meant redelivery forever. messaging already fired the
+            // re-establishment toward the (known-contact) sender.
+            warn!(
+                "MESSAGE: dropped message for dead group from {}; re-establishment fired",
+                hex::encode(&msg.from[..4])
+            );
+        },
         Ok(Some(crate::messaging::InboundDecoded::ApplicationStale)) => {
             // Ack stale-epoch envelopes so the relay GCs them.
             // Previously this `bail`ed without ack which made
