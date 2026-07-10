@@ -223,6 +223,7 @@ dependencies {
     implementation(libs.androidx.core.splashscreen)
 
     implementation(libs.kotlinx.serialization.core)
+    implementation(libs.kotlinx.serialization.json)
 
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)

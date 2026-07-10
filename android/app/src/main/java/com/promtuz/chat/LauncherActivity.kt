@@ -5,8 +5,11 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.promtuz.chat.navigation.AppNavigation
+import com.promtuz.chat.ui.appearance.AppearanceStore
 import com.promtuz.chat.presentation.viewmodel.AppVM
 import com.promtuz.chat.ui.components.InviteBottomSheet
 import com.promtuz.chat.ui.theme.PromtuzTheme
@@ -29,7 +32,8 @@ class LauncherActivity : ComponentActivity() {
         consumeInvite(intent)
 
         setContent {
-            PromtuzTheme {
+            val appearance by AppearanceStore.appearance.collectAsState()
+            PromtuzTheme(appearance = appearance) {
                 AppNavigation(viewModel)
                 InviteBottomSheet(viewModel)
             }

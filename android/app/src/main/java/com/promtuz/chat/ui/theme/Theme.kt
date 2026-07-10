@@ -12,12 +12,13 @@ import androidx.compose.ui.platform.LocalContext
 import com.promtuz.chat.ui.appearance.ChatAppearance
 import com.promtuz.chat.ui.appearance.LocalChatAppearance
 import com.promtuz.chat.ui.appearance.LocalChatColors
+import com.promtuz.chat.ui.appearance.ThemeMode
 import com.promtuz.chat.ui.appearance.resolve
 
 /**
  * Designed identity by default ([DarkColors]/[LightColors]); [dynamicTheme] opts into
  * wallpaper-seeded Material You. Also mounts the chat appearance + its resolved
- * [LocalChatColors] — a persisted appearance store later feeds [appearance] here.
+ * [LocalChatColors]. [appearance]'s themeMode overrides [darkTheme] unless System.
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -29,10 +30,15 @@ fun PromtuzTheme(
 ) {
     val context = LocalContext.current
 
+    val dark = when (appearance.themeMode) {
+        ThemeMode.System -> darkTheme
+        ThemeMode.Light -> false
+        ThemeMode.Dark -> true
+    }
     val colorScheme = when {
-        dynamicTheme && darkTheme -> dynamicDarkColorScheme(context)
+        dynamicTheme && dark -> dynamicDarkColorScheme(context)
         dynamicTheme -> dynamicLightColorScheme(context)
-        darkTheme -> DarkColors
+        dark -> DarkColors
         else -> LightColors
     }
 

@@ -6,6 +6,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeStyle
 import dev.chrisbanes.haze.HazeTint
@@ -37,15 +38,19 @@ val LocalChatColors = staticCompositionLocalOf<ChatColorScheme> {
 
 fun ChatColors.resolve(scheme: ColorScheme) = ChatColorScheme(
     outgoingBubble = outgoing.orRole(scheme.primaryContainer),
-    onOutgoingBubble = outgoingText.orRole(scheme.onPrimaryContainer),
+    onOutgoingBubble = outgoingText.orRole(outgoing?.let(::bestOn) ?: scheme.onPrimaryContainer),
     incomingBubble = incoming.orRole(scheme.surfaceContainerHigh),
-    onIncomingBubble = incomingText.orRole(scheme.onSurface),
+    onIncomingBubble = incomingText.orRole(incoming?.let(::bestOn) ?: scheme.onSurface),
     accent = accent.orRole(scheme.primary),
     bar = scheme.surface,
     marker = scheme.onSurfaceVariant,
 )
 
 private fun Long?.orRole(role: Color): Color = this?.let { Color(it) } ?: role
+
+/** Readable text for a user-picked bubble fill the scheme knows nothing about. */
+private fun bestOn(argb: Long): Color =
+    if (Color(argb).luminance() > 0.4f) Color(0xE6000000) else Color.White
 
 /** The one blur recipe both chat bars share. */
 @Composable
