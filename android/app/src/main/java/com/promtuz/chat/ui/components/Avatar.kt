@@ -21,7 +21,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.promtuz.chat.ui.theme.adjustLight
 
 const val AVATAR_RADIUS_RATIO = 2.875f;
 
@@ -47,11 +46,6 @@ fun Avatar(
             .clickable(
                 enabled = true,
                 interactionSource = interactionSource,
-//                indication = ripple(
-//                    color = adjustLight(
-//                        MaterialTheme.colorScheme.background, 0.3f
-//                    )
-//                ),
             ) {
 
             }, contentAlignment = Alignment.Center

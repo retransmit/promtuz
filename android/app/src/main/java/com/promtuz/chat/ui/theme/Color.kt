@@ -8,7 +8,6 @@ import androidx.compose.ui.*
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.tooling.preview.*
 import androidx.compose.ui.unit.*
-import androidx.core.graphics.ColorUtils
 
 
 @Composable
@@ -30,27 +29,6 @@ fun transparentTopAppBar() = TopAppBarDefaults.topAppBarColors(
     scrolledContainerColor = Color.Transparent
 )
 
-
-/**
- *
- * 1f changeInLight is 100%
- *
- * Example:
- * 1. `+0.3f` will increase light by `30%` regardless of base value, but will max out at 100% (pure white)
- * 2. `-0.3f` will decrease light by `30%` regardless of base value, but will max out at 0% (pitch black)
- *
- */
-fun adjustLight(col: Color, changeInLight: Float): Color {
-    val hsl = floatArrayOf(0f, 0f, 0f)
-    ColorUtils.RGBToHSL(
-        (col.red * 255f).toInt(),
-        (col.green * 255f).toInt(),
-        (col.blue * 255f).toInt(),
-        hsl
-    )
-    hsl[2] += changeInLight
-    return Color(ColorUtils.HSLToColor(hsl))
-}
 
 @Preview(wallpaper = Wallpapers.BLUE_DOMINATED_EXAMPLE)
 @Composable
