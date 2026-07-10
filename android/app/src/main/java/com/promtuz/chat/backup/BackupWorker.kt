@@ -2,10 +2,15 @@ package com.promtuz.chat.backup
 
 import android.app.backup.BackupManager
 import android.content.Context
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
@@ -75,8 +80,11 @@ class BackupWorker(context: Context, params: WorkerParameters) :
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
         /**
-         * App-start hook: mark the dirty flag on every DB doorbell and keep
-         * the daily snapshot scheduled (WiFi + charging, like the big apps).
+         * App-start hook: mark the dirty flag on every DB doorbell, snapshot
+         * whenever the app leaves the foreground (dirty-gated no-op
+         * otherwise — this is what keeps the LOCAL blob fresh; the daily
+         * periodic is just the safety net), and keep the daily schedule.
+         * Cloud shipping stays the OS's job on its own idle/WiFi window.
          */
         fun start(context: Context) {
             val app = context.applicationContext
@@ -85,6 +93,9 @@ class BackupWorker(context: Context, params: WorkerParameters) :
                     prefs(app).edit().putBoolean(KEY_DIRTY, true).apply()
                 }
             }
+            ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+                override fun onStop(owner: LifecycleOwner) = snapshotNow(app)
+            })
             val request = PeriodicWorkRequestBuilder<BackupWorker>(24, TimeUnit.HOURS)
                 .setConstraints(
                     Constraints.Builder()
@@ -95,6 +106,15 @@ class BackupWorker(context: Context, params: WorkerParameters) :
                 .build()
             WorkManager.getInstance(app).enqueueUniquePeriodicWork(
                 WORK_NAME, ExistingPeriodicWorkPolicy.KEEP, request
+            )
+        }
+
+        /** One-shot local snapshot, no constraints (it's a disk write). */
+        fun snapshotNow(context: Context) {
+            WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
+                "$WORK_NAME-now",
+                ExistingWorkPolicy.KEEP,
+                OneTimeWorkRequestBuilder<BackupWorker>().build(),
             )
         }
     }
