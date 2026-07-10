@@ -131,6 +131,30 @@ impl Identity {
         Ok(())
     }
 
+    /// Restore a previously-created identity from its raw secret — the shared
+    /// tail of both recovery channels (escrow bytes or decoded BIP39 phrase).
+    /// Refuses when an identity already exists: restore is a fresh-install
+    /// flow and must never clobber a live identity.
+    pub(super) fn restore(isk: &[u8; 32], name: &str) -> Result<()> {
+        if Identity::get().is_some() {
+            return Err(anyhow!("an identity already exists; restore requires a fresh install"));
+        }
+        let name = validate_nickname(name).map_err(|e| anyhow!(e))?;
+        let store = SECURE_STORE.get().ok_or(anyhow!("API is not initialized"))?;
+
+        let ipk = SigningKey::from_bytes(isk).verifying_key();
+        let enc_isk = store.seal(isk.to_vec()).map_err(|e| anyhow!("seal failed: {e}"))?;
+
+        Identity::save(IdentityRow {
+            id: 0,
+            ipk: ipk.to_bytes(),
+            enc_isk,
+            created_at: systime().as_millis() as u64,
+            name,
+        })?;
+        Ok(())
+    }
+
     /// Mint a bearer pairing invite valid for ~10 minutes. Signed by our
     /// long-term IPK; whoever holds it may add us until it expires. Used
     /// by `api::identity::make_invite_qr`.

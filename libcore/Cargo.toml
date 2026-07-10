@@ -43,6 +43,8 @@ tokio-util = "0.7.18"
 thiserror = "2.0.18"
 uuid = { version = "1.23.4", features = ["v7"] }
 zeroize = { version = "1.9.0", features = ["aarch64", "derive"] }
+# Recovery (IDENTITY_RECOVERY.md): phrase = BIP39(isk), 24 words.
+bip39 = "2.2.0"
 x509-parser = "0.18.1"
 
 # MLS (RFC 9420) — see misc/specs/MLS.md
