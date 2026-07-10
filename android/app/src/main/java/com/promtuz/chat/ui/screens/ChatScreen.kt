@@ -31,6 +31,7 @@ import com.promtuz.chat.ui.components.ChatBottomBar
 import com.promtuz.chat.ui.components.ChatTopBar
 import com.promtuz.chat.ui.components.DashedHorizontalDivider
 import com.promtuz.chat.ui.components.MessageBubble
+import com.promtuz.chat.ui.components.SwipeToReply
 import com.promtuz.chat.ui.components.rememberChatWallpaper
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
@@ -68,7 +69,13 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
                     when (row) {
                         is ChatRow.Msg -> {
                             val gapAbove = if (row.mergedTop) layout.messageGap.dp else layout.groupGap.dp
-                            MessageBubble(Modifier.padding(top = gapAbove), row.msg, row.mergedTop, row.mergedBottom)
+                            SwipeToReply(
+                                enabled = row.msg.dispatchIdHex != null && !row.msg.deleted,
+                                onReply = { viewModel.beginReply(row.msg) },
+                                Modifier.padding(top = gapAbove),
+                            ) {
+                                MessageBubble(msg = row.msg, mergedTop = row.mergedTop, mergedBottom = row.mergedBottom)
+                            }
                         }
                         is ChatRow.Frontier -> FrontierMarker(row.label)
                     }
