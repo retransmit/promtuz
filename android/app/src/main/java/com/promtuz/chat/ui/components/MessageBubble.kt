@@ -8,10 +8,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -40,9 +44,11 @@ import androidx.compose.foundation.text.appendInlineContent
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import com.promtuz.chat.domain.model.MessageContent
+import com.promtuz.chat.domain.model.Quote
 import com.promtuz.chat.domain.model.ReactionGroup
 import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
@@ -104,6 +110,8 @@ fun MessageBubble(
                 )
                 .padding(horizontal = 11.dp, vertical = 6.dp),
         ) {
+            msg.quote?.let { QuoteBlock(it, textColor, chat.accent) }
+
             BubbleTextWithMeta(msg, textColor, appearance.type.fontScale)
 
             if (msg.reactions.isNotEmpty()) {
@@ -117,6 +125,29 @@ fun MessageBubble(
                 }
             }
         }
+    }
+}
+
+/** The quoted-message block a reply carries: accent rail + short snippet. */
+@Composable
+private fun QuoteBlock(quote: Quote, textColor: Color, accent: Color) {
+    Row(
+        Modifier
+            .padding(top = 2.dp, bottom = 4.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(textColor.copy(alpha = 0.08f))
+            .height(IntrinsicSize.Min),
+    ) {
+        Box(Modifier.width(3.dp).fillMaxHeight().background(accent))
+        Text(
+            quote.text ?: "Message unavailable",
+            Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = textColor.copy(alpha = if (quote.text != null) 0.8f else 0.5f),
+            fontStyle = if (quote.text != null) FontStyle.Normal else FontStyle.Italic,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

@@ -109,8 +109,8 @@ object CoreBridge {
     suspend fun messages(peerIpk: ByteArray, limit: Int, beforeId: String = ""): List<MessageRecord> =
         withContext(Dispatchers.IO) { ffiGetMessages(peerIpk, limit.toUInt(), beforeId) }
 
-    suspend fun sendMessage(toIpk: ByteArray, content: String) =
-        withContext(Dispatchers.IO) { ffiSendMessage(toIpk, content) }
+    suspend fun sendMessage(toIpk: ByteArray, content: String, replyTo: ByteArray? = null) =
+        withContext(Dispatchers.IO) { ffiSendMessage(toIpk, content, replyTo) }
 
     suspend fun editMessage(peer: ByteArray, dispatchId: ByteArray, content: String) =
         withContext(Dispatchers.IO) { ffiEditMessage(peer, dispatchId, content) }

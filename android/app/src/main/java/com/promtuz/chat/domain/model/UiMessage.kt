@@ -19,4 +19,17 @@ data class UiMessage(
     val deleted: Boolean,
     val timestampMs: Long,
     val reactions: List<ReactionGroup>,
+    /** The quoted message, when this is a reply. */
+    val quote: Quote? = null,
+)
+
+/**
+ * Quoted-message snippet, resolved at load from the quoted dispatch_id.
+ * [text] is null when the quoted message isn't in the loaded window (or was
+ * hard-deleted) — render a "message unavailable" shell.
+ */
+data class Quote(
+    val dispatchIdHex: String,
+    val text: String?,
+    val outgoing: Boolean,
 )

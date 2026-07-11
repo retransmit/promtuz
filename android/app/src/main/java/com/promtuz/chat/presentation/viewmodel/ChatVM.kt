@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.promtuz.chat.domain.model.Activity
 import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.Presence
+import com.promtuz.chat.domain.model.Quote
 import com.promtuz.chat.presentation.state.ConnectionState
 import com.promtuz.chat.domain.model.ReactionGroup
 import com.promtuz.chat.domain.model.SendStatus
@@ -128,8 +129,11 @@ class ChatVM(private val application: Application) : ViewModel() {
     private suspend fun load(): List<UiMessage> {
         val rows = CoreBridge.messages(peer, 200)                    // oldest-first
         val byMsg = CoreBridge.reactions(peer).groupBy { it.dispatchId.toHex() }
+        // Quote resolution: replies name a dispatch_id; snippet comes from the
+        // loaded window (null text → "unavailable" shell, e.g. outside window).
+        val byDid = rows.asSequence().mapNotNull { r -> r.dispatchId?.let { it.toHex() to r } }.toMap()
         // reversed → newest at index 0 → drawn at the bottom under reverseLayout
-        return rows.asReversed().map { it.toUi(byMsg) }
+        return rows.asReversed().map { it.toUi(byMsg, byDid) }
     }
 
     fun send() {
@@ -140,8 +144,10 @@ class ChatVM(private val application: Application) : ViewModel() {
         composerAction.value = null
         when (action) {
             is ComposerAction.Edit -> action.msg.dispatchIdHex?.let { edit(it, text) }
-            // Reply metadata isn't on the wire yet; stage UX now, quote later.
-            else -> fire { CoreBridge.sendMessage(peer, text) }
+            is ComposerAction.Reply -> fire {
+                CoreBridge.sendMessage(peer, text, action.msg.dispatchIdHex?.fromHex())
+            }
+            null -> fire { CoreBridge.sendMessage(peer, text) }
         }
     }
 
@@ -193,12 +199,23 @@ sealed interface ComposerAction {
     data class Edit(override val msg: UiMessage) : ComposerAction
 }
 
-private fun MessageRecord.toUi(reactionsByMsg: Map<String, List<ReactionRecord>>): UiMessage {
+private fun MessageRecord.toUi(
+    reactionsByMsg: Map<String, List<ReactionRecord>>,
+    byDid: Map<String, MessageRecord>,
+): UiMessage {
     val didHex = dispatchId?.toHex()
     val reactions = didHex?.let { reactionsByMsg[it] }
         ?.groupBy { it.emoji }
         ?.map { (emoji, rs) -> ReactionGroup(emoji, rs.size, rs.any { it.mine }) }
         ?: emptyList()
+    val quote = replyTo?.toHex()?.let { rtHex ->
+        val quoted = byDid[rtHex]
+        Quote(
+            dispatchIdHex = rtHex,
+            text = quoted?.takeIf { !it.deleted }?.content,
+            outgoing = quoted?.outgoing ?: false,
+        )
+    }
     return UiMessage(
         key = didHex ?: id,
         localId = id,
@@ -210,5 +227,6 @@ private fun MessageRecord.toUi(reactionsByMsg: Map<String, List<ReactionRecord>>
         deleted = deleted,
         timestampMs = timestamp.toLong() * 1000,
         reactions = reactions,
+        quote = quote,
     )
 }
