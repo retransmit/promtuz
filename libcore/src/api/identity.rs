@@ -40,9 +40,11 @@ pub fn make_invite_qr() -> Result<Vec<u8>, CoreError> {
 pub fn pair_from_qr(qr_bytes: Vec<u8>) -> Result<(), CoreError> {
     let qr = IdentityQr::deser(&qr_bytes)
         .map_err(|e| CoreError::Internal { msg: format!("bad qr: {e}") })?;
-    let our_name = Identity::get()
-        .ok_or_else(|| CoreError::Internal { msg: "no identity".into() })?
-        .name();
+    let me = Identity::get().ok_or_else(|| CoreError::Internal { msg: "no identity".into() })?;
+    if qr.ipk == me.ipk() {
+        return Err(CoreError::Internal { msg: "cannot pair with yourself".into() });
+    }
+    let our_name = me.name();
 
     // We have the sharer's identity from the QR — save them right away.
     let _ = Contact::save(qr.ipk, qr.name);
@@ -68,6 +70,8 @@ pub struct InvitePreview {
     pub already_contact: bool,
     /// The invite's ~10-min window has elapsed.
     pub expired: bool,
+    /// This is our own invite — pairing with self is refused.
+    pub is_self: bool,
 }
 
 /// Decode-only preview of a scanned/opened invite so the client can show an
@@ -80,10 +84,12 @@ pub fn preview_invite(qr_bytes: Vec<u8>) -> Result<InvitePreview, CoreError> {
     let qr = IdentityQr::deser(&qr_bytes)
         .map_err(|e| CoreError::Internal { msg: format!("bad invite: {e}") })?;
     let now_ms = crate::utils::systime().as_millis() as u64;
+    let is_self = Identity::get().is_some_and(|me| me.ipk() == qr.ipk);
     Ok(InvitePreview {
         ipk: qr.ipk.to_vec(),
         name: qr.name.chars().take(32).collect(),
         already_contact: Contact::exists(&qr.ipk),
         expired: qr.invite.expiry_ms < now_ms,
+        is_self,
     })
 }

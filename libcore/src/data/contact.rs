@@ -48,6 +48,12 @@ impl Contact {
     /// send path self-heals (`messaging.rs`: "mls_group_id has no local
     /// state; recreating"), so preserving it is always the safe choice.
     pub fn save(ipk: [u8; 32], name: String) -> Result<SaveOutcome> {
+        // Self is never a contact: a 1:1 group with yourself dies on
+        // CannotDecryptOwnMessage once the relay reflects your own dispatch
+        // back. This is the chokepoint both pairing paths funnel through.
+        if crate::data::identity::Identity::public_key().is_ok_and(|k| k.to_bytes() == ipk) {
+            return Err(anyhow::anyhow!("cannot add yourself as a contact"));
+        }
         let added_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
 
         let conn = CONTACTS_DB.lock();
