@@ -50,6 +50,7 @@ import com.promtuz.chat.domain.model.MessageContent
 import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.UiMessage
 import com.promtuz.chat.presentation.viewmodel.ChatVM
+import com.promtuz.chat.ui.appearance.DoubleTapAction
 import com.promtuz.chat.ui.appearance.LocalChatAppearance
 import com.promtuz.chat.ui.appearance.LocalChatColors
 import com.promtuz.chat.ui.components.ChatBottomBar
@@ -104,10 +105,13 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
     LaunchedEffect(bottomKey) {
         val ownSend = newestOutKey != null && newestOutKey != lastOutKey
         lastOutKey = newestOutKey
-        val atBottom = listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
         val nearBottom = listState.firstVisibleItemIndex <= 3
-        if (bottomKey != null && !atBottom && (nearBottom || ownSend)) {
-            listState.animateScrollToItem(0)
+        if (bottomKey != null && (nearBottom || ownSend)) {
+            // Pinned at the bottom: re-anchor without animating and let the items'
+            // placement animations carry the motion (an animateScroll here cancels
+            // and restarts per send — the burst jitter). Away from it: glide.
+            if (listState.firstVisibleItemIndex == 0) listState.requestScrollToItem(0)
+            else listState.animateScrollToItem(0)
         }
     }
 
@@ -178,7 +182,7 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
                     contentPadding = padding,
                     reverseLayout = true,
                 ) {
-                    items(rows, key = ::rowKey) { row ->
+                    items(rows, key = ::rowKey, contentType = { it::class }) { row ->
                         val animated = Modifier.animateItem(
                             fadeInSpec = RowFade,
                             placementSpec = RowPlacement,
@@ -204,6 +208,8 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
                                             // the context menu re-draws this row lifted; hide the original
                                             .graphicsLayer { alpha = if (menu.anchor?.msg?.key == row.msg.key) 0f else 1f },
                                     ) {
+                                        val actionable = row.msg.dispatchIdHex != null && !row.msg.deleted
+                                        val interaction = appearance.interaction
                                         MessageBubble(
                                             msg = row.msg,
                                             mergedTop = row.mergedTop,
@@ -213,6 +219,18 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
                                             },
                                             menuState = menu,
                                             onReactionTap = { viewModel.toggleReaction(row.msg, it) },
+                                            onQuoteClick = ::jumpToQuoted,
+                                            onDoubleTap = when {
+                                                !actionable || selecting -> null
+                                                interaction.doubleTapAction == DoubleTapAction.React ->
+                                                    { { viewModel.toggleReaction(row.msg, interaction.doubleTapEmoji) } }
+                                                interaction.doubleTapAction == DoubleTapAction.Reply ->
+                                                    { { viewModel.beginReply(row.msg) } }
+                                                interaction.doubleTapAction == DoubleTapAction.Edit && row.msg.outgoing ->
+                                                    { { viewModel.beginEdit(row.msg) } }
+                                                else -> null
+                                            },
+                                            onRowLongPress = { toggleSelect(row.msg.key) },
                                         )
                                     }
                                     // Selection mode: any tap on the row toggles; drawn above so it wins.

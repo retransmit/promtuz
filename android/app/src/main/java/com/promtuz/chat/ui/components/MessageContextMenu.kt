@@ -226,7 +226,9 @@ fun MessageContextMenu(
             MessageBubble(msg = anchor.msg, mergedTop = anchor.mergedTop, mergedBottom = anchor.mergedBottom)
         }
 
-        MenuStack(state, anchor, quickReactions, actionGroups, pop.value, origin, shift, onReact)
+        // Pop is handed down as a getter and read only inside graphicsLayer, so
+        // animation frames never recompose the stack.
+        MenuStack(state, anchor, quickReactions, actionGroups, { pop.value }, origin, shift, onReact)
     }
 }
 
@@ -241,7 +243,7 @@ private fun MenuStack(
     anchor: MenuAnchor,
     quickReactions: List<String>,
     actionGroups: List<List<MenuAction>>,
-    pop: Float,
+    pop: () -> Float,
     origin: Offset,
     shift: MutableFloatState,
     onReact: (String) -> Unit,
@@ -249,9 +251,10 @@ private fun MenuStack(
     val outgoing = anchor.msg.outgoing
     val pivot = TransformOrigin(if (outgoing) 1f else 0f, 0.1f)
     val entrance = Modifier.graphicsLayer {
-        alpha = pop.coerceIn(0f, 1f)
-        scaleX = 0.75f + 0.25f * pop
-        scaleY = 0.75f + 0.25f * pop
+        val p = pop()
+        alpha = p.coerceIn(0f, 1f)
+        scaleX = 0.75f + 0.25f * p
+        scaleY = 0.75f + 0.25f * p
         transformOrigin = pivot
     }
 

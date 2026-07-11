@@ -27,10 +27,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -71,11 +68,12 @@ import com.promtuz.chat.ui.appearance.LocalChatColors
  * No per-message ticks: delivery state rides the frontier markers.
  *
  * [onLongPress] (fired with the row's root bounds, for the context-menu lift),
- * [onReactionTap], [onQuoteClick] (fired with the quoted message's dispatch id)
- * and [onDoubleTap] are optional so the bubble stays a pure renderer elsewhere.
- * With [menuState] set, the long-press gesture keeps streaming into the open
- * menu — drag over an item, release to pick it (one continuous pointer stream,
- * same interaction grammar as AppDropMenu).
+ * [onReactionTap], [onQuoteClick] (fired with the quoted message's dispatch id),
+ * [onDoubleTap] and [onRowLongPress] (long-press on the row OUTSIDE the bubble —
+ * the multi-select entry) are optional so the bubble stays a pure renderer
+ * elsewhere. With [menuState] set, the long-press gesture keeps streaming into
+ * the open menu — drag over an item, release to pick it (one continuous pointer
+ * stream, same interaction grammar as AppDropMenu).
  */
 @Composable
 fun MessageBubble(
@@ -88,6 +86,7 @@ fun MessageBubble(
     onReactionTap: ((String) -> Unit)? = null,
     onQuoteClick: ((String) -> Unit)? = null,
     onDoubleTap: (() -> Unit)? = null,
+    onRowLongPress: (() -> Unit)? = null,
 ) {
     val appearance = LocalChatAppearance.current
     val chat = LocalChatColors.current
@@ -96,13 +95,28 @@ fun MessageBubble(
     val bubbleColor = if (outgoing) chat.outgoingBubble else chat.incomingBubble
     val textColor = if (outgoing) chat.onOutgoingBubble else chat.onIncomingBubble
     val haptic = LocalHapticFeedback.current
-    var rowBounds by remember { mutableStateOf(Rect.Zero) }
-    var bubbleCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    // Plain refs, not snapshot state: positions change every frame during placement
+    // animations and are only ever read inside gesture handlers.
+    val coords = remember { CoordsHolder() }
 
     BoxWithConstraints(
         modifier
             .fillMaxWidth()
-            .onGloballyPositioned { rowBounds = it.boundsInRoot() }
+            .onGloballyPositioned { coords.row = it }
+            .then(
+                if (onRowLongPress == null) Modifier
+                else Modifier.pointerInput(onRowLongPress) {
+                    detectTapGestures(onLongPress = { pos ->
+                        val inBubble = coords.bubble?.takeIf { it.isAttached }
+                            ?.boundsInRoot()
+                            ?.contains(coords.row?.localToRoot(pos) ?: return@detectTapGestures) == true
+                        if (!inBubble) {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onRowLongPress()
+                        }
+                    })
+                }
+            )
             .padding(horizontal = 12.dp),
     ) {
         val maxBubble = maxWidth * appearance.layout.maxWidthFraction
@@ -136,7 +150,7 @@ fun MessageBubble(
                 )
                 .clip(shape)
                 .background(bubbleColor)
-                .onGloballyPositioned { bubbleCoords = it }
+                .onGloballyPositioned { coords.bubble = it }
                 .then(
                     if (onLongPress == null) Modifier
                     else Modifier.pointerInput(menuState) {
@@ -145,7 +159,7 @@ fun MessageBubble(
                             if (menuState?.isOpen == true) return@awaitEachGesture
                             val press = awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            onLongPress(rowBounds)
+                            onLongPress(coords.row?.takeIf { it.isAttached }?.boundsInRoot() ?: Rect.Zero)
                             if (menuState == null) return@awaitEachGesture
 
                             // Same finger now drives the open menu: drag hovers, release picks.
@@ -153,7 +167,7 @@ fun MessageBubble(
                             while (true) {
                                 val ev = awaitPointerEvent()
                                 val ch = ev.changes.firstOrNull { it.id == press.id } ?: ev.changes.first()
-                                val root = bubbleCoords?.takeIf { it.isAttached }?.localToRoot(ch.position)
+                                val root = coords.bubble?.takeIf { it.isAttached }?.localToRoot(ch.position)
                                 if (!ch.pressed) {
                                     when (val hit = root?.let(menuState::release)) {
                                         is MenuHit.Action -> {
@@ -277,7 +291,8 @@ private fun BubbleTextWithMeta(msg: UiMessage, textColor: androidx.compose.ui.gr
         if (edited) append("edited ")
         if (timeStr != null) append(timeStr)
     }
-    val labelPx = if (label.isNotEmpty()) measurer.measure(label, metaStyle).size.width else 0
+    val labelPx = if (label.isEmpty()) 0
+    else remember(label, metaStyle) { measurer.measure(label, metaStyle).size.width }
     val iconPx = if (pending || failed) with(density) { 14.dp.roundToPx() } else 0
     val gapPx = with(density) { 8.dp.roundToPx() }
     val metaWidth = with(density) { (labelPx + iconPx + gapPx).toSp() }
@@ -317,6 +332,11 @@ private fun BubbleTextWithMeta(msg: UiMessage, textColor: androidx.compose.ui.gr
             }
         }
     }
+}
+
+private class CoordsHolder {
+    var row: LayoutCoordinates? = null
+    var bubble: LayoutCoordinates? = null
 }
 
 private val clockFormat = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())

@@ -1,5 +1,7 @@
 package com.promtuz.chat.domain.model
 
+import androidx.compose.runtime.Immutable
+
 /**
  * A message shaped for rendering. Keyed on [key] — the shared dispatch id when
  * present, else the local ULID — so edit / delete / reaction / receipt, which all
@@ -8,6 +10,7 @@ package com.promtuz.chat.domain.model
  * field is value-equality-friendly (no raw ByteArray) so LazyColumn diffing is
  * correct; the 16-byte dispatch id rides as hex and converts at the FFI boundary.
  */
+@Immutable
 data class UiMessage(
     val key: String,
     val localId: String,
@@ -28,6 +31,7 @@ data class UiMessage(
  * [text] is null when the quoted message isn't in the loaded window (or was
  * hard-deleted) — render a "message unavailable" shell.
  */
+@Immutable
 data class Quote(
     val dispatchIdHex: String,
     val text: String?,
