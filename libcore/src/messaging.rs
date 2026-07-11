@@ -79,7 +79,9 @@ use common::proto::mls_wire::MAX_WELCOME_BYTES;
 use common::proto::mls_wire::MLS_ENVELOPE_VERSION;
 use common::proto::mls_wire::MlsApplicationEnvelopeP;
 use common::proto::mls_wire::MlsEnvelopeP;
+use common::proto::mls_wire::PairDeclineP;
 use common::proto::mls_wire::PairingP;
+use common::proto::mls_wire::pair_decline_signing_input;
 use common::proto::mls_wire::ReceiptKind;
 use common::proto::mls_wire::WelcomeEnvelopeP;
 use common::proto::mls_wire::envelope_signing_input;
@@ -358,6 +360,15 @@ async fn send_control(to: [u8; 32], payload: AppPayload) -> Result<()> {
     )
     .map_err(|e| anyhow!("build envelope: {e}"))?;
 
+    dispatch_envelope(to, our_ipk, &ipk_signer, env_bytes).await
+}
+
+/// Sign a `DispatchP` over `env_bytes` and send it (the relay queues it for an
+/// offline peer). Shared tail of the MLS control path and the non-MLS
+/// PairDecline — both just need an authenticated dispatch of opaque bytes.
+async fn dispatch_envelope(
+    to: [u8; 32], our_ipk: [u8; 32], ipk_signer: &SigningKey, env_bytes: Vec<u8>,
+) -> Result<()> {
     let id = crate::data::message::next_dispatch_id();
     let sig_message = dispatch_sig_message(&to, &our_ipk, &id, &env_bytes);
     let sig = {
@@ -378,7 +389,7 @@ async fn send_control(to: [u8; 32], payload: AppPayload) -> Result<()> {
         relay.as_ref().and_then(|r| r.connection.clone())
     };
     let Some(conn) = conn else {
-        info!("MESSAGE: offline — control dispatch to {} not sent (local change stands)", hex::encode(&to[..4]));
+        info!("MESSAGE: offline — dispatch to {} not sent", hex::encode(&to[..4]));
         return Ok(());
     };
     if let Ok((mut tx, mut rx)) = conn.open_bi().await {
@@ -387,6 +398,29 @@ async fn send_control(to: [u8; 32], payload: AppPayload) -> Result<()> {
         let _ = SRelayPacket::unpack(&mut rx).await; // drain ack, ignore
     }
     Ok(())
+}
+
+/// Tell `to` we declined their pairing Welcome (PAIRING.md). A plain signed
+/// control message on the dispatch/queue channel — no MLS group (accepting it
+/// is what failed). The inviter verifies the signature under our IPK, marks us
+/// REJECTED, and fails the messages it sent us while PENDING.
+pub async fn send_pair_decline(to: [u8; 32], reason: u8) -> Result<()> {
+    let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
+    let ipk_signer = crate::data::identity::secret_key_signing(&our_ipk)?;
+    let ts = crate::utils::systime().as_millis() as u64;
+    let sig = {
+        use ed25519_dalek::Signer;
+        ipk_signer.sign(&pair_decline_signing_input(&our_ipk, &to, reason, ts)).to_bytes()
+    };
+    let envelope = MlsEnvelopeP::PairDecline(PairDeclineP {
+        sender_ipk:    Bytes(our_ipk),
+        recipient_ipk: Bytes(to),
+        reason,
+        timestamp:     ts,
+        sig:           Bytes(sig),
+    });
+    let env_bytes = envelope.ser().map_err(|e| anyhow!("encode decline: {e}"))?;
+    dispatch_envelope(to, our_ipk, &ipk_signer, env_bytes).await
 }
 
 /// Emit an ephemeral activity signal to `peer` — an OR of `ACTIVITY_*` bits
@@ -1010,11 +1044,16 @@ pub async fn process_inbound_envelope<C: DhtClient>(
                 );
             }
         },
+        MlsEnvelopeP::PairDecline(_) => {}, // fixed-size, no cap
     }
 
     match envelope {
-        MlsEnvelopeP::Welcome(env) => process_welcome_inbound(ctx, sender_ipk, env)
-            .map(|_| Some(InboundDecoded::Welcome)),
+        MlsEnvelopeP::Welcome(env) => match process_welcome_inbound(ctx, sender_ipk, env)? {
+            WelcomeOutcome::Accepted => Ok(Some(InboundDecoded::Welcome)),
+            WelcomeOutcome::Rejected(reason) => {
+                Ok(Some(InboundDecoded::WelcomeRejected { sender_ipk, reason }))
+            },
+        },
         MlsEnvelopeP::Application(env) => {
             let decoded = process_application_inbound(ctx, sender_ipk, env)?;
             if let InboundDecoded::ApplicationNoGroup { group_id } = &decoded {
@@ -1022,7 +1061,35 @@ pub async fn process_inbound_envelope<C: DhtClient>(
             }
             Ok(Some(decoded))
         },
+        MlsEnvelopeP::PairDecline(d) => {
+            process_pair_decline_inbound(sender_ipk, d)?;
+            Ok(Some(InboundDecoded::PairDeclined))
+        },
     }
+}
+
+/// Handle an inbound `PairDecline` (PAIRING.md): verify it's from the pending
+/// contact and validly signed (a malicious relay must not forge a rejection to
+/// grief a pair), then mark them REJECTED and fail the messages we sent them.
+fn process_pair_decline_inbound(sender_ipk: [u8; 32], d: PairDeclineP) -> Result<()> {
+    if d.sender_ipk.0 != sender_ipk {
+        bail!("pair-decline sender_ipk mismatch");
+    }
+    let our_ipk = Identity::get().ok_or_else(|| anyhow!("identity not found"))?.ipk();
+    if d.recipient_ipk.0 != our_ipk {
+        bail!("pair-decline not addressed to us");
+    }
+    let vk = VerifyingKey::from_bytes(&sender_ipk).map_err(|e| anyhow!("decliner ipk: {e}"))?;
+    let msg = pair_decline_signing_input(&sender_ipk, &our_ipk, d.reason, d.timestamp);
+    vk.verify_strict(&msg, &Signature::from_bytes(&d.sig.0))
+        .map_err(|_| anyhow!("pair-decline signature invalid"))?;
+    if !Contact::exists(&sender_ipk) {
+        bail!("pair-decline from non-contact");
+    }
+    Contact::mark_rejected(&sender_ipk, d.reason);
+    Message::mark_all_failed_by_peer(&sender_ipk);
+    warn!("PAIR: {} declined (reason {})", hex::encode(&sender_ipk[..4]), d.reason);
+    Ok(())
 }
 
 /// Post-restore self-heal: a known contact sent into a group we hold no
@@ -1096,11 +1163,29 @@ pub enum InboundDecoded {
     ApplicationNoGroup {
         group_id: [u8; 32],
     },
+    /// We couldn't accept a Welcome (KP consumed / group build failed). The
+    /// caller sends a `PairDecline` back to the inviter and acks.
+    WelcomeRejected {
+        sender_ipk: [u8; 32],
+        reason:     u8,
+    },
+    /// The invitee declined our pair; already applied (contact REJECTED,
+    /// PENDING-era messages failed). Terminal — the caller just acks.
+    PairDeclined,
+}
+
+/// Outcome of accepting a pairing Welcome. A gate/auth failure is still an
+/// `Err` (bogus welcome — bail, no decline); only a *post-gate* accept failure
+/// is `Rejected`, which the caller turns into a `PairDecline` back to the
+/// inviter.
+enum WelcomeOutcome {
+    Accepted,
+    Rejected(u8),
 }
 
 fn process_welcome_inbound<C: DhtClient>(
     ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], env: WelcomeEnvelopeP,
-) -> Result<()> {
+) -> Result<WelcomeOutcome> {
     if env.sender_ipk.0 != sender_ipk {
         bail!("welcome envelope sender_ipk mismatch with DispatchP.from");
     }
@@ -1124,11 +1209,13 @@ fn process_welcome_inbound<C: DhtClient>(
     }
 
     // Contact-or-invite gate: accept a Welcome from a stranger only if it
-    // carries a valid pairing invite we minted (verified under our own IPK,
-    // unexpired). On first pair we save them as a contact using the
-    // self-asserted display name (length-bounded). Welcomes from existing
-    // contacts skip the invite check.
-    if !Contact::exists(&sender_ipk) {
+    // carries a valid pairing invite we minted. Capture the name here but DON'T
+    // save yet — the save moves after a successful accept so a failed accept
+    // leaves no bricked contact (symmetric to the inviter's no-brick fix).
+    // Welcomes from existing contacts skip the invite check.
+    let new_contact_name: Option<String> = if Contact::exists(&sender_ipk) {
+        None
+    } else {
         let invited =
             env.pairing.as_ref().is_some_and(|p| Identity::verify_invite(&p.invite));
         if !invited {
@@ -1138,21 +1225,28 @@ fn process_welcome_inbound<C: DhtClient>(
             );
             bail!("unknown sender and no valid invite");
         }
-        if let Some(p) = env.pairing.as_ref() {
-            let name: String = p.sender_name.chars().take(32).collect();
-            match Contact::save(sender_ipk, name) {
-                Ok(_) => info!("IDENTITY: paired with {}", hex::encode(&sender_ipk[..4])),
-                Err(e) => warn!("IDENTITY: failed to save paired contact: {e}"),
-            }
+        env.pairing.as_ref().map(|p| p.sender_name.chars().take(32).collect())
+    };
+
+    // Post-gate accept failure = a decline, not a bail: we were invited, we
+    // just couldn't build the group (KP already consumed, malformed welcome).
+    let group = match process_welcome_inbound_no_contacts(ctx, sender_ipk, env) {
+        Ok(g) => g,
+        Err(e) => {
+            warn!("MLS: welcome accept failed from {}: {e}", hex::encode(&sender_ipk[..4]));
+            return Ok(WelcomeOutcome::Rejected(
+                common::proto::mls_wire::DECLINE_GROUP_BUILD_FAILED,
+            ));
+        },
+    };
+
+    // Success: now save the contact (defaults PAIRED) and bind the group.
+    if let Some(name) = new_contact_name {
+        match Contact::save(sender_ipk, name) {
+            Ok(_) => info!("IDENTITY: paired with {}", hex::encode(&sender_ipk[..4])),
+            Err(e) => warn!("IDENTITY: failed to save paired contact: {e}"),
         }
     }
-
-    let group = process_welcome_inbound_no_contacts(ctx, sender_ipk, env)?;
-
-    // Persist the group_id back onto the contact row so the next send
-    // to this contact reuses it. We tolerate "no contact row" silently
-    // — the contact-first gate above means this branch is unreachable
-    // for legitimate Welcomes; defence-in-depth only.
     let _ = Contact::set_mls_group_id(&sender_ipk, &group.group_id());
 
     info!(
@@ -1160,7 +1254,7 @@ fn process_welcome_inbound<C: DhtClient>(
         hex::encode(&sender_ipk[..4]),
         hex::encode(&group.group_id()[..4])
     );
-    Ok(())
+    Ok(WelcomeOutcome::Accepted)
 }
 
 /// Globals-free variant of [`process_welcome_inbound`].
@@ -1418,9 +1512,23 @@ pub async fn poll_welcomes<C: DhtClient>(ctx: &MlsContext<'_, C>) -> Result<usiz
         let welcome_id = entry.welcome_id.0;
         let known_contact = Contact::exists(&sender_ipk);
         match process_welcome_inbound(ctx, sender_ipk, entry.envelope) {
-            Ok(()) => {
+            Ok(WelcomeOutcome::Accepted) => {
                 ack_ids.push(welcome_id);
                 count += 1;
+                WELCOME_RETRY_COUNTS.lock().remove(&welcome_id);
+                // Prove the pair to the inviter. This drain path bypasses
+                // process_deliver, so the ack must fire here too — otherwise an
+                // offline-received pair never confirms.
+                crate::RUNTIME.spawn(async move {
+                    let _ = send_pair_ack(sender_ipk).await;
+                });
+            },
+            Ok(WelcomeOutcome::Rejected(reason)) => {
+                // Couldn't accept — tell the inviter and ack (re-fetch won't help).
+                crate::RUNTIME.spawn(async move {
+                    let _ = send_pair_decline(sender_ipk, reason).await;
+                });
+                ack_ids.push(welcome_id);
                 WELCOME_RETRY_COUNTS.lock().remove(&welcome_id);
             },
             Err(e) => {

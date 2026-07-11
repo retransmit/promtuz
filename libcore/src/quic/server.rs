@@ -800,6 +800,19 @@ async fn process_deliver(
                 }
             });
         },
+        Ok(Some(crate::messaging::InboundDecoded::WelcomeRejected { sender_ipk, reason })) => {
+            crate::data::seen::Seen::record(&msg.from, &msg.id.0, systime().as_secs());
+            warn!("PAIR: could not accept welcome from {}; declining", hex::encode(&msg.from[..4]));
+            crate::RUNTIME.spawn(async move {
+                if let Err(e) = crate::messaging::send_pair_decline(sender_ipk, reason).await {
+                    warn!("PAIR: decline send failed: {e}");
+                }
+            });
+        },
+        Ok(Some(crate::messaging::InboundDecoded::PairDeclined)) => {
+            crate::data::seen::Seen::record(&msg.from, &msg.id.0, systime().as_secs());
+            // Already applied (contact REJECTED, messages failed) — just ack.
+        },
         Ok(Some(crate::messaging::InboundDecoded::ApplicationBuffered)) => {
             // Buffered for a future epoch / staged commit merged.
             // Terminal-good: the caller acks so the relay GCs the entry.

@@ -24,9 +24,11 @@ pub struct ContactRow {
     /// 1 = paired (proven by an inbound MLS message), 2 = rejected. Legacy
     /// rows default to paired — they already work.
     pub status:        u8,
+    /// Why the pair was rejected (a `DECLINE_*` reason), when `status = 2`.
+    pub reject_reason: Option<u8>,
 }
 
-from_row!(ContactRow { ipk, name, added_at, mls_group_id, status });
+from_row!(ContactRow { ipk, name, added_at, mls_group_id, status, reject_reason });
 
 /// Hard cutover: drop the v2 shared-key columns (`epk`, `enc_esk`) and
 /// add `mls_group_id`.
@@ -63,6 +65,7 @@ const MIGRATION_ARRAY: &[M] = &[
     // Pairing state machine (PAIRING.md). Default paired: legacy contacts
     // already have a working group.
     M::up("ALTER TABLE contacts ADD COLUMN status INTEGER NOT NULL DEFAULT 1;"),
+    M::up("ALTER TABLE contacts ADD COLUMN reject_reason INTEGER;"),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
@@ -102,12 +105,13 @@ mod tests {
             .expect("query")
             .filter_map(|r| r.ok())
             .collect();
-        assert_eq!(cols.len(), 5, "expected 5 columns post-migration, got {cols:?}");
+        assert_eq!(cols.len(), 6, "expected 6 columns post-migration, got {cols:?}");
         assert!(cols.contains(&"ipk".to_string()));
         assert!(cols.contains(&"name".to_string()));
         assert!(cols.contains(&"added_at".to_string()));
         assert!(cols.contains(&"mls_group_id".to_string()));
         assert!(cols.contains(&"status".to_string()));
+        assert!(cols.contains(&"reject_reason".to_string()));
         assert!(!cols.contains(&"epk".to_string()), "v2 epk column must be dropped");
         assert!(
             !cols.contains(&"enc_esk".to_string()),

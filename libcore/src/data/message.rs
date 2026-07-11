@@ -278,6 +278,18 @@ impl Message {
         conn.execute("DELETE FROM messages WHERE peer_ipk = ?1", [peer_ipk.as_slice()]).ok();
     }
 
+    /// Fail every not-yet-read outgoing message to this peer (PAIRING.md): a
+    /// declined pair means our PENDING-era sends were encrypted to a group the
+    /// peer never joined, so they can never arrive. Skips already-read/delivered
+    /// (status > sent) defensively. Rides the reactive doorbell.
+    pub fn mark_all_failed_by_peer(peer_ipk: &[u8; 32]) {
+        let conn = MESSAGES_DB.lock();
+        let _ = conn.execute(
+            "UPDATE messages SET status = ?1 WHERE peer_ipk = ?2 AND outgoing = 1 AND status <= ?3",
+            (STATUS_FAILED, peer_ipk.as_slice(), STATUS_SENT),
+        );
+    }
+
     /// Count of messages with this peer (cheap diagnostics read).
     pub fn count_by_peer(peer_ipk: &[u8; 32]) -> u32 {
         let conn = MESSAGES_DB.lock();

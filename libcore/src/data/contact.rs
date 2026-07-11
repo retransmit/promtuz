@@ -108,9 +108,9 @@ impl Contact {
         let mut n = 0usize;
         for r in rows {
             n += tx.execute(
-                "INSERT OR REPLACE INTO contacts (ipk, name, added_at, mls_group_id, status) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![r.ipk, r.name, r.added_at, r.mls_group_id, r.status],
+                "INSERT OR REPLACE INTO contacts (ipk, name, added_at, mls_group_id, status, reject_reason) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![r.ipk, r.name, r.added_at, r.mls_group_id, r.status, r.reject_reason],
             )?;
         }
         tx.commit()?;
@@ -166,6 +166,16 @@ impl Contact {
         let _ = conn.execute(
             "UPDATE contacts SET status = ?1 WHERE ipk = ?2 AND status = ?3",
             params![PAIR_STATUS_PAIRED, ipk, PAIR_STATUS_PENDING],
+        );
+    }
+
+    /// Mark a pending pair as REJECTED with `reason` (a `DECLINE_*` code). The
+    /// UPDATE rides the reactive doorbell → UI re-reads.
+    pub fn mark_rejected(ipk: &[u8; 32], reason: u8) {
+        let conn = CONTACTS_DB.lock();
+        let _ = conn.execute(
+            "UPDATE contacts SET status = ?1, reject_reason = ?2 WHERE ipk = ?3",
+            params![PAIR_STATUS_REJECTED, reason, ipk],
         );
     }
 

@@ -44,6 +44,8 @@ pub struct ContactInfo {
     pub added_at: u64,
     /// Pairing state: 0 = pending, 1 = paired, 2 = rejected (PAIRING.md).
     pub status: u8,
+    /// Why rejected (a DECLINE_* code), when status = 2.
+    pub reject_reason: Option<u8>,
 }
 
 /// Send `content` to `to_ipk`, optionally quoting a prior message by its
@@ -199,7 +201,13 @@ pub fn get_conversations() -> Vec<MessageRecord> {
 pub fn get_contacts() -> Vec<ContactInfo> {
     Contact::list()
         .into_iter()
-        .map(|c| ContactInfo { ipk: c.ipk.to_vec(), name: c.name, added_at: c.added_at, status: c.status })
+        .map(|c| ContactInfo {
+            ipk: c.ipk.to_vec(),
+            name: c.name,
+            added_at: c.added_at,
+            status: c.status,
+            reject_reason: c.reject_reason,
+        })
         .collect()
 }
 

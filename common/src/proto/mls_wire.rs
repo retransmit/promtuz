@@ -68,8 +68,9 @@ use crate::types::bytes::Bytes;
 /// (bumping it is a wider flag day). This one is peer-to-peer only, so
 /// bumping it to 5 for the typed `AppPayload` seam is a client-only
 /// coordinated redeploy. Bumped to 6 for the Edit/Delete variants, 7 for
-/// the React variant, 8 for the Reply variant, 9 for the PairAck variant.
-pub const MLS_WIRE_VERSION: u16 = 9;
+/// the React variant, 8 for the Reply variant, 9 for the PairAck variant,
+/// 10 for the PairDecline envelope.
+pub const MLS_WIRE_VERSION: u16 = 10;
 
 /// The decrypted MLS application plaintext. Was raw UTF-8; now a tagged
 /// union so receipts/edits/etc. ride the same encrypted channel. The
@@ -319,6 +320,12 @@ pub enum MlsEnvelopeP {
     /// bytes to `MlsGroup::new_from_welcome` after verifying the
     /// outer signature against the inviter's IPK.
     Welcome(WelcomeEnvelopeP),
+    /// Pairing declined (PAIRING.md). Sent by the invitee back to the
+    /// inviter when a Welcome couldn't be accepted (KP consumed, group build
+    /// failed, or user rejected). Not MLS — a plain signed control message on
+    /// the same dispatch/queue channel; the relay treats it as opaque payload.
+    /// Appended last so postcard's ordinal tags for Application/Welcome hold.
+    PairDecline(PairDeclineP),
 }
 
 /// Application-tier envelope: encrypted MLS message addressed to a
@@ -424,6 +431,47 @@ pub struct PairingP {
     /// Sender's self-asserted display name; the recipient length-bounds it
     /// on accept.
     pub sender_name: String,
+}
+
+/// Why an invitee declined a Welcome (PAIRING.md). Machine reasons — the
+/// inviter renders a message.
+pub const DECLINE_GROUP_BUILD_FAILED: u8 = 0;
+pub const DECLINE_KP_CONSUMED: u8 = 1;
+pub const DECLINE_USER_REJECTED: u8 = 2;
+
+/// Domain separator for the pair-decline signature.
+pub const PAIR_DECLINE_SIG_DOMAIN: &[u8] = b"promtuz-pair-decline-v1";
+
+/// Pairing-declined control message ([`MlsEnvelopeP::PairDecline`]). Signed by
+/// the decliner so a malicious relay can't forge a rejection to grief a pair.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairDeclineP {
+    /// Decliner IPK (also `DispatchP::from`); bound into the transcript.
+    pub sender_ipk: Bytes<32>,
+    /// Inviter IPK (also `DispatchP::to`); bound so a decline can't be
+    /// re-targeted at a different inviter.
+    pub recipient_ipk: Bytes<32>,
+    /// One of the `DECLINE_*` reasons.
+    pub reason: u8,
+    pub timestamp: u64,
+    /// Ed25519 signature over [`pair_decline_signing_input`], verified by the
+    /// inviter under `sender_ipk`.
+    pub sig: Bytes<64>,
+}
+
+/// Canonical bytes signed/verified for a [`PairDeclineP`].
+/// Layout: `PAIR_DECLINE_SIG_DOMAIN || MLS_WIRE_VERSION_BE || sender || recipient || reason || timestamp_be`
+pub fn pair_decline_signing_input(
+    sender_ipk: &[u8; 32], recipient_ipk: &[u8; 32], reason: u8, timestamp: u64,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(PAIR_DECLINE_SIG_DOMAIN.len() + 2 + 32 + 32 + 1 + 8);
+    buf.extend_from_slice(PAIR_DECLINE_SIG_DOMAIN);
+    buf.extend_from_slice(&MLS_WIRE_VERSION.to_be_bytes());
+    buf.extend_from_slice(sender_ipk);
+    buf.extend_from_slice(recipient_ipk);
+    buf.push(reason);
+    buf.extend_from_slice(&timestamp.to_be_bytes());
+    buf
 }
 
 /// Build the canonical signing transcript for
@@ -1287,6 +1335,32 @@ mod tests {
     /// existing `dht_p2p` test fixture.
     fn fresh_signing_key() -> SigningKey {
         SigningKey::generate(&mut OsRng)
+    }
+
+    /// A PairDecline signed by the real decliner verifies; a forged one (wrong
+    /// key) or a tampered reason does not — so a malicious relay can't fake a
+    /// rejection to grief a pair.
+    #[test]
+    fn pair_decline_sig_authenticates_the_decliner() {
+        use ed25519_dalek::Signature;
+        use ed25519_dalek::Verifier;
+        let decliner = fresh_signing_key();
+        let inviter: [u8; 32] = fresh_signing_key().verifying_key().to_bytes();
+        let from = decliner.verifying_key().to_bytes();
+        let msg = pair_decline_signing_input(&from, &inviter, DECLINE_KP_CONSUMED, 42);
+        let sig = decliner.sign(&msg);
+        assert!(decliner.verifying_key().verify(&msg, &sig).is_ok(), "real decliner verifies");
+
+        // Forged by a different key (a relay) — fails under the decliner's IPK.
+        let forged = fresh_signing_key().sign(&msg);
+        assert!(decliner.verifying_key().verify(&msg, &forged).is_err(), "forgery rejected");
+
+        // Tampered reason → different transcript → sig no longer matches.
+        let tampered = pair_decline_signing_input(&from, &inviter, DECLINE_USER_REJECTED, 42);
+        assert!(
+            decliner.verifying_key().verify(&tampered, &Signature::from(sig)).is_err(),
+            "reason is bound into the transcript"
+        );
     }
 
     /// Build a `KeyPackageRecord` with internally-consistent fields.
