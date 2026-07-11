@@ -27,6 +27,15 @@ use rustls::server::ResolvesServerCert;
 #[cfg(feature = "crypto")]
 use rustls::sign::CertifiedKey;
 
+/// QUIC idle timeout, applied on both ends (relay server here, libcore client
+/// in `api::init`). Long enough that a backgrounded mobile app — frozen, unable
+/// to send keepalives — keeps its connection across a typical app switch; QUIC
+/// resumes it by connection-ID path migration on the new NAT port, no
+/// handshake. Also bounds how long the relay holds a dead peer's zombie state
+/// (and false "online") before eviction. Delivery already tolerates staleness:
+/// a dead conn fails the 3 s try_deliver and gets evicted + queued.
+pub const IDLE_TIMEOUT_SECS: u64 = 240;
+
 /// Defaults applied to every server-side QUIC connection. Caps connection
 /// lifetime and per-connection stream budget so one misbehaving peer cannot
 /// consume unbounded resources.
@@ -37,20 +46,19 @@ use rustls::sign::CertifiedKey;
 fn default_server_transport() -> TransportConfig {
     let mut tc = TransportConfig::default();
     tc.max_idle_timeout(Some(
-        IdleTimeout::try_from(Duration::from_secs(30)).expect("30s is a valid IdleTimeout"),
+        IdleTimeout::try_from(Duration::from_secs(IDLE_TIMEOUT_SECS)).expect("valid IdleTimeout"),
     ));
     tc.max_concurrent_bidi_streams(VarInt::from_u32(64));
     tc.max_concurrent_uni_streams(VarInt::from_u32(64));
     tc
 }
 
-/// Outbound-connection defaults. Keepalive every 10 s refreshes the server's
-/// 30 s idle timer so a legitimately quiet client (e.g. nothing to send) does
-/// not get evicted.
+/// Outbound-connection defaults. Keepalive every 10 s refreshes the peer's
+/// idle timer (and NAT binding) so a legitimately quiet client is not evicted.
 fn default_client_transport() -> TransportConfig {
     let mut tc = TransportConfig::default();
     tc.max_idle_timeout(Some(
-        IdleTimeout::try_from(Duration::from_secs(30)).expect("30s is a valid IdleTimeout"),
+        IdleTimeout::try_from(Duration::from_secs(IDLE_TIMEOUT_SECS)).expect("valid IdleTimeout"),
     ));
     tc.keep_alive_interval(Some(Duration::from_secs(10)));
     tc.max_concurrent_bidi_streams(VarInt::from_u32(64));

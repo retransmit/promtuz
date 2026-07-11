@@ -35,6 +35,7 @@ import uniffi.core.reactMessage as ffiReactMessage
 import uniffi.core.reactionsFor as ffiReactionsFor
 import uniffi.core.setActivity as ffiSetActivity
 import uniffi.core.subscribePresence as ffiSubscribePresence
+import uniffi.core.onForeground as ffiOnForeground
 import uniffi.core.adoptEscrowedSecret as ffiAdoptEscrowedSecret
 import uniffi.core.backupExport as ffiBackupExport
 import uniffi.core.backupImport as ffiBackupImport
@@ -54,6 +55,9 @@ import com.promtuz.core.adapter.PresenceSignal
  * IPKs are always 32 bytes; callers pass them straight through as ByteArray.
  */
 object CoreBridge {
+    /** App returned to foreground — wake the relay loop for an instant reconnect. */
+    fun onForeground() = ffiOnForeground()
+
     /** Cheap identity check; safe to call before [CoreInitializer.start]. */
     fun shouldLaunchApp(): Boolean = ffiShouldLaunchApp()
 

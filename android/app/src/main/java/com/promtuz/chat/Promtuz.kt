@@ -2,12 +2,16 @@ package com.promtuz.chat
 
 import android.app.Application
 import android.content.pm.ApplicationInfo
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.promtuz.chat.backup.BackupWorker
 import com.promtuz.chat.di.appModule
 import com.promtuz.chat.di.vmModule
 import com.promtuz.chat.ui.appearance.AppearanceStore
 import com.promtuz.chat.utils.logs.AppLog
 import com.promtuz.chat.utils.logs.AppLogger
+import com.promtuz.core.CoreBridge
 import com.promtuz.core.CoreInitializer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -54,6 +58,12 @@ class Promtuz : Application() {
         CoreInitializer.start()
         BackupWorker.start(this)
         AppearanceStore.init(this)
+
+        // Foreground → nudge core for an instant reconnect (the raised idle
+        // timeout means most app switches never dropped the connection at all).
+        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStart(owner: LifecycleOwner) = CoreBridge.onForeground()
+        })
 
         startKoin {
             androidLogger()

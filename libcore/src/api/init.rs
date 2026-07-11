@@ -18,6 +18,7 @@ use common::quic::protorole::ProtoRole;
 use log::debug;
 use log::error;
 use log::trace;
+use once_cell::sync::Lazy;
 use quinn::Endpoint;
 use quinn::TransportConfig;
 
@@ -85,10 +86,15 @@ fn init_inner(
 
     let mut transport_cfg = TransportConfig::default();
     transport_cfg.keep_alive_interval(Some(Duration::from_secs(15)));
-    // Bound dead connections/handshakes (keepalive 15s < idle 30s) so a link
-    // that goes silent is torn down and the relay loop reconnects.
-    transport_cfg
-        .max_idle_timeout(Some(Duration::from_secs(30).try_into().expect("valid idle timeout")));
+    // Long idle timeout so a backgrounded (frozen) app keeps its connection
+    // across an app switch — QUIC resumes it via connection-ID path migration
+    // on the new NAT port, skipping the reconnect handshake entirely. Must
+    // match the relay's server idle (both = IDLE_TIMEOUT_SECS).
+    transport_cfg.max_idle_timeout(Some(
+        Duration::from_secs(common::quic::config::IDLE_TIMEOUT_SECS)
+            .try_into()
+            .expect("valid idle timeout"),
+    ));
     client_cfg.transport_config(Arc::new(transport_cfg));
 
     endpoint.set_default_client_config(client_cfg);
@@ -96,6 +102,19 @@ fn init_inner(
 
     start_relay_loop(seeds);
     Ok(())
+}
+
+/// Woken when the app returns to the foreground. The relay loop races its
+/// post-disconnect backoff against this so a reconnect (needed only after a
+/// background longer than the idle timeout) fires immediately instead of
+/// waiting out the 2 s retry sleep. A no-op when the connection is still live —
+/// QUIC path migration already continued it, nothing to reconnect.
+static FOREGROUND: Lazy<tokio::sync::Notify> = Lazy::new(tokio::sync::Notify::new);
+
+/// Client hook: call from the platform's app-foreground lifecycle event.
+#[uniffi::export]
+pub fn on_foreground() {
+    FOREGROUND.notify_waiters();
 }
 
 /// Initialize logging. ponytail: android_logger writes to logcat on
@@ -173,7 +192,10 @@ fn start_relay_loop(seeds: Vec<ResolverSeed>) {
                 Err(err) => error!("failed to fetch relay: {err}"),
             }
 
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                _ = FOREGROUND.notified() => trace!("foreground: reconnecting now"),
+            }
         }
     });
 }
