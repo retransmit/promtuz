@@ -149,7 +149,30 @@ pub(crate) async fn handle_drain_queue_with(
     //    arrived via either the sender fan-out or the inbound `Forward`
     //    handler.
     if i_am_home && let Some(dht) = ctx.relay.dht.as_ref().cloned() {
+        let before = deliver_queue.len();
         iterate_cf_dht_queue(&dht, &recipient_arr, &mut deliver_queue, &mut delivered_keys);
+        // The sender fan-out stored these same dispatches at ALL K homes. We
+        // GC our own copy on AckDrain, but the other K-1 keep theirs and
+        // redeliver them on every reconnect (now client-deduped, but wasted
+        // bandwidth). Tell them to GC too — reuse the QueueFetchAck round by
+        // seeding `pending_remote_drain` with the other homes + these ids.
+        let dht_ids: Vec<[u8; 16]> = deliver_queue[before..].iter().map(|d| d.id.0).collect();
+        if !dht_ids.is_empty() {
+            let self_id = dht.node_id;
+            let others: Vec<NodeDescriptor> = {
+                let target = NodeId::from_bytes(recipient_arr);
+                let routing = dht.routing.read();
+                routing.find_closest(&target, K).into_iter().filter(|d| d.id != self_id).collect()
+            };
+            if !others.is_empty() {
+                let per_home = others.iter().map(|h| (h.id, dht_ids.clone())).collect();
+                *ctx.pending_remote_drain.lock() = Some(RemoteDrainState {
+                    user_ipk: recipient_arr,
+                    per_home,
+                    homes: others,
+                });
+            }
+        }
     }
 
     // 4. If !i_am_home AND drain_auth set AND DHT is enabled, fetch
