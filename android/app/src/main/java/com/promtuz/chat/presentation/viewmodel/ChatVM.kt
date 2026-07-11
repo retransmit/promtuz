@@ -63,11 +63,15 @@ class ChatVM(private val application: Application) : ViewModel() {
         viewModelScope.launch {
             observeQuery(setOf("messages", "reactions")) { load() }.collect { list ->
                 _messages.value = list
-                // Their message just landed — the typing bubble hands off to it.
-                val newest = list.firstOrNull { !it.outgoing }?.key
-                if (newest != newestIncoming) {
-                    newestIncoming = newest
+                // Their message just landed — the typing bubble hands off to it,
+                // and with this chat on screen it's read: receipt the high-water mark.
+                val newest = list.firstOrNull { !it.outgoing }
+                if (newest?.key != newestIncoming) {
+                    newestIncoming = newest?.key
                     clearTyping()
+                    newest?.dispatchIdHex?.let { did ->
+                        fire { CoreBridge.markRead(peer, did.fromHex()) }
+                    }
                 }
             }
         }

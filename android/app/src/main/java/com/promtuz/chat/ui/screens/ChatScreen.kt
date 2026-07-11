@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -81,6 +82,16 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
     val hazeState = rememberHazeState()
 
     val rows = remember(messages, mergeWindowMs, typing) { buildChatRows(messages, mergeWindowMs, typing) }
+    val listState = rememberLazyListState()
+
+    // Follow the conversation: when the newest message changes and we're at (or
+    // near) the bottom, glide to it. Reading history (scrolled up) never jumps.
+    val newestKey = (rows.firstOrNull { it is ChatRow.Msg } as? ChatRow.Msg)?.msg?.key
+    LaunchedEffect(newestKey) {
+        if (newestKey != null && listState.firstVisibleItemIndex <= 3) {
+            listState.animateScrollToItem(0)
+        }
+    }
 
     var menu by remember { mutableStateOf<MenuAnchor?>(null) }
     var confirmDelete by remember { mutableStateOf<UiMessage?>(null) }
@@ -95,6 +106,7 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
             Box(Modifier.fillMaxSize().then(wallpaper).hazeSource(hazeState)) {
                 LazyColumn(
                     Modifier.fillMaxSize(),
+                    state = listState,
                     contentPadding = padding,
                     reverseLayout = true,
                 ) {
@@ -258,24 +270,28 @@ private fun Modifier.sendEnter(msg: UiMessage): Modifier {
 }
 
 /**
- * Interleave message rows (with group merge flags) and status-frontier markers. Each frontier is the
- * newest outgoing message of its tier (lowest index in the newest-first list); the marker sits just
- * below it, so "above the line" is that status or better. Absent tiers produce no marker. A live
- * typing signal appends a [ChatRow.Typing] at the bottom (index 0 under reverseLayout).
+ * Interleave message rows (with group merge flags) and status-frontier markers. A frontier answers
+ * the one question the chat itself can't: "did it reach them / did they see it, given they haven't
+ * responded?" — so it only shows when NOTHING incoming is newer than the tier's newest outgoing
+ * message (their reply/receipt-by-response makes the marker redundant), and Sent has no marker at
+ * all (pending already wears a spinner; everything else on screen is at least sent). A live typing
+ * signal appends a [ChatRow.Typing] at the bottom (index 0 under reverseLayout).
  */
 private fun buildChatRows(messages: List<UiMessage>, mergeWindowMs: Long, typing: Boolean): List<ChatRow> {
-    fun frontier(status: SendStatus) = messages.indexOfFirst { it.outgoing && it.status == status }
+    val newestIncoming = messages.indexOfFirst { !it.outgoing }
+    fun frontier(status: SendStatus): Int {
+        val i = messages.indexOfFirst { it.outgoing && it.status == status }
+        return if (i != -1 && (newestIncoming == -1 || i < newestIncoming)) i else -1
+    }
     val seen = frontier(SendStatus.Read)
     val delivered = frontier(SendStatus.Delivered)
-    val sent = frontier(SendStatus.Sent)
 
-    val rows = ArrayList<ChatRow>(messages.size + 4)
+    val rows = ArrayList<ChatRow>(messages.size + 3)
     if (typing) rows.add(ChatRow.Typing)
     for (i in messages.indices) {
         when (i) {
             seen -> rows.add(ChatRow.Frontier("Seen"))
             delivered -> rows.add(ChatRow.Frontier("Delivered"))
-            sent -> rows.add(ChatRow.Frontier("Sent"))
         }
         val m = messages[i]
         val older = messages.getOrNull(i + 1)
