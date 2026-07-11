@@ -1,5 +1,8 @@
 package com.promtuz.chat.ui.components
 
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -96,6 +99,8 @@ fun MessageBubble(
             Modifier
                 .align(if (outgoing) Alignment.CenterEnd else Alignment.CenterStart)
                 .widthIn(max = maxBubble)
+                // edit/delete/reactions change the bubble's size in place — glide, don't snap
+                .animateContentSize(spring(stiffness = Spring.StiffnessMediumLow))
                 .clip(shape)
                 .background(bubbleColor)
                 .then(
