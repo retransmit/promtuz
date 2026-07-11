@@ -85,11 +85,21 @@ fun ChatScreen(name: String, viewModel: ChatVM) {
     val rows = remember(messages, mergeWindowMs, typing) { buildChatRows(messages, mergeWindowMs, typing) }
     val listState = rememberLazyListState()
 
-    // Follow the conversation: when the newest message changes and we're at (or
-    // near) the bottom, glide to it. Reading history (scrolled up) never jumps.
-    val newestKey = (rows.firstOrNull { it is ChatRow.Msg } as? ChatRow.Msg)?.msg?.key
-    LaunchedEffect(newestKey) {
-        if (newestKey != null && listState.firstVisibleItemIndex <= 3) {
+    // Follow the conversation. Any change to the bottom row (new message, frontier
+    // moving under it, typing bubble) re-evaluates; own sends always land us at the
+    // bottom, incoming only pulls us when we're near it (scrolled-up reading holds).
+    // Already exactly at the bottom → no scroll call at all: the placement
+    // animations carry the motion, and a competing animateScroll just jitters.
+    val bottomKey = rows.firstOrNull()?.let(::rowKey)
+    val newestOutKey = (rows.firstOrNull { it is ChatRow.Msg } as? ChatRow.Msg)
+        ?.msg?.takeIf { it.outgoing }?.key
+    var lastOutKey by remember { mutableStateOf(newestOutKey) }
+    LaunchedEffect(bottomKey) {
+        val ownSend = newestOutKey != null && newestOutKey != lastOutKey
+        lastOutKey = newestOutKey
+        val atBottom = listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
+        val nearBottom = listState.firstVisibleItemIndex <= 3
+        if (bottomKey != null && !atBottom && (nearBottom || ownSend)) {
             listState.animateScrollToItem(0)
         }
     }
@@ -296,6 +306,9 @@ private fun buildChatRows(messages: List<UiMessage>, mergeWindowMs: Long, typing
 
     val rows = ArrayList<ChatRow>(messages.size + 3)
     if (typing) rows.add(ChatRow.Typing)
+    // A frontier line between two messages severs their group: the marker itself
+    // is the visual break, so the bubbles on either side get full corners.
+    fun frontierBetween(newer: Int, older: Int) = older == seen || older == delivered
     for (i in messages.indices) {
         when (i) {
             seen -> rows.add(ChatRow.Frontier("Seen"))
@@ -304,8 +317,8 @@ private fun buildChatRows(messages: List<UiMessage>, mergeWindowMs: Long, typing
         val m = messages[i]
         val older = messages.getOrNull(i + 1)
         val newer = messages.getOrNull(i - 1)
-        val mergedTop = older != null && sameGroup(m, older, mergeWindowMs)
-        val mergedBottom = newer != null && sameGroup(m, newer, mergeWindowMs)
+        val mergedTop = older != null && sameGroup(m, older, mergeWindowMs) && !frontierBetween(i, i + 1)
+        val mergedBottom = newer != null && sameGroup(m, newer, mergeWindowMs) && !frontierBetween(i - 1, i)
         rows.add(ChatRow.Msg(m, mergedTop, mergedBottom))
     }
     return rows
