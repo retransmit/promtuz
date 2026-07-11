@@ -1,10 +1,18 @@
 import com.android.build.gradle.internal.tasks.factory.dependsOn
+import java.io.FileInputStream
 import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.jetbrains.kotlin.serialization)
+}
+
+val localProperties = Properties().apply {
+    val propertiesFile = rootProject.file("local.properties")
+    if (propertiesFile.exists()) {
+        load(FileInputStream(propertiesFile))
+    }
 }
 
 // Release signing from a gitignored keystore.properties (never the debug
@@ -87,6 +95,15 @@ android {
     }
 
     signingConfigs {
+        getByName("debug") {
+            val storePath = localProperties.getProperty("debug.store.file")
+            if (storePath != null) {
+                storeFile = file(storePath)
+                storePassword = localProperties.getProperty("debug.store.password")
+                keyAlias = localProperties.getProperty("debug.key.alias")
+                keyPassword = localProperties.getProperty("debug.key.password")
+            }
+        }
         if (hasReleaseSigning) create("release") {
             storeFile = file(keystoreProps.getProperty("storeFile"))
             storePassword = keystoreProps.getProperty("storePassword")
