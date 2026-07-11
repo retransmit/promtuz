@@ -54,7 +54,7 @@ fun InviteBottomSheet(vm: AppVM) {
             when (s) {
                 InviteSheet.Decoding -> CircularProgressIndicator()
 
-                InviteSheet.Invalid -> Title("This invite link is invalid.")
+                is InviteSheet.Invalid -> Title(s.message)
 
                 is InviteSheet.Pairing -> {
                     CircularProgressIndicator()
@@ -84,8 +84,6 @@ fun InviteBottomSheet(vm: AppVM) {
                 }
 
                 is InviteSheet.Confirm -> when {
-                    s.isSelf -> Title("This is your own invite link.")
-
                     s.expiryMs <= System.currentTimeMillis() ->
                         Title("This invite expired — ask ${s.name} for a new link.")
 

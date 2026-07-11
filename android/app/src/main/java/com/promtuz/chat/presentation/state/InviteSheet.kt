@@ -6,14 +6,14 @@ sealed interface InviteSheet {
     data object Decoding : InviteSheet
 
     /** Decoded — show the prompt tailored by the flags. `expiryMs` drives a live
-     *  countdown; `isSelf` means it's our own link (pairing refused). */
+     *  countdown. Self-pairing isn't pre-detected: the backend refuses it on
+     *  Add and the message surfaces via [Invalid] (rare, no dedicated field). */
     data class Confirm(
         val bytes: ByteArray,
         val ipk: ByteArray,
         val name: String,
         val alreadyContact: Boolean,
         val expiryMs: Long,
-        val isSelf: Boolean,
     ) : InviteSheet
 
     /** Pairing in flight — the welcome is being published to their homes. */
@@ -25,6 +25,7 @@ sealed interface InviteSheet {
     /** Couldn't reach them (KeyPackage not published / timed out). Retryable. */
     data class Unreachable(val bytes: ByteArray, val name: String) : InviteSheet
 
-    /** Malformed link or previewInvite() threw. */
-    data object Invalid : InviteSheet
+    /** Malformed link, previewInvite() threw, or pairing was refused (e.g. your
+     *  own link) — `message` is the reason to show. */
+    data class Invalid(val message: String = "This invite link is invalid.") : InviteSheet
 }

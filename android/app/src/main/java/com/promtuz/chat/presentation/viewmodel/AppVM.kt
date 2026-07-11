@@ -100,10 +100,10 @@ class AppVM(
         viewModelScope.launch {
             _invite.value = try {
                 val p = bridge.previewInvite(bytes)
-                InviteSheet.Confirm(bytes, p.ipk, p.name, p.alreadyContact, p.expiryMs.toLong(), p.isSelf)
+                InviteSheet.Confirm(bytes, p.ipk, p.name, p.alreadyContact, p.expiryMs.toLong())
             } catch (e: Exception) {
                 Timber.tag(TAG).w(e, "previewInvite failed")
-                InviteSheet.Invalid
+                InviteSheet.Invalid()
             }
         }
     }
@@ -118,8 +118,9 @@ class AppVM(
             try {
                 bridge.pairFromQr(bytes)
             } catch (e: Exception) {
+                // Synchronous refusal (self-pair) — surface the reason directly.
                 Timber.tag(TAG).w(e, "pairFromQr failed")
-                _invite.value = InviteSheet.Unreachable(bytes, name)
+                _invite.value = InviteSheet.Invalid(e.message ?: "Couldn't start pairing.")
                 return@launch
             }
             val appeared = withTimeoutOrNull(12_000) {

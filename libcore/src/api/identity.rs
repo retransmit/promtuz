@@ -78,8 +78,6 @@ pub struct InvitePreview {
     pub already_contact: bool,
     /// The invite's ~10-min window has elapsed.
     pub expired: bool,
-    /// This is our own invite — pairing with self is refused.
-    pub is_self: bool,
     /// Unix-ms the invite window closes — the UI renders a live countdown
     /// rather than a bare expired flag (PAIRING.md).
     pub expiry_ms: u64,
@@ -95,13 +93,11 @@ pub fn preview_invite(qr_bytes: Vec<u8>) -> Result<InvitePreview, CoreError> {
     let qr = IdentityQr::deser(&qr_bytes)
         .map_err(|e| CoreError::Internal { msg: format!("bad invite: {e}") })?;
     let now_ms = crate::utils::systime().as_millis() as u64;
-    let is_self = Identity::get().is_some_and(|me| me.ipk() == qr.ipk);
     Ok(InvitePreview {
         ipk: qr.ipk.to_vec(),
         name: qr.name.chars().take(32).collect(),
         already_contact: Contact::exists(&qr.ipk),
         expired: qr.invite.expiry_ms < now_ms,
-        is_self,
         expiry_ms: qr.invite.expiry_ms,
     })
 }
