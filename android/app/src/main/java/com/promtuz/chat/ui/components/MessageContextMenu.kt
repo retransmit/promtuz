@@ -4,6 +4,8 @@ import android.view.animation.OvershootInterpolator
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.EaseOutQuint
 import androidx.compose.animation.core.Easing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -13,13 +15,16 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableFloatState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -37,6 +42,7 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -154,8 +160,8 @@ private val Overshoot = Easing { OvershootInterpolator(1.1f).getInterpolation(it
  * The long-press overlay: the list hides the pressed row and this re-composes the
  * same bubble at its captured bounds, gently lifted (scale → ~1.03) over a 20%
  * scrim — zero reparenting. Reaction strip + action card ([MenuCard], the same
- * surface AppDropMenu uses) pop in anchored to the bubble's side, flipping above
- * when cramped. Everything animates both ways: [MessageMenuState.close] plays the
+ * surface AppDropMenu uses) pop in anchored to the bubble's side; when cramped the
+ * bubble slides to make room. Everything animates both ways: [MessageMenuState.close] plays the
  * exit and only then releases the anchor. Drag-select rides [MessageMenuState].
  */
 @Composable
@@ -185,6 +191,9 @@ fun MessageContextMenu(
 
     // Root offset makes bounds (captured in window-root space) local to this overlay.
     var origin by remember { mutableStateOf(Offset.Zero) }
+    // Set by MenuStack's layout when the ensemble needs the bubble out of the way.
+    val shift = remember { mutableFloatStateOf(0f) }
+    val density = LocalDensity.current
 
     Box(Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionInRoot() }) {
         Box(
@@ -195,7 +204,8 @@ fun MessageContextMenu(
                 .pointerInput(Unit) { detectTapGestures { state.close() } },
         )
 
-        // The lifted bubble: pixel-identical at its position, scaling up with the pop.
+        // The lifted bubble: re-laid-out at the captured row width so it wraps exactly
+        // as it did in the list, lifting from its tail corner and sliding with the pop.
         Box(
             Modifier
                 .offset {
@@ -204,20 +214,27 @@ fun MessageContextMenu(
                         (anchor.bounds.top - origin.y).roundToInt(),
                     )
                 }
+                .width(with(density) { anchor.bounds.width.toDp() })
                 .graphicsLayer {
                     val s = 1f + 0.03f * pop.value
                     scaleX = s
                     scaleY = s
+                    translationY = shift.floatValue * pop.value
+                    transformOrigin = TransformOrigin(if (anchor.msg.outgoing) 1f else 0f, 1f)
                 },
         ) {
             MessageBubble(msg = anchor.msg, mergedTop = anchor.mergedTop, mergedBottom = anchor.mergedBottom)
         }
 
-        MenuStack(state, anchor, quickReactions, actionGroups, pop.value, origin, onReact)
+        MenuStack(state, anchor, quickReactions, actionGroups, pop.value, origin, shift, onReact)
     }
 }
 
-/** Measures strip + card, places them around the bubble (below; flips above if cramped). */
+/**
+ * Measures strip + card, places them around the bubble (strip above, card below).
+ * When that stack can't fit, it writes the bubble's required translation into
+ * [shift] instead of flipping, so the whole ensemble slides into view together.
+ */
 @Composable
 private fun MenuStack(
     state: MessageMenuState,
@@ -226,6 +243,7 @@ private fun MenuStack(
     actionGroups: List<List<MenuAction>>,
     pop: Float,
     origin: Offset,
+    shift: MutableFloatState,
     onReact: (String) -> Unit,
 ) {
     val outgoing = anchor.msg.outgoing
@@ -244,6 +262,7 @@ private fun MenuStack(
                 groups = actionGroups,
                 hovered = state.hovered - quickReactions.size,
                 modifier = entrance,
+                itemHeight = 42.dp,
                 onRowPositioned = { i, coords -> state.rowCoords[i] = coords },
                 onPick = { it.onClick() },
             )
@@ -255,23 +274,23 @@ private fun MenuStack(
         val card = measurables[1].measure(loose)
 
         layout(constraints.maxWidth, constraints.maxHeight) {
-            val margin = 14.dp.roundToPx()
-            val gap = 8.dp.roundToPx()
+            val margin = 12.dp.roundToPx()
+            val gap = 6.dp.roundToPx()
             val top = (anchor.bounds.top - origin.y).roundToInt()
             val bottom = (anchor.bounds.bottom - origin.y).roundToInt()
             fun xFor(w: Int) = if (outgoing) constraints.maxWidth - margin - w else margin
 
-            var stripY = top - gap - strip.height
-            var cardY = bottom + gap
-            if (cardY + card.height > constraints.maxHeight - margin) {
-                cardY = top - gap - card.height
-                stripY = cardY - gap - strip.height
-            }
-            stripY = stripY.coerceAtLeast(margin)
-            cardY = cardY.coerceAtLeast(margin + strip.height + gap)
+            // Shift the bubble (not the menu) when cramped; card visibility wins when
+            // the bubble is too tall for both, and the strip then clamps at the margin.
+            val minTop = margin + strip.height + gap
+            val maxBottom = constraints.maxHeight - margin - gap - card.height
+            var dy = 0
+            if (top < minTop) dy = minTop - top
+            if (bottom + dy > maxBottom) dy = maxBottom - bottom
+            shift.floatValue = dy.toFloat()
 
-            strip.place(xFor(strip.width), stripY)
-            card.place(xFor(card.width), cardY)
+            strip.place(xFor(strip.width), (top + dy - gap - strip.height).coerceAtLeast(margin))
+            card.place(xFor(card.width), bottom + dy + gap)
         }
     }
 }
@@ -287,9 +306,9 @@ private fun ReactionStrip(
     val colors = MaterialTheme.colorScheme
     Row(
         entrance
-            .clip(RoundedCornerShape(26.dp))
+            .clip(RoundedCornerShape(24.dp))
             .background(colors.surfaceContainerHigh)
-            .padding(horizontal = 6.dp, vertical = 4.dp),
+            .padding(horizontal = 5.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         emojis.forEachIndexed { i, emoji ->
@@ -300,11 +319,12 @@ private fun ReactionStrip(
             }
             val mine = msg.reactions.any { it.emoji == emoji && it.mine }
             val hoveredHere = state.hovered == i
+            val hover by animateFloatAsState(if (hoveredHere) 1.25f else 1f, spring())
             Box(
                 Modifier
                     .onGloballyPositioned { state.chipCoords[i] = it }
                     .graphicsLayer {
-                        val s = chipPop.value * (if (hoveredHere) 1.25f else 1f)
+                        val s = chipPop.value * hover
                         alpha = chipPop.value.coerceIn(0f, 1f)
                         scaleX = s
                         scaleY = s
@@ -318,9 +338,9 @@ private fun ReactionStrip(
                         }
                     )
                     .clickable { onReact(emoji) }
-                    .padding(horizontal = 7.dp, vertical = 5.dp),
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
             ) {
-                Text(emoji, fontSize = 21.sp)
+                Text(emoji, fontSize = 19.sp)
             }
         }
     }
