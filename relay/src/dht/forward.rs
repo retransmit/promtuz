@@ -7,31 +7,15 @@
 //! online there) or queues the dispatch in `cf_dht_queue` for later pickup.
 //!
 //! This module implements that fan-out from the *sender* side. It is the
-//! sister to [`super::publish::publish`] and deliberately mirrors its
-//! shape — same `K_MIN`-quorum success criterion, same `JoinSet`-based
-//! parallel dispatch, same self-store short-circuit when the sender
-//! relay is itself in the K-closest set.
+//! sister to [`super::queue_drain`] (the recipient-side fetch from the
+//! same K homes) and shares its shape — `K_MIN`-quorum success criterion,
+//! `JoinSet`-based parallel dispatch, and a self-store short-circuit when
+//! the sender relay is itself in the K-closest set.
 //!
-//! ## Why a separate module instead of merging into `publish.rs`
-//!
-//! The two paths share the *structure* (parallel RPCs, K_MIN quorum,
-//! self-store shortcut) but diverge meaningfully:
-//!
-//! - `publish` operates on `PresenceRecord` and writes to `cf_presence`;
-//!   `forward_to_homes` operates on `DispatchP` and writes to
-//!   `cf_dht_queue`.
-//! - `publish` returns a single typed outcome enum
-//!   (`StoreOutcome::Stored` etc.); `forward_to_homes` distinguishes
-//!   `Delivered` from `Stored` because the sender uses that to decide
-//!   between [`DispatchAckP::Delivered`] and [`DispatchAckP::Forwarded`]
-//!   on the originating client's ack.
-//! - `publish` carries an Ed25519-signed presence record; `Forward`
-//!   carries an unmodified `DispatchP` plus an *additional* outer
-//!   sender-relay signature (two-layer signing).
-//!
-//! Sharing the dispatch-parallel idiom with a generic helper would have
-//! cost more in indirection than the ~40 lines of duplicated `JoinSet`
-//! plumbing, so they live as siblings.
+//! Each `Forward` carries the unmodified `DispatchP` plus an outer
+//! sender-relay signature (two-layer signing); the home reports
+//! `Delivered` vs `Stored` so the sender can drive the originating
+//! client's [`DispatchAckP::Delivered`] / [`DispatchAckP::Forwarded`] ack.
 //!
 //! ## Lock contract
 //!
@@ -246,9 +230,8 @@ pub(crate) async fn forward_to_homes(
     // 3. Build the wire `Forward` once — the same `Forward` is sent to
     //    every remote home (one signature, K-1 transmissions) since
     //    the transcript covers `(dispatch.id, sender_relay_id, timestamp)`,
-    //    none of which depend on the home being addressed. This matches
-    //    publish.rs's "build record once, multiplex over K peers"
-    //    pattern.
+    //    none of which depend on the home being addressed — one
+    //    signature, multiplexed over every home.
     let forward_pkt = build_signed_forward(&dht, dispatch, now_ms);
 
     // 4. Fan-out RPCs against the K-1 (or K) remote descriptors in
@@ -596,9 +579,8 @@ mod tests {
     use crate::dht::Dht;
     use crate::dht::DhtConfig;
 
-    /// Counter-derived signing key. Matches the discipline established
-    /// in `publish.rs::tests::fresh_signing_key` — distinct keys per
-    /// call without an RNG dep.
+    /// Counter-derived signing key — distinct keys per call without an
+    /// RNG dep.
     fn fresh_signing_key() -> SigningKey {
         static SEQ: AtomicU64 = AtomicU64::new(1);
         let n = SEQ.fetch_add(1, AtomicOrdering::SeqCst);
