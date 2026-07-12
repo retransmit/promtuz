@@ -427,6 +427,12 @@ pub enum CRelayPacket {
     /// Set our activity mode (Active/Idle). Fire-and-forget; the relay updates
     /// the state it reports to our mutual contacts. Appended last (postcard).
     SetPresence(PresenceMode),
+
+    /// Tell this home relay our push-pseudonym `P`, so it can trigger a
+    /// background wake for our offline queue without ever learning the device
+    /// token. Bound to the connection-authenticated IPK — no separate
+    /// signature. Fire-and-forget; no reply. Appended last (postcard).
+    RegisterPush { pseudonym: Bytes<32> },
 }
 
 /// Server Relay Packet

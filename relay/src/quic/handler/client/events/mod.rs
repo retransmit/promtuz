@@ -78,6 +78,10 @@ pub(super) async fn handle_packet(
 
         SetPresence(mode) => presence::handle_set_presence(mode, ctx.clone()).await,
 
+        RegisterPush { pseudonym } => {
+            misc::handle_register_push(pseudonym.0, ctx.clone()).await
+        },
+
         // Ignore Extra
         _ => Ok(()),
     }

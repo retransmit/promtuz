@@ -97,6 +97,13 @@ pub struct Relay {
     /// Clients that flagged themselves Idle → the unix-ms they did. Absence =
     /// Active. Populated by `SetPresence`, cleared on Active or disconnect.
     pub presence_mode: RwLock<HashMap<[u8; 32], u64>>,
+
+    /// `IPK → push-pseudonym P` for offline-wake. Populated by
+    /// `CRelayPacket::RegisterPush`; read by the DHT enqueue path to trigger a
+    /// gateway wake. Deliberately **not** cleared on disconnect — the whole
+    /// point is to wake a device whose app is *not* connected. `Arc` so the
+    /// DHT enqueue path (`dht/forward.rs`) sees the same map.
+    pub push_pseudonyms: Arc<RwLock<HashMap<[u8; 32], [u8; 32]>>>,
 }
 
 impl Relay {
@@ -197,6 +204,7 @@ impl Relay {
             clients,
             presence_subs: RwLock::new(HashMap::new()),
             presence_mode: RwLock::new(HashMap::new()),
+            push_pseudonyms: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
