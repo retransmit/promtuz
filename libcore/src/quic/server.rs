@@ -401,20 +401,24 @@ impl Relay {
             }
 
             // Durable first-send retry: re-drive first-sends that deferred
-            // (peer had no published KP). Run AFTER the welcome poll so a
-            // Welcome that just paired us is applied first. Bounded like the
-            // poll so a dead DHT can't stall the queue drain below.
-            // ponytail: 15s cap matches poll_welcomes; raise if a user
-            // accumulates many deferred first-sends across a long offline gap.
-            if tokio::time::timeout(
-                Duration::from_secs(15),
-                retry_pending_sends_once(client.clone()),
-            )
-            .await
-            .is_err()
-            {
-                warn!("MLS: retry_pending_sends timed out; draining anyway");
-            }
+            // (peer had no published KP). Outbound-only, so it needn't gate the
+            // inbound drain or the Connected state — spawned (not awaited) so its
+            // DHT round-trip doesn't stretch the "Syncing…" window. Spawned HERE,
+            // after the welcome poll returned, so a Welcome that just paired us is
+            // still applied before we retry a first-send to that peer (no fork).
+            // ponytail: 15s cap matches poll_welcomes.
+            let client_for_retry = client.clone();
+            tokio::spawn(async move {
+                if tokio::time::timeout(
+                    Duration::from_secs(15),
+                    retry_pending_sends_once(client_for_retry),
+                )
+                .await
+                .is_err()
+                {
+                    warn!("MLS: retry_pending_sends timed out");
+                }
+            });
 
             // KP rotation scheduler — long-lived task, ticks every
             // KP_SCHEDULER_TICK_MS. Cancelled on disconnect via
