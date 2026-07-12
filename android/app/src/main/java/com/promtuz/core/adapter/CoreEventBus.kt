@@ -53,6 +53,11 @@ object CoreEventBus : CoreEvents {
     private val _presenceByPeer = MutableStateFlow<Map<String, Presence>>(emptyMap())
     val presenceByPeer: StateFlow<Map<String, Presence>> = _presenceByPeer.asStateFlow()
 
+    /** Seed the presence cache from disk on cold start ([PresenceStore]). */
+    fun hydratePresence(seed: Map<String, Presence>) {
+        if (seed.isNotEmpty()) _presenceByPeer.value = seed
+    }
+
     override fun onConnection(state: FfiConnectionState) {
         _connection.value = ConnectionState.entries.getOrElse(state.ordinal) { ConnectionState.Idle }
     }

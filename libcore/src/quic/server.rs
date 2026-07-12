@@ -197,7 +197,11 @@ impl Relay {
         let connect_ms = systime().as_millis() as u64 - connect_start;
         info!("authenticated with relay({}) in {connect_ms}ms at {timestamp}", self.id);
         CONNECTION_START_TIME.store(timestamp, Ordering::Relaxed);
-        ConnectionState::Connected.emit();
+        // Auth is up but the offline backlog (welcomes, deferred sends, queued
+        // messages) isn't drained yet — surface that as "Syncing…". `handle`
+        // flips to Connected once it's pulled; failures below emit Disconnected,
+        // so we never stick here.
+        ConnectionState::Syncing.emit();
 
         self.record_success().map_err(|e| RelayConnError::Error(e.into()))?;
 
@@ -465,6 +469,10 @@ impl Relay {
                 self.ack_drain(conn, ipk).await;
             }
         }
+
+        // Offline backlog is in the local DB — synced and live. (A drain-setup
+        // failure returns above → Disconnected, so we never stick on Syncing.)
+        ConnectionState::Connected.emit();
 
         //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
 

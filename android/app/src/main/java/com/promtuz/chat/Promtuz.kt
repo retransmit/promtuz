@@ -14,8 +14,12 @@ import com.promtuz.chat.utils.logs.AppLog
 import com.promtuz.chat.utils.logs.AppLogger
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.CoreInitializer
+import com.promtuz.core.PresenceStore
+import com.promtuz.core.adapter.CoreEventBus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import org.koin.android.ext.koin.androidContext
 import org.koin.android.ext.koin.androidLogger
@@ -56,10 +60,23 @@ class Promtuz : Application() {
             readJNILogs()
         }
 
+        // Seed the last-known presence before core starts firing deltas, so a
+        // cold start shows last-seens instead of a blank; then persist changes
+        // (debounced, off the hot path) for the next cold start.
+        PresenceStore.init(this)
+        CoreEventBus.hydratePresence(PresenceStore.seed())
+
         CoreInitializer.start()
         BackupWorker.start(this)
         AppearanceStore.init(this)
         ChatPrefs.init(this)
+
+        CoroutineScope(Dispatchers.IO).launch {
+            CoreEventBus.presenceByPeer.collectLatest { map ->
+                delay(1500) // collectLatest cancels+restarts on a new value → debounce
+                PresenceStore.save(map, System.currentTimeMillis())
+            }
+        }
 
         // Foreground → nudge core for an instant reconnect (the raised idle
         // timeout means most app switches never dropped the connection) and go
