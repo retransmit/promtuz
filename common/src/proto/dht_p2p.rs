@@ -78,8 +78,8 @@ pub const DHT_HELLO_SIG_DOMAIN: &[u8] = b"promtuz-dht-hello-v1";
 /// outside this window is treated as a replay or a misconfigured clock
 /// and rejected with [`crate::quic::CloseReason::DhtClockSkew`].
 ///
-/// Mirrors `HELLO_MAX_SKEW_MS` at `resolver/src/resolver/mod.rs:47` —
-/// the resolver applies the same window to `RelayHello`/`RelayHeartbeat`,
+/// Mirrors the resolver's `HELLO_MAX_SKEW_MS` — it applies the same
+/// window to `RelayHello`/`RelayHeartbeat`,
 /// and consistency across packet kinds keeps a relay's local clock-drift
 /// behaviour identical against either receiver.
 pub const MAX_DHT_HELLO_SKEW_MS: u64 = 60_000;
@@ -255,8 +255,7 @@ mod verify_impl {
         /// `self.node_id` post-success) on a clean check.
         ///
         /// Mirrors the order, semantics and failure modes of the
-        /// resolver-side `verify_signed_packet` at
-        /// `resolver/src/resolver/mod.rs:315-346`:
+        /// resolver-side `verify_signed_packet`:
         ///
         /// 1. **id ↔ pubkey binding**: `BLAKE3(pubkey) == node_id`.
         ///    Catches an attacker presenting a benign pubkey under a
@@ -268,8 +267,8 @@ mod verify_impl {
         /// 3. **Signature**: `sig` verifies under `pubkey` over the
         ///    canonical transcript built by
         ///    [`dht_hello_signing_input`]. Uses `verify_strict` (same
-        ///    choice as `resolver/src/resolver/mod.rs:332`) for the
-        ///    standard small-subgroup defence.
+        ///    choice as the resolver) for the standard small-subgroup
+        ///    defence.
         /// 4. **Timestamp window**: `|now_ms − timestamp| ≤
         ///    MAX_DHT_HELLO_SKEW_MS`.
         ///
