@@ -121,6 +121,18 @@ android {
             )
             signingConfig = if (hasReleaseSigning) signingConfigs.getByName("release") else null
         }
+        // Perf measurement: AOT-compiled, non-debuggable (no Compose debug checks,
+        // no JIT cold start), debug-signed so it installs anywhere. Minify stays
+        // off to keep uniffi/JNA out of R8's reach — the wins we're measuring are
+        // debuggable=false + AOT, not shrinking. `gradlew installBenchmark`.
+        create("benchmark") {
+            initWith(getByName("release"))
+            isMinifyEnabled = false
+            isShrinkResources = false
+            isDebuggable = false
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
