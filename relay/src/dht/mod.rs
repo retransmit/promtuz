@@ -57,9 +57,7 @@ use self::routing::RoutingTable;
 ///   the existing `Relay::clients` pattern.
 ///
 /// All sub-locks are `parking_lot` and *never* held across `await` —
-/// callers clone what they need out of the lock first (cf. the
-/// project-wide rule documented at
-/// `relay/src/quic/handler/client/events/forward.rs:59`).
+/// callers clone what they need out of the lock first (project-wide rule).
 ///
 /// `routing`/`peer_conns` are `pub(crate)` because only
 /// in-relay code holds an `Arc<Dht>`; `node_id`/`signing_key`/`cfg`/
