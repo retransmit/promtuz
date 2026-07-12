@@ -12,6 +12,7 @@ import uniffi.core.InvitePreview
 import uniffi.core.MessageRecord
 import uniffi.core.ReactionRecord
 import uniffi.core.RelayStat
+import uniffi.core.UnreadCount
 import uniffi.core.computeQrMask as ffiComputeQrMask
 import uniffi.core.connectRelay as ffiConnectRelay
 import uniffi.core.enroll as ffiEnroll
@@ -31,6 +32,8 @@ import uniffi.core.shouldLaunchApp as ffiShouldLaunchApp
 import uniffi.core.deleteMessage as ffiDeleteMessage
 import uniffi.core.editMessage as ffiEditMessage
 import uniffi.core.markRead as ffiMarkRead
+import uniffi.core.markConversationRead as ffiMarkConversationRead
+import uniffi.core.unreadCounts as ffiUnreadCounts
 import uniffi.core.reactMessage as ffiReactMessage
 import uniffi.core.reactionsFor as ffiReactionsFor
 import uniffi.core.setActivity as ffiSetActivity
@@ -141,6 +144,14 @@ object CoreBridge {
     /** High-water-mark read receipt: mark everything from `peer` up to this dispatch id as read. */
     suspend fun markRead(peer: ByteArray, uptoDispatchId: ByteArray) =
         withContext(Dispatchers.IO) { ffiMarkRead(peer, uptoDispatchId) }
+
+    /** Mark the whole conversation with `peer` read (home-list action). */
+    suspend fun markConversationRead(peer: ByteArray) =
+        withContext(Dispatchers.IO) { ffiMarkConversationRead(peer) }
+
+    /** Per-peer unread incoming counts (only peers with unread > 0) for home badges. */
+    suspend fun unreadCounts(): List<UnreadCount> =
+        withContext(Dispatchers.IO) { ffiUnreadCounts() }
 
     /** Ephemeral typing/recording signal (OR of Activity bits; 0 = idle). Fire-and-forget. */
     suspend fun setActivity(peer: ByteArray, activityBits: Int) =

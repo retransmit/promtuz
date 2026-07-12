@@ -194,6 +194,7 @@ class AppVM(
     private suspend fun loadSummaries(): List<ChatSummary> = try {
         val contacts = bridge.contacts()
         val convByPeer = bridge.conversations().associateBy { it.peerIpk.toList() }
+        val unread = bridge.unreadCounts().associate { it.peerIpk.toList() to it.count.toInt() }
         contacts.map { c ->
             val last = convByPeer[c.ipk.toList()]
             ChatSummary(
@@ -202,6 +203,10 @@ class AppVM(
                 lastPreview = last?.content,
                 timestampMs = (last?.timestamp ?: c.addedAt).toLong() * 1000,
                 status = c.status.toInt(),
+                unreadCount = unread[c.ipk.toList()] ?: 0,
+                lastOutgoing = last?.outgoing == true,
+                lastDeleted = last?.deleted == true,
+                lastStatus = last?.status?.toInt() ?: 1,
             )
         }.sortedByDescending { it.timestampMs }
     } catch (e: Exception) {
