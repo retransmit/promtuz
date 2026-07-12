@@ -7,12 +7,14 @@ import androidx.lifecycle.viewModelScope
 import androidx.navigation3.runtime.NavBackStack
 import androidx.navigation3.runtime.NavKey
 import com.promtuz.chat.R
+import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.chat.domain.model.ChatSummary
 import com.promtuz.chat.domain.model.Presence
 import com.promtuz.chat.navigation.AppNavigator
 import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.state.InviteSheet
 import com.promtuz.chat.security.RecoveryStore
+import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
@@ -44,10 +46,18 @@ class AppVM(
     private val _dynamicTitle = MutableStateFlow(context.resources.getString(R.string.app_name))
     val dynamicTitle: StateFlow<String> = _dynamicTitle.asStateFlow()
 
-    /** Home chat list — reactive: re-reads whenever contacts or messages change. */
+    /** Home chat list — reactive: re-reads on contact/message changes, re-sorts
+     *  pinned-first the instant a pin toggles. */
     val chats: StateFlow<List<ChatSummary>> =
-        observeQuery(setOf("contacts", "messages")) { loadSummaries() }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+        combine(
+            observeQuery(setOf("contacts", "messages")) { loadSummaries() },
+            ChatPrefs.pinned,
+        ) { list, pinned ->
+            list.sortedWith(
+                compareByDescending<ChatSummary> { it.peerHex in pinned }
+                    .thenByDescending { it.timestampMs }
+            )
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** Live presence per contact (hex IPK) for the whole app — home dots + chat header. */
     val presenceByPeer: StateFlow<Map<String, Presence>> get() = bridge.presenceByPeer
@@ -141,6 +151,17 @@ class AppVM(
 
     fun openChat(peerHex: String, name: String) {
         navigator.push(Routes.Chat(peerHex, name))
+    }
+
+    /** Home-list "Mark read": clear the unread backlog for this conversation. */
+    fun markConversationRead(peerHex: String) = viewModelScope.launch {
+        runCatching { bridge.markConversationRead(peerHex.fromHex()) }
+    }
+
+    /** Home-list "Delete chat": forget the contact + all local state, drop its flags. */
+    fun deleteChat(peerHex: String) = viewModelScope.launch {
+        runCatching { bridge.forgetContact(peerHex.fromHex()) }
+        ChatPrefs.forget(peerHex)
     }
 
     /** A `/pair` deeplink arrived: decode it and raise the confirmation sheet. */

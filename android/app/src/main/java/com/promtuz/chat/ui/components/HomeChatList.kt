@@ -20,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.chat.domain.model.Activity
 import com.promtuz.chat.presentation.viewmodel.AppVM
 
@@ -29,6 +30,8 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM) {
     val chats by appViewModel.chats.collectAsState()
     val presence by appViewModel.presenceByPeer.collectAsState()
     val activity by appViewModel.activityByPeer.collectAsState()
+    val pinned by ChatPrefs.pinned.collectAsState()
+    val muted by ChatPrefs.muted.collectAsState()
 
     if (chats.isEmpty()) {
         HomeEmpty(innerPadding)
@@ -45,13 +48,18 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM) {
 
         itemsIndexed(chats, key = { _, c -> c.peerHex }) { _, chat ->
             HomeChatListItem(
-                chat,
-                presence[chat.peerHex],
+                chat = chat,
+                presence = presence[chat.peerHex],
                 typing = Activity.Typing in Activity.fromBits(activity[chat.peerHex] ?: 0),
+                pinned = chat.peerHex in pinned,
+                muted = chat.peerHex in muted,
+                onOpen = { appViewModel.openChat(chat.peerHex, chat.name) },
+                onPin = { ChatPrefs.togglePin(chat.peerHex) },
+                onMute = { ChatPrefs.toggleMute(chat.peerHex) },
+                onMarkRead = { appViewModel.markConversationRead(chat.peerHex) },
+                onDelete = { appViewModel.deleteChat(chat.peerHex) },
                 modifier = Modifier.animateItem(),
-            ) {
-                appViewModel.openChat(chat.peerHex, chat.name)
-            }
+            )
         }
 
         item { Spacer(Modifier.height(24.dp)) }

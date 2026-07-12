@@ -1,7 +1,7 @@
 package com.promtuz.chat.ui.components
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,17 +11,30 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import com.promtuz.chat.domain.model.ChatSummary
 import com.promtuz.chat.domain.model.Presence
 import com.promtuz.chat.utils.common.parseMessageDate
@@ -31,68 +44,117 @@ fun HomeChatListItem(
     chat: ChatSummary,
     presence: Presence?,
     typing: Boolean,
-    modifier: Modifier = Modifier,
+    pinned: Boolean,
+    muted: Boolean,
     onOpen: () -> Unit,
+    onPin: () -> Unit,
+    onMute: () -> Unit,
+    onMarkRead: () -> Unit,
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val type = MaterialTheme.typography
     val colors = MaterialTheme.colorScheme
+    val haptic = LocalHapticFeedback.current
     val unread = chat.unreadCount > 0
 
-    Row(
-        modifier
-            .fillMaxWidth()
-            .clickable(onClick = onOpen)
-            .padding(horizontal = 16.dp, vertical = 9.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Avatar(chat.name, statusColor = presenceColor(presence))
+    var menuOpen by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    var rowHeight by remember { mutableIntStateOf(0) }
 
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    chat.name,
-                    Modifier.weight(1f),
-                    style = type.titleMediumEmphasized,
-                    fontWeight = if (unread) FontWeight.Bold else null,
-                    color = colors.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+    Box(modifier) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .onSizeChanged { rowHeight = it.height }
+                .combinedClickable(
+                    onClick = onOpen,
+                    onLongClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        menuOpen = true
+                    },
                 )
-                if (chat.timestampMs > 0) Row(
-                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                .padding(horizontal = 16.dp, vertical = 9.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Avatar(chat.name, statusColor = presenceColor(presence))
+
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (chat.lastOutgoing && !typing) DeliveryTick(chat.lastStatus)
                     Text(
-                        parseMessageDate(chat.timestampMs),
-                        style = type.bodySmallEmphasized,
-                        color = if (unread) colors.primary else colors.onSurfaceVariant.copy(0.7f),
+                        chat.name,
+                        Modifier.weight(1f),
+                        style = type.titleMediumEmphasized,
+                        fontWeight = if (unread) FontWeight.Bold else null,
+                        color = colors.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
+                    if (chat.timestampMs > 0) Row(
+                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (chat.lastOutgoing && !typing) DeliveryTick(chat.lastStatus)
+                        Text(
+                            parseMessageDate(chat.timestampMs),
+                            style = type.bodySmallEmphasized,
+                            color = if (unread && !muted) colors.primary else colors.onSurfaceVariant.copy(0.7f),
+                        )
+                    }
+                }
+
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    val (line, lineColor) = statusLine(chat, typing, colors)
+                    Text(
+                        line,
+                        Modifier.weight(1f),
+                        style = type.bodySmallEmphasized,
+                        color = lineColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (unread) UnreadBadge(chat.unreadCount, muted, colors)
                 }
             }
+        }
 
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
+        if (menuOpen) {
+            val topGroup = buildList {
+                add(MenuAction(if (pinned) "Unpin" else "Pin") { onPin() })
+                add(MenuAction(if (muted) "Unmute" else "Mute") { onMute() })
+                if (unread) add(MenuAction("Mark read") { onMarkRead() })
+            }
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, rowHeight),
+                onDismissRequest = { menuOpen = false },
+                properties = PopupProperties(focusable = true),
             ) {
-                val (line, lineColor) = statusLine(chat, typing, colors)
-                Text(
-                    line,
-                    Modifier.weight(1f),
-                    style = type.bodySmallEmphasized,
-                    color = lineColor,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                MenuCard(
+                    groups = listOf(
+                        topGroup,
+                        listOf(MenuAction("Delete chat", destructive = true) { confirmDelete = true }),
+                    ),
+                    hovered = -1,
+                    onPick = { it.onClick(); menuOpen = false },
                 )
-                if (unread) UnreadBadge(chat.unreadCount, colors)
             }
         }
+
+        if (confirmDelete) DeleteChatDialog(
+            name = chat.name,
+            onConfirm = { confirmDelete = false; onDelete() },
+            onDismiss = { confirmDelete = false },
+        )
     }
 }
 
@@ -125,13 +187,15 @@ private fun DeliveryTick(status: Int) {
 }
 
 @Composable
-private fun UnreadBadge(count: Int, colors: ColorScheme) {
+private fun UnreadBadge(count: Int, muted: Boolean, colors: ColorScheme) {
+    val bg = if (muted) colors.surfaceVariant else colors.primary
+    val fg = if (muted) colors.onSurfaceVariant else colors.onPrimary
     Box(
         Modifier
             .heightIn(min = 20.dp)
             .defaultMinSize(minWidth = 20.dp)
             .clip(CircleShape)
-            .background(colors.primary)
+            .background(bg)
             .padding(horizontal = 6.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -139,10 +203,25 @@ private fun UnreadBadge(count: Int, colors: ColorScheme) {
             if (count > 99) "99+" else "$count",
             style = MaterialTheme.typography.labelMedium,
             fontWeight = FontWeight.Bold,
-            color = colors.onPrimary,
+            color = fg,
             maxLines = 1,
         )
     }
+}
+
+@Composable
+private fun DeleteChatDialog(name: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Delete chat") },
+        text = { Text("Delete your chat with $name? This removes the contact and all messages on this device. This can't be undone.") },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("Delete", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 private val OnlineDot = Color(0xFF34C759)

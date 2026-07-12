@@ -6,6 +6,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.promtuz.chat.backup.BackupWorker
+import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.chat.di.appModule
 import com.promtuz.chat.di.vmModule
 import com.promtuz.chat.ui.appearance.AppearanceStore
@@ -58,6 +59,7 @@ class Promtuz : Application() {
         CoreInitializer.start()
         BackupWorker.start(this)
         AppearanceStore.init(this)
+        ChatPrefs.init(this)
 
         // Foreground → nudge core for an instant reconnect (the raised idle
         // timeout means most app switches never dropped the connection) and go
