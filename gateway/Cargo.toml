@@ -14,5 +14,10 @@ serde.workspace = true
 quinn.workspace = true
 tokio.workspace = true
 clap.workspace = true
+parking_lot = "0.12.5"
 # Per-source-IP accept-side rate limiter (same pattern as the resolver).
 governor = "0.10.4"
+
+[dev-dependencies]
+# Test-only: mint a push keypair to sign a RegisterToken in registry tests.
+ed25519-dalek.workspace = true

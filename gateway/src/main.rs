@@ -4,7 +4,9 @@ mod cli;
 mod config;
 mod gateway;
 mod quic;
+mod registry;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -31,8 +33,8 @@ async fn main() -> Result<()> {
         common::node::enroll::spawn_config_reload(cli.config.clone());
     }
 
-    let gateway = Gateway::new(cfg);
-    let acceptor = Acceptor::new(gateway.endpoint.clone());
+    let gateway = Arc::new(Gateway::new(cfg));
+    let acceptor = Acceptor::new(gateway.clone());
 
     tokio::select! {
         _ = acceptor.run() => {}

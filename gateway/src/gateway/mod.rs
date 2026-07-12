@@ -12,12 +12,13 @@ use quinn::Endpoint;
 use quinn::ServerConfig;
 
 use crate::config::AppConfig;
+use crate::registry::PushRegistry;
 
-/// The push gateway node: a blind QUIC listener that (later cuts) registers
-/// `P → token` and dispatches wake requests to APNs/FCM. For now it enrolls
-/// and listens. The `P → token` registry hangs here next cut.
+/// The push gateway node: a blind QUIC listener that registers `P → token`
+/// and (next cut) dispatches wake requests to APNs/FCM.
 pub struct Gateway {
     pub endpoint: Arc<Endpoint>,
+    pub registry: PushRegistry,
 }
 
 impl Gateway {
@@ -50,6 +51,6 @@ impl Gateway {
                 info!("initializing gateway with IPK({})", key.key());
             }
         }
-        Self { endpoint: Arc::new(Self::endpoint(&cfg)) }
+        Self { endpoint: Arc::new(Self::endpoint(&cfg)), registry: PushRegistry::default() }
     }
 }

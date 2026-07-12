@@ -1,21 +1,26 @@
+use std::sync::Arc;
+
+use common::debug;
+use common::info;
 use common::proto::pack::Unpacker;
 use common::proto::push::PushRequest;
 use common::quic::protorole::ProtoRole;
-use common::debug;
 use common::warn;
 use quinn::Connection;
+
+use crate::gateway::Gateway;
 
 /// Per-connection handler. Serves the one-RPC-per-bi-stream contract (mirrors
 /// the resolver's client handler): each accepted bi-stream is one
 /// [`PushRequest`].
 ///
-/// Skeleton cut: it authenticates the ALPN role, decodes the request, and
-/// logs it. The `P → token` registry (Register) and the APNs/FCM dispatch
-/// (Wake) land in the next cut.
+/// `Register` (devices, `client/1`) verifies + stores `P → token`. `Wake`
+/// (home relays, `relay/1`) resolves `P → token`; the actual APNs/FCM dispatch
+/// is the next cut.
 pub struct Handler;
 
 impl Handler {
-    pub async fn handle(conn: Connection) {
+    pub async fn handle(conn: Connection, gateway: Arc<Gateway>) {
         let addr = conn.remote_address();
         debug!("incoming conn from {addr}");
 
@@ -29,12 +34,21 @@ impl Handler {
 
         while let Ok((_send, mut recv)) = conn.accept_bi().await {
             match PushRequest::unpack(&mut recv).await {
-                // ponytail: skeleton — registry + FCM dispatch are the next cut.
-                Ok(PushRequest::Register(_)) => {
-                    warn!("gateway: RegisterToken from {addr} — dispatch not wired yet");
+                Ok(PushRequest::Register(reg)) => match gateway.registry.register(&reg) {
+                    Ok(()) => debug!("gateway: registered pseudonym from {addr}"),
+                    Err(e) => warn!("gateway: rejected registration from {addr}: {e}"),
                 },
-                Ok(PushRequest::Wake(_)) => {
-                    warn!("gateway: WakeRequest from {addr} — dispatch not wired yet");
+                Ok(PushRequest::Wake(req)) => match gateway.registry.resolve(&req.pseudonym.0) {
+                    // ponytail: dispatch (FCM HTTP v1) is the next cut — for now
+                    // we prove the P→token resolve half.
+                    Some(entry) => info!(
+                        "gateway: wake for known pseudonym → {:?} ({} B token), \
+                         {} B payload — dispatch pending",
+                        entry.provider,
+                        entry.token.len(),
+                        req.payload.len(),
+                    ),
+                    None => warn!("gateway: wake for unknown pseudonym from {addr}"),
                 },
                 Err(e) => {
                     warn!("gateway: request decode failed from {addr}: {e}");
