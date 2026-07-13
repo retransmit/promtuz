@@ -34,8 +34,11 @@ pub enum LastOutcome {
 pub fn outcome_for_ack(ack: &DispatchAckP) -> LastOutcome {
     use LastOutcome::*;
     match ack {
-        DispatchAckP::Forwarded | DispatchAckP::Delivered => Durable,
-        DispatchAckP::Queued => Queued,
+        // `Queued` is the relay's local-fallback ack, returned only AFTER a
+        // `put_sync` fsync (see forward.rs::store_in_rocks) — a durable handoff,
+        // so the message is "sent" even if the recipient is offline. Treating it
+        // as non-durable was the "stuck pending until the recipient logs in" bug.
+        DispatchAckP::Forwarded | DispatchAckP::Delivered | DispatchAckP::Queued => Durable,
         DispatchAckP::QueueFull | DispatchAckP::Error { .. } => Reachable,
         DispatchAckP::NotFound | DispatchAckP::InvalidSig => Terminal,
     }
