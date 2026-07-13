@@ -134,9 +134,7 @@ pub(crate) fn delete_migrated_entry(dht: &Dht, key: &MessageKey) -> bool {
 /// home-relay queue. Used by:
 ///
 /// - `forward_to_homes` when the sender relay discovers it is itself in
-///   the recipient's K-closest set — the self-store short-circuit that
-///   mirrors the publish-path's "self in K" optimisation in
-///   [`super::publish::publish`].
+///   the recipient's K-closest set — the self-store short-circuit.
 /// - The home-side `DhtRequest::Forward` handler, to durably enqueue an
 ///   inbound dispatch for an offline recipient.
 ///

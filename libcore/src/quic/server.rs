@@ -197,7 +197,11 @@ impl Relay {
         let connect_ms = systime().as_millis() as u64 - connect_start;
         info!("authenticated with relay({}) in {connect_ms}ms at {timestamp}", self.id);
         CONNECTION_START_TIME.store(timestamp, Ordering::Relaxed);
-        ConnectionState::Connected.emit();
+        // Auth is up but the offline backlog (welcomes, deferred sends, queued
+        // messages) isn't drained yet — surface that as "Syncing…". `handle`
+        // flips to Connected once it's pulled; failures below emit Disconnected,
+        // so we never stick here.
+        ConnectionState::Syncing.emit();
 
         self.record_success().map_err(|e| RelayConnError::Error(e.into()))?;
 
@@ -408,20 +412,24 @@ impl Relay {
             }
 
             // Durable first-send retry: re-drive first-sends that deferred
-            // (peer had no published KP). Run AFTER the welcome poll so a
-            // Welcome that just paired us is applied first. Bounded like the
-            // poll so a dead DHT can't stall the queue drain below.
-            // ponytail: 15s cap matches poll_welcomes; raise if a user
-            // accumulates many deferred first-sends across a long offline gap.
-            if tokio::time::timeout(
-                Duration::from_secs(15),
-                retry_pending_sends_once(client.clone()),
-            )
-            .await
-            .is_err()
-            {
-                warn!("MLS: retry_pending_sends timed out; draining anyway");
-            }
+            // (peer had no published KP). Outbound-only, so it needn't gate the
+            // inbound drain or the Connected state — spawned (not awaited) so its
+            // DHT round-trip doesn't stretch the "Syncing…" window. Spawned HERE,
+            // after the welcome poll returned, so a Welcome that just paired us is
+            // still applied before we retry a first-send to that peer (no fork).
+            // ponytail: 15s cap matches poll_welcomes.
+            let client_for_retry = client.clone();
+            tokio::spawn(async move {
+                if tokio::time::timeout(
+                    Duration::from_secs(15),
+                    retry_pending_sends_once(client_for_retry),
+                )
+                .await
+                .is_err()
+                {
+                    warn!("MLS: retry_pending_sends timed out");
+                }
+            });
 
             // KP rotation scheduler — long-lived task, ticks every
             // KP_SCHEDULER_TICK_MS. Cancelled on disconnect via
@@ -476,6 +484,10 @@ impl Relay {
                 self.ack_drain(conn, ipk).await;
             }
         }
+
+        // Offline backlog is in the local DB — synced and live. (A drain-setup
+        // failure returns above → Disconnected, so we never stick on Syncing.)
+        ConnectionState::Connected.emit();
 
         //==:==:==:==:==:==:==:==:==:==:==:==:==:==:==||
 

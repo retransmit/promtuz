@@ -17,7 +17,9 @@ enum class ConnectionState(@param:StringRes val text: Int) {
     @SerialName("Connected") Connected(R.string.state_connected),
     @SerialName("Reconnecting") Reconnecting(R.string.state_reconnecting),
     @SerialName("Failed") Failed(R.string.state_failed),
-    @SerialName("NoInternet") NoInternet(R.string.state_nointernet);
+    @SerialName("NoInternet") NoInternet(R.string.state_nointernet),
+    // Appended last so ordinals match the libcore enum (the client maps by ordinal).
+    @SerialName("Syncing") Syncing(R.string.state_syncing);
 
     companion object {
         fun fromInt(i: Int): ConnectionState = entries.getOrElse(i) { Idle }

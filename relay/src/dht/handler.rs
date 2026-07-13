@@ -93,8 +93,8 @@ use super::tls_extract;
 
 /// Maximum concurrent in-flight inbound DHT streams per peer connection.
 ///
-/// 16 matches the existing per-client limiter at
-/// `relay/src/quic/handler/client/mod.rs:77`. Past this, additional
+/// 16 matches the existing per-client limiter in
+/// `quic/handler/client/mod.rs`. Past this, additional
 /// streams are dropped at `try_acquire_owned` rather than queued — the
 /// peer is misbehaving (DHT RPCs have bounded sizes and shouldn't pile up).
 const MAX_CONCURRENT_STREAMS_PER_PEER: usize = 16;
@@ -105,7 +105,7 @@ const MAX_CONCURRENT_STREAMS_PER_PEER: usize = 16;
 ///
 /// 5 s is several orders of magnitude above the round-trip needed to
 /// open a uni-stream and ship a 130-byte signed packet, but well below
-/// the QUIC idle timeout (`common/src/quic/config.rs:32-33`, 30 s) so
+/// the QUIC idle timeout (`common/src/quic/config.rs`, 30 s) so
 /// a stalled hello doesn't get caught only by the idle path. Matches
 /// the order of magnitude of `LOOKUP_RPC_TIMEOUT_MS` (1500 ms in
 /// `dht/config.rs`), with extra slack for the *first* packet on a
@@ -139,8 +139,7 @@ const HELLO_RECV_TIMEOUT: Duration = Duration::from_secs(5);
 ///    `finish()`es the send side.
 /// 5. On `Connection::closed()` (peer rebooted, network failed), evict
 ///    the routing-table entry only if it still points at this exact
-///    `Connection` — same race-guard as `remove_client_if_same` at
-///    `relay/src/quic/handler/client/mod.rs:43-52`.
+///    `Connection` — same race-guard as `remove_client_if_same`.
 pub(crate) async fn handle_peer_connection(dht: Arc<Dht>, conn: Connection) {
     // Forward-compatible TLS pubkey extraction. Under the current
     // `with_no_client_auth()` server config this returns `None`

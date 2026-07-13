@@ -18,6 +18,11 @@ pub enum ConnectionState {
     Reconnecting,
     Failed,
     NoInternet,
+    /// Link + auth are up, but we're still pulling the offline backlog
+    /// (welcomes, deferred sends, queued messages) into the local DB.
+    /// Appended last to keep every prior ordinal stable (the client maps by
+    /// ordinal).
+    Syncing,
 }
 
 impl Emittable for ConnectionState {
