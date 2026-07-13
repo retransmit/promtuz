@@ -2,6 +2,7 @@ package com.promtuz.core.push
 
 import android.Manifest
 import android.app.Application
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -82,7 +83,7 @@ object PushNotifier {
 
         val nm = NotificationManagerCompat.from(app)
         nm.notify(
-            msg.peerHex.hashCode(),
+            notifId(msg.peerHex),
             NotificationCompat.Builder(app, Notifications.MESSAGES_CHANNEL)
                 .setSmallIcon(R.drawable.i_notifications)
                 .setStyle(style)
@@ -110,8 +111,23 @@ object PushNotifier {
     }
 
     private fun clear() {
-        if (::app.isInitialized) NotificationManagerCompat.from(app).cancelAll()
+        if (!::app.isInitialized) return
+        // Cancel the message notifications (incl. the summary — all carry GROUP_KEY) but NOT the drain
+        // worker's foreground-service notice on API < 31: it has no group, and cancelling a live FGS
+        // notification is illegal.
+        val nm = app.getSystemService(NotificationManager::class.java)
+        nm.activeNotifications
+            .filter { it.notification.group == Notifications.GROUP_KEY }
+            .forEach { nm.cancel(it.id) }
+    }
+
+    /** Deterministic per-peer id (so a cold FCM wake updates the same chat's notification instead of
+     *  duplicating), kept clear of the reserved summary (1) / drain-FGS (42) ids. */
+    private fun notifId(peerHex: String): Int {
+        val h = peerHex.hashCode() and 0x7FFF_FFFF
+        return if (h < RESERVED_MAX) h + RESERVED_MAX else h
     }
 
     private const val MAX_LINES = 8
+    private const val RESERVED_MAX = 100
 }

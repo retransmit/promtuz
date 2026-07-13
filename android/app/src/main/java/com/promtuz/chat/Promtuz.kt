@@ -67,9 +67,9 @@ class Promtuz : Application() {
         // (onNewToken won't re-fire if unchanged). registerPushToken stores it and re-registers on
         // each relay connect, so calling before the first connect is fine.
         PushNotifier.start(this)
-        FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
-            CoreBridge.registerPushToken(token.toByteArray())
-        }
+        FirebaseMessaging.getInstance().token
+            .addOnSuccessListener { token -> CoreBridge.registerPushToken(token.toByteArray()) }
+            .addOnFailureListener { Timber.tag("Push").w(it, "FCM token fetch failed — no wake until it succeeds") }
 
         // Foreground → nudge core for an instant reconnect (the raised idle
         // timeout means most app switches never dropped the connection) and go

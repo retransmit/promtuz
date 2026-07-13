@@ -17,6 +17,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import com.promtuz.chat.data.ChatPrefs
 
+// Suppresses the primer for the rest of this process after "Not now" — resets on next launch so the
+// ask returns at a later high-intent moment, without persisting a permanent opt-out.
+private var dismissedThisSession = false
+
 /**
  * Contextual, one-shot priming for POST_NOTIFICATIONS. The system prompt is a
  * one-shot on 13+ (denials can't be re-summoned), so we don't burn it head-on at
@@ -31,7 +35,7 @@ fun NotificationPrimer() {
     val context = LocalContext.current
     var show by remember {
         mutableStateOf(
-            !ChatPrefs.notifPrimed &&
+            !ChatPrefs.notifPrimed && !dismissedThisSession &&
                 ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
                 PackageManager.PERMISSION_GRANTED,
         )
@@ -39,17 +43,19 @@ fun NotificationPrimer() {
     if (!show) return
 
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
-    fun done() { ChatPrefs.notifPrimed = true; show = false }
+    // Enable spends the one-shot system prompt → done for good. "Not now" only suppresses this session.
+    val enable = {
+        ChatPrefs.notifPrimed = true
+        show = false
+        launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+    val notNow = { dismissedThisSession = true; show = false }
 
     AlertDialog(
-        onDismissRequest = { done() },
+        onDismissRequest = notNow,
         title = { Text("Turn on notifications") },
         text = { Text("So you hear from your contacts when Promtuz is closed.") },
-        confirmButton = {
-            TextButton(onClick = { done(); launcher.launch(Manifest.permission.POST_NOTIFICATIONS) }) {
-                Text("Enable")
-            }
-        },
-        dismissButton = { TextButton(onClick = { done() }) { Text("Not now") } },
+        confirmButton = { TextButton(onClick = enable) { Text("Enable") } },
+        dismissButton = { TextButton(onClick = notNow) { Text("Not now") } },
     )
 }
