@@ -81,6 +81,15 @@ const MIGRATION_ARRAY: &[M] = &[
                 CHECK(pubkey IS NULL OR length(pubkey) = 32);
         "#,
     ),
+    M::up(
+        r#"--sql
+            CREATE TABLE gateways (
+              id     TEXT PRIMARY KEY,
+              addr   TEXT NOT NULL,
+              pubkey BLOB NOT NULL CHECK(length(pubkey) = 32)
+            );
+        "#,
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

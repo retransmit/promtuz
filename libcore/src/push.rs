@@ -7,6 +7,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use common::proto::RelayId;
 use common::proto::client_rel::CRelayPacket;
 use common::proto::client_res::ClientRequest;
 use common::proto::client_res::ClientResponse;
@@ -21,9 +22,11 @@ use ed25519_dalek::SigningKey;
 use ed25519_dalek::ed25519::signature::rand_core::OsRng;
 use ed25519_dalek::ed25519::signature::rand_core::RngCore;
 use once_cell::sync::Lazy;
+use rusqlite::params;
 
 use crate::ENDPOINT;
 use crate::RESOLVER_SEEDS;
+use crate::db::network::NETWORK_DB;
 use crate::quic::dialer::connect_to_any_seed;
 use crate::state::RELAY;
 
@@ -85,7 +88,16 @@ pub async fn register_token_at_gateway() -> Result<()> {
         return Ok(());
     };
     let gateway = fetch_gateway().await?;
+    if let Err(e) = send_registration(&gateway, token).await {
+        // A dead cached gateway would otherwise wedge registration forever;
+        // evicting it forces the next call back through the resolver.
+        evict_gateway(&gateway.id);
+        return Err(e);
+    }
+    Ok(())
+}
 
+async fn send_registration(gateway: &GatewayDescriptor, token: Vec<u8>) -> Result<()> {
     // ponytail: Fcm-only for now (Android). Pass the provider from the app when
     // iOS / UnifiedPush land.
     let reg = RegisterToken::signed(&PUSH_KEY, PushProvider::Fcm, token);
@@ -94,12 +106,19 @@ pub async fn register_token_at_gateway() -> Result<()> {
     let (mut tx, _rx) = conn.open_bi().await?;
     tx.write_all(&PushRequest::Register(reg).pack()?).await?;
     tx.finish()?;
+    // finish() only marks the stream done locally; await the peer's ack or close() drops the unsent op.
+    let _ = tx.stopped().await;
     conn.close(0u32.into(), b"registered");
     Ok(())
 }
 
-/// Ask a resolver for a push gateway to register with; returns the first one.
+/// Return a cached gateway if one is stored; else ask a resolver, cache the
+/// result, and return the first. Mirrors the relay cache: the resolver is
+/// dialed only on a miss.
 async fn fetch_gateway() -> Result<GatewayDescriptor> {
+    if let Some(gateway) = cached_gateway() {
+        return Ok(gateway);
+    }
     let seeds = RESOLVER_SEEDS.get().context("resolver seeds not set")?;
     let conn = connect_to_any_seed(seeds).await?;
     let (mut send, mut recv) = conn.open_bi().await?;
@@ -109,8 +128,40 @@ async fn fetch_gateway() -> Result<GatewayDescriptor> {
     conn.close(0u32.into(), b"done");
     match resp {
         ClientResponse::GetGateways { gateways } => {
+            cache_gateways(&gateways);
             gateways.into_iter().next().context("no gateways registered")
         },
         other => Err(anyhow!("GetGateways: unexpected variant {other:?}")),
     }
+}
+
+fn cached_gateway() -> Option<GatewayDescriptor> {
+    let conn = NETWORK_DB.lock();
+    conn.query_row("SELECT id, addr, pubkey FROM gateways LIMIT 1", [], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?))
+    })
+    .ok()
+    .and_then(|(id, addr, pubkey)| {
+        Some(GatewayDescriptor {
+            id:     id.parse().ok()?,
+            addr:   addr.parse().ok()?,
+            pubkey: Bytes(pubkey.try_into().ok()?),
+        })
+    })
+}
+
+fn cache_gateways(gateways: &[GatewayDescriptor]) {
+    let conn = NETWORK_DB.lock();
+    for g in gateways {
+        let _ = conn.execute(
+            "INSERT INTO gateways (id, addr, pubkey) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET addr = excluded.addr, pubkey = excluded.pubkey",
+            params![g.id.to_string(), g.addr.to_string(), g.pubkey.0.as_slice()],
+        );
+    }
+}
+
+fn evict_gateway(id: &RelayId) {
+    let conn = NETWORK_DB.lock();
+    let _ = conn.execute("DELETE FROM gateways WHERE id = ?1", params![id.to_string()]);
 }
