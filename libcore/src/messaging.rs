@@ -951,7 +951,6 @@ pub async fn attempt_send<C: DhtClient>(
                 delivery::retire(&id);
                 Message::mark_sent(&msg_id);
                 MessageEv::Sent { id: msg_id, to, content: content.clone(), timestamp: msg_timestamp }.emit();
-                info!("MESSAGE: sent to {}", hex::encode(&to[..4]));
             },
             LastOutcome::Terminal => {
                 delivery::retire(&id);

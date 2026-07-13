@@ -101,6 +101,15 @@ fn init_inner(
     endpoint.set_default_client_config(client_cfg);
     ENDPOINT.set(Arc::new(endpoint)).map_err(|_| anyhow::anyhow!("init called twice"))?;
 
+    // Re-drive the outbox on a timer so retries + the pending→failed timeout fire without a reconnect.
+    RUNTIME.spawn(async {
+        let mut ticker = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            ticker.tick().await;
+            crate::delivery::reconcile().await;
+        }
+    });
+
     start_relay_loop(seeds);
     Ok(())
 }

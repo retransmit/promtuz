@@ -726,7 +726,6 @@ async fn process_deliver(
                     let timestamp = systime().as_secs();
                     match Message::save_incoming(*msg.from, &msg.id.0, &content, timestamp, reply_to) {
                         Ok(Some(saved)) => {
-                            info!("MESSAGE: received from {}", hex::encode(&msg.from[..4]));
                             MessageEv::Received {
                                 id: saved.inner.id,
                                 from: *msg.from,

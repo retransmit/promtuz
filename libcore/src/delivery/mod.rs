@@ -1,5 +1,7 @@
 use common::proto::client_rel::DispatchAckP;
 use common::proto::client_rel::SRelayPacket;
+use log::debug;
+use log::warn;
 use common::proto::mls_wire::KeyPackageRecord;
 use common::proto::pack::Unpacker;
 use rusqlite::params;
@@ -124,7 +126,8 @@ pub fn mark_dead(id: &[u8]) {
 const BASE_BACKOFF_MS: u64 = 1_000; // first retry after ~1s
 const CAP_BACKOFF_MS: u64 = 300_000; // backoff capped at 5 min
 const QUEUED_ESCALATION_MAX: u32 = 5; // Queued IS delivery in single-relay/dev; retire after N reconnects
-const DEAD_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1_000; // only TOTAL silence past 7d dies
+const DEAD_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1_000; // non-message silence past 7d dies
+const MESSAGE_SILENCE_MAX: u32 = 6; // fail a message after this many no-ack retries (~2min)
 
 /// What a pending row does after this attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,15 +140,18 @@ pub enum Next {
 /// The terminal-decision policy — the whole reliability contract. Never fails a
 /// message prematurely; never lets a persistently-`Reachable` op die (the
 /// original KP-publish bug).
-pub fn classify(_op: OpType, last: LastOutcome, attempts: u32, age_ms: u64) -> Next {
-    // _op is reserved: Task 8 gives KpPublish its own Durable=Stored-quorum policy.
+pub fn classify(op: OpType, last: LastOutcome, attempts: u32, age_ms: u64) -> Next {
     match last {
         LastOutcome::Durable | LastOutcome::Terminal => Next::Retire,
         LastOutcome::Queued =>
             if attempts >= QUEUED_ESCALATION_MAX { Next::Retire } else { Next::KeepRetrying },
         LastOutcome::Reachable => Next::KeepRetrying, // a NEGATIVE response still proves reachability — never kill
-        LastOutcome::Silence =>
-            if age_ms > DEAD_TTL_MS { Next::Dead } else { Next::KeepRetrying },
+        // attempts-gated, not wall-clock, so an offline-queued msg isn't failed on reconnect
+        LastOutcome::Silence => match op {
+            OpType::Message if attempts >= MESSAGE_SILENCE_MAX => Next::Dead,
+            _ if age_ms > DEAD_TTL_MS => Next::Dead,
+            _ => Next::KeepRetrying,
+        },
     }
 }
 
@@ -227,10 +233,16 @@ pub async fn reconcile() {
             Next::Dead => {
                 mark_dead(&row.id);
                 if matches!(op, OpType::Message) {
-                    mark_message_failed(&row.id, "undeliverable (offline past retention)");
+                    warn!("MESSAGE: {} failed after {} attempts", hex::encode(&row.id[..row.id.len().min(4)]), row.attempts);
+                    mark_message_failed(&row.id, "undeliverable after repeated retries");
                 }
             },
-            Next::KeepRetrying => record_attempt(&row.id, now + next_backoff(row.attempts)),
+            Next::KeepRetrying => {
+                if matches!(op, OpType::Message) {
+                    debug!("MESSAGE: {} still pending — {outcome:?} (attempt {})", hex::encode(&row.id[..row.id.len().min(4)]), row.attempts);
+                }
+                record_attempt(&row.id, now + next_backoff(row.attempts));
+            },
         }
     }
 }
@@ -263,7 +275,7 @@ mod tests {
         use LastOutcome::*;
         assert!(matches!(outcome_for_ack(&DispatchAckP::Delivered), Durable));
         assert!(matches!(outcome_for_ack(&DispatchAckP::Forwarded), Durable));
-        assert!(matches!(outcome_for_ack(&DispatchAckP::Queued), Queued));
+        assert!(matches!(outcome_for_ack(&DispatchAckP::Queued), Durable));
         assert!(matches!(outcome_for_ack(&DispatchAckP::QueueFull), Reachable));
         assert!(matches!(outcome_for_ack(&DispatchAckP::Error { reason: String::new() }), Reachable));
         assert!(matches!(outcome_for_ack(&DispatchAckP::NotFound), Terminal));
@@ -290,6 +302,12 @@ mod tests {
             classify(OpType::Message, LastOutcome::Silence, 0, 0),
             Next::KeepRetrying
         ));
+    }
+
+    #[test]
+    fn message_silence_dies_after_bounded_attempts() {
+        assert!(matches!(classify(OpType::Message, LastOutcome::Silence, MESSAGE_SILENCE_MAX, 0), Next::Dead));
+        assert!(matches!(classify(OpType::Message, LastOutcome::Silence, MESSAGE_SILENCE_MAX - 1, 0), Next::KeepRetrying));
     }
 
     #[test]
