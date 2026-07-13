@@ -93,6 +93,13 @@ async fn main() -> Result<()> {
             // paths see the same live session.
             dht.attach_resolver(resolver_handle.clone());
 
+            // Keep the cached push-gateway directory fresh so `trigger_wake`
+            // has targets. Detached; degrades to no-wakes when empty.
+            tokio::spawn(crate::dht::push_wake::refresh_gateways(
+                dht.clone(),
+                resolver_handle.clone(),
+            ));
+
             let resolver_handle_for_bootstrap = resolver_handle.clone();
             let dht_for_bootstrap = dht.clone();
             tokio::spawn(async move {

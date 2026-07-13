@@ -181,9 +181,9 @@ impl Relay {
                     // `Forward` handler can deliver locally when the
                     // recipient is online here.
                     d.attach_clients(clients.clone());
-                    // Wire the offline-wake path: shared IPK→P map + the
-                    // configured gateway (if any).
-                    d.attach_push(push_pseudonyms.clone(), cfg.push.gateway.clone());
+                    // Wire the offline-wake path: the shared IPK→P map. The
+                    // gateway list is filled from the resolver (see main.rs).
+                    d.attach_push(push_pseudonyms.clone());
                     info!("DHT enabled (node_id = {node_id})");
                     Some(Arc::new(d))
                 },

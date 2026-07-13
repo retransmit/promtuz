@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use common::node::config::NodeSeed;
+use common::proto::client_res::GatewayDescriptor;
 use common::quic::id::NodeId;
 use ed25519_dalek::SigningKey;
 use parking_lot::RwLock;
@@ -200,8 +200,10 @@ pub struct Dht {
     /// [`Self::clients`].
     pub(crate) push_pseudonyms: Option<PushMap>,
 
-    /// The push gateway to send [`WakeRequest`]s to. `None` → no wakes.
-    pub(crate) push_gateway: Option<NodeSeed>,
+    /// Cached push-gateway directory, refreshed from the resolver. The enqueue
+    /// path dials one of these to send a [`WakeRequest`], verifying its
+    /// `PUSH_GATEWAY` capability at dial. Empty → no wakes.
+    pub(crate) push_gateways: PushGateways,
 }
 
 /// Shared reference to the relay's connected-clients map. Aliased so
@@ -211,6 +213,9 @@ pub(crate) type ClientsMap = Arc<RwLock<HashMap<[u8; 32], Connection>>>;
 
 /// Shared `IPK → push-pseudonym` map. See `Dht::push_pseudonyms`.
 pub(crate) type PushMap = Arc<RwLock<HashMap<[u8; 32], [u8; 32]>>>;
+
+/// Cached push-gateway descriptors from the resolver. See `Dht::push_gateways`.
+pub(crate) type PushGateways = Arc<RwLock<Vec<GatewayDescriptor>>>;
 
 impl Dht {
     /// Construct the runtime DHT state over the shared fjall [`Store`].
@@ -239,7 +244,7 @@ impl Dht {
             welcome_limiters: WelcomeLimiters::new(),
             clients: None,
             push_pseudonyms: None,
-            push_gateway: None,
+            push_gateways: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
@@ -264,12 +269,10 @@ impl Dht {
         self.clients = Some(clients);
     }
 
-    /// Wire the shared `IPK → P` map and the push gateway so the enqueue path
-    /// can trigger an offline wake. Skipped in test fixtures and when no
-    /// gateway is configured (the map alone is harmless).
-    pub fn attach_push(&mut self, pseudonyms: PushMap, gateway: Option<NodeSeed>) {
+    /// Wire the shared `IPK → P` map so the enqueue path can trigger an offline
+    /// wake. The gateway list is filled separately from the resolver.
+    pub fn attach_push(&mut self, pseudonyms: PushMap) {
         self.push_pseudonyms = Some(pseudonyms);
-        self.push_gateway = gateway;
     }
 
     /// Wire the resolver-session handle for the bootstrap-retry path.
