@@ -163,6 +163,11 @@ pub fn build_server_cfg(
 
     let key = rustls_pemfile::private_key(&mut key_reader)?.ok_or(anyhow!("No Private Key"))?;
 
+    // TODO(node-mtls): all inbound is no-client-auth, so node identity is
+    // authenticated app-layer (signed hellos), not transport, and a server
+    // can't read a connecting node's capability cert. mTLS the node ALPNs
+    // (keep client/1 open — phones are pseudonymous) to verify node
+    // certs/capabilities directly. See dht/tls_extract.rs.
     let mut tls = RustlsServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
