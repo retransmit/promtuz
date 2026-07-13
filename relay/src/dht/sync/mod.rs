@@ -21,7 +21,6 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use common::debug;
 use common::info;
 use tokio_util::sync::CancellationToken;
 
@@ -96,9 +95,9 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                 let known = dht.routing.read().total_known();
                 let sparse = known < BOOTSTRAP_RETRY_THRESHOLD;
                 if sparse && !was_sparse {
-                    debug!("DHT routing table sparse ({known} < {BOOTSTRAP_RETRY_THRESHOLD}); retrying bootstrap");
+                    crate::dht_log!("DHT routing table sparse ({known} < {BOOTSTRAP_RETRY_THRESHOLD}); retrying bootstrap");
                 } else if !sparse && was_sparse {
-                    debug!("DHT routing table recovered ({known} >= {BOOTSTRAP_RETRY_THRESHOLD})");
+                    crate::dht_log!("DHT routing table recovered ({known} >= {BOOTSTRAP_RETRY_THRESHOLD})");
                 }
                 was_sparse = sparse;
                 if sparse {
@@ -112,7 +111,7 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                         match handle_opt {
                             Some(handle) => match bootstrap(dht.clone(), handle).await {
                                 Ok(state) => {
-                                    debug!("DHT bootstrap retry succeeded (state {state:?})");
+                                    crate::dht_log!("DHT bootstrap retry succeeded (state {state:?})");
                                     bootstrap_backoff_ms = BOOTSTRAP_RETRY_BASE_MS;
                                 },
                                 // Brand-new-network case — hold base backoff so a
@@ -121,7 +120,7 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                                     bootstrap_backoff_ms = BOOTSTRAP_RETRY_BASE_MS;
                                 },
                                 Err(e) => {
-                                    debug!("DHT bootstrap retry failed: {e}; backing off");
+                                    crate::dht_log!("DHT bootstrap retry failed: {e}; backing off");
                                     bootstrap_backoff_ms =
                                         (bootstrap_backoff_ms * 2).min(BOOTSTRAP_RETRY_MAX_BACKOFF_MS);
                                 },

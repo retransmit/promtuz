@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use common::debug;
 use common::info;
 use common::quic::CloseReason;
 use tokio_util::sync::CancellationToken;
@@ -38,6 +37,7 @@ async fn main() -> Result<()> {
     }
 
     common::server::log::init(cfg.log.level.as_deref());
+    crate::util::dht_log::DHT_LOG.store(cfg.log.dht, std::sync::atomic::Ordering::Relaxed);
     info!("pzrelay {} ({})", env!("CARGO_PKG_VERSION"), env!("PZ_GIT_SHA"));
 
     // Block until we hold a valid cert (writes a CSR + waits if unenrolled), so
@@ -91,13 +91,13 @@ async fn main() -> Result<()> {
             let dht_for_bootstrap = dht.clone();
             tokio::spawn(async move {
                 match bootstrap::bootstrap(dht_for_bootstrap, resolver_handle_for_bootstrap).await {
-                    Ok(state) => debug!("DHT bootstrap reached state {state:?}"),
+                    Ok(state) => crate::dht_log!("DHT bootstrap reached state {state:?}"),
                     // Brand-new network is legitimate — info, not warn, so the
                     // first-relay operator isn't alarmed.
                     Err(bootstrap::BootstrapError::EmptyRegistry) => {
-                        debug!("DHT bootstrap: resolver returned no peers (new network?)")
+                        crate::dht_log!("DHT bootstrap: resolver returned no peers (new network?)")
                     },
-                    Err(e) => debug!("DHT bootstrap failed: {e}"),
+                    Err(e) => crate::dht_log!("DHT bootstrap failed: {e}"),
                 }
             });
 
