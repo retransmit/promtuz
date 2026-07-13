@@ -4,6 +4,7 @@ use std::path::Path;
 use std::process;
 
 use common::node::config::NetworkConfig;
+use common::node::config::NodeConfig;
 use serde::Deserialize;
 
 #[derive(Deserialize, Debug)]
@@ -13,6 +14,10 @@ pub struct AppConfig {
     pub log:     LogConfig,
     #[serde(default)]
     pub push:    PushConfig,
+    /// Resolver seeds to register with, so relays can discover this gateway.
+    /// Absent → the gateway runs but registers nowhere (undiscoverable).
+    #[serde(default)]
+    pub resolver: Option<NodeConfig>,
 }
 
 #[derive(Deserialize, Debug, Default)]

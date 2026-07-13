@@ -6,6 +6,7 @@ mod fcm;
 mod gateway;
 mod quic;
 mod registry;
+mod resolver_link;
 
 use std::sync::Arc;
 use std::time::Duration;

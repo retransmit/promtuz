@@ -3,8 +3,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use common::graceful;
 use common::info;
+use common::quic::config::build_client_cfg;
 use common::quic::config::build_server_cfg;
+use common::quic::config::load_root_ca;
 use common::quic::config::setup_crypto_provider;
+use common::quic::id::NodeId;
 use common::quic::id::NodeKey;
 use common::quic::p256::secret_from_key;
 use common::quic::protorole::ProtoRole;
@@ -50,13 +53,30 @@ impl Gateway {
     }
 
     pub fn new(cfg: AppConfig) -> Self {
-        // Log our IPK for operator sanity; not stored — nothing in the wake
-        // path re-signs with it yet.
-        if let Ok(secret) = secret_from_key(&cfg.network.key_path) {
-            if let Ok(key) = NodeKey::new(secret.verifying_key()) {
+        let mut endpoint = Self::endpoint(&cfg);
+        // Default client config so the gateway can dial the resolver (`relay/1`)
+        // to register itself.
+        let roots = graceful!(load_root_ca(&cfg.network.root_ca_path), "loading the root CA");
+        let client_cfg =
+            graceful!(build_client_cfg(ProtoRole::Relay, &roots), "building the client config");
+        endpoint.set_default_client_config(client_cfg);
+        let endpoint = Arc::new(endpoint);
+
+        // Load our identity key: for the IPK log line and to sign GatewayHello.
+        let signing = secret_from_key(&cfg.network.key_path).ok();
+        if let Some(s) = &signing {
+            if let Ok(key) = NodeKey::new(s.verifying_key()) {
                 info!("initializing gateway with IPK({})", key.key());
             }
         }
+
+        // Register with the resolver so relays can discover us.
+        if let Some(signing) = signing {
+            let node_id = NodeId::new(signing.verifying_key().to_bytes());
+            let seeds = cfg.resolver.as_ref().map(|r| r.seed.clone()).unwrap_or_default();
+            crate::resolver_link::spawn((*endpoint).clone(), seeds, signing, node_id);
+        }
+
         let fcm = cfg.push.fcm_service_account.as_deref().and_then(|path| {
             match FcmSender::from_service_account(path) {
                 Ok(sender) => {
@@ -70,6 +90,6 @@ impl Gateway {
             }
         });
 
-        Self { endpoint: Arc::new(Self::endpoint(&cfg)), registry: PushRegistry::default(), fcm }
+        Self { endpoint, registry: PushRegistry::default(), fcm }
     }
 }
