@@ -1,5 +1,6 @@
 package com.promtuz.core.push
 
+import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
@@ -25,6 +26,9 @@ class PushService : FirebaseMessagingService() {
         val work = OneTimeWorkRequestBuilder<DrainWorker>()
             .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
             .build()
-        WorkManager.getInstance(applicationContext).enqueue(work)
+        // Coalesce a burst of wakes: keep any drain already enqueued/running
+        // rather than spawning parallel 12s workers that burn the expedited quota.
+        WorkManager.getInstance(applicationContext)
+            .enqueueUniqueWork("push-drain", ExistingWorkPolicy.KEEP, work)
     }
 }
