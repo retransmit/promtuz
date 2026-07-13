@@ -17,6 +17,7 @@ import com.promtuz.chat.R
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.adapter.CoreEventBus
 import com.promtuz.core.adapter.IncomingMessage
+import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.extensions.toHex
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -34,8 +35,6 @@ object PushNotifier {
 
     private lateinit var app: Application
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    // Recent messages per peerHex, so MessagingStyle can show the last few. In-memory; cleared on open.
-    private val threads = mutableMapOf<String, MutableList<IncomingMessage>>()
     private var names: Map<String, String> = emptyMap()
 
     @Volatile
@@ -63,11 +62,23 @@ object PushNotifier {
                 .getOrDefault(names)
         }
         val them = Person.Builder().setName(names[msg.peerHex] ?: "New message").setKey(msg.peerHex).build()
-        val thread = threads.getOrPut(msg.peerHex) { mutableListOf() }
-            .also { it.add(msg); if (it.size > MAX_LINES) it.removeAt(0) }
+
+        // Hydrate from the DB (not in-memory state) so the notification survives
+        // process death — an FCM cold-wake shows the recent thread, not just the
+        // one message that woke us.
+        val recent = runCatching { CoreBridge.messages(msg.peerHex.fromHex(), MAX_LINES) }
+            .getOrDefault(emptyList())
+            .filterNot { it.deleted }
+            .sortedBy { it.timestamp }
 
         val style = NotificationCompat.MessagingStyle(Person.Builder().setName("You").build())
-        thread.forEach { style.addMessage(it.content, it.timestampMs, them) }
+        if (recent.isEmpty()) {
+            style.addMessage(msg.content, msg.timestampMs, them) // fallback if the DB write hasn't landed
+        } else {
+            recent.forEach {
+                style.addMessage(it.content, it.timestamp.toLong() * 1000, if (it.outgoing) null else them)
+            }
+        }
 
         val nm = NotificationManagerCompat.from(app)
         nm.notify(
@@ -99,7 +110,6 @@ object PushNotifier {
     }
 
     private fun clear() {
-        threads.clear()
         if (::app.isInitialized) NotificationManagerCompat.from(app).cancelAll()
     }
 
