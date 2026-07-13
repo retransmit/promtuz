@@ -2,9 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use common::debug;
 use common::info;
 use common::quic::CloseReason;
-use common::warn;
 use tokio_util::sync::CancellationToken;
 
 use crate::dht::bootstrap;
@@ -91,13 +91,13 @@ async fn main() -> Result<()> {
             let dht_for_bootstrap = dht.clone();
             tokio::spawn(async move {
                 match bootstrap::bootstrap(dht_for_bootstrap, resolver_handle_for_bootstrap).await {
-                    Ok(state) => info!("DHT bootstrap reached state {state:?}"),
+                    Ok(state) => debug!("DHT bootstrap reached state {state:?}"),
                     // Brand-new network is legitimate — info, not warn, so the
                     // first-relay operator isn't alarmed.
                     Err(bootstrap::BootstrapError::EmptyRegistry) => {
-                        info!("DHT bootstrap: resolver returned no peers (new network?)")
+                        debug!("DHT bootstrap: resolver returned no peers (new network?)")
                     },
-                    Err(e) => warn!("DHT bootstrap failed: {e}"),
+                    Err(e) => debug!("DHT bootstrap failed: {e}"),
                 }
             });
 

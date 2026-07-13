@@ -21,8 +21,8 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use common::debug;
 use common::info;
-use common::warn;
 use tokio_util::sync::CancellationToken;
 
 use super::Dht;
@@ -96,9 +96,9 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                 let known = dht.routing.read().total_known();
                 let sparse = known < BOOTSTRAP_RETRY_THRESHOLD;
                 if sparse && !was_sparse {
-                    warn!("DHT routing table sparse ({known} < {BOOTSTRAP_RETRY_THRESHOLD}); retrying bootstrap");
+                    debug!("DHT routing table sparse ({known} < {BOOTSTRAP_RETRY_THRESHOLD}); retrying bootstrap");
                 } else if !sparse && was_sparse {
-                    info!("DHT routing table recovered ({known} >= {BOOTSTRAP_RETRY_THRESHOLD})");
+                    debug!("DHT routing table recovered ({known} >= {BOOTSTRAP_RETRY_THRESHOLD})");
                 }
                 was_sparse = sparse;
                 if sparse {
@@ -112,7 +112,7 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                         match handle_opt {
                             Some(handle) => match bootstrap(dht.clone(), handle).await {
                                 Ok(state) => {
-                                    info!("DHT bootstrap retry succeeded (state {state:?})");
+                                    debug!("DHT bootstrap retry succeeded (state {state:?})");
                                     bootstrap_backoff_ms = BOOTSTRAP_RETRY_BASE_MS;
                                 },
                                 // Brand-new-network case — hold base backoff so a
@@ -121,7 +121,7 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                                     bootstrap_backoff_ms = BOOTSTRAP_RETRY_BASE_MS;
                                 },
                                 Err(e) => {
-                                    warn!("DHT bootstrap retry failed: {e}; backing off");
+                                    debug!("DHT bootstrap retry failed: {e}; backing off");
                                     bootstrap_backoff_ms =
                                         (bootstrap_backoff_ms * 2).min(BOOTSTRAP_RETRY_MAX_BACKOFF_MS);
                                 },
