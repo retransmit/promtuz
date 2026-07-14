@@ -196,8 +196,8 @@ pub struct SubscribePresenceP {
 /// backgrounded app sends `SetPresence(Idle)` as its last packet before
 /// freezing); `Online`/`Offline` the relay derives from the connection.
 ///
-/// Necessary once the QUIC idle timeout went to 240s: a frozen app keeps its
-/// connection, so "connected" no longer means "actively here".
+/// A frozen app can keep its connection until the QUIC idle timeout, so
+/// "connected" does not always mean "actively here".
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum PresenceState {
     /// Connected and active.

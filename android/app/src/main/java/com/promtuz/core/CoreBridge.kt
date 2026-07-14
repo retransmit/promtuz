@@ -39,6 +39,7 @@ import uniffi.core.reactionsFor as ffiReactionsFor
 import uniffi.core.setActivity as ffiSetActivity
 import uniffi.core.subscribePresence as ffiSubscribePresence
 import uniffi.core.onForeground as ffiOnForeground
+import uniffi.core.onTaskRemoved as ffiOnTaskRemoved
 import uniffi.core.registerPushToken as ffiRegisterPushToken
 import uniffi.core.registerPush as ffiRegisterPush
 import uniffi.core.kpPublishReady as ffiKpPublishReady
@@ -64,6 +65,9 @@ import com.promtuz.core.adapter.PresenceSignal
 object CoreBridge {
     /** App returned to foreground — wake the relay loop for an instant reconnect. */
     fun onForeground() = ffiOnForeground()
+
+    /** App task was removed from recents — best-effort close so relay marks us offline. */
+    fun onTaskRemoved() = ffiOnTaskRemoved()
 
     /** Hand libcore the FCM push token; it registers `P → token` with a gateway. Fire-and-forget. */
     fun registerPushToken(token: ByteArray) = ffiRegisterPushToken(token)

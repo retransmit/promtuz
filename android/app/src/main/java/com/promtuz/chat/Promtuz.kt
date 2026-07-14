@@ -1,6 +1,7 @@
 package com.promtuz.chat
 
 import android.app.Application
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
@@ -15,6 +16,7 @@ import com.promtuz.chat.utils.logs.AppLogger
 import com.google.firebase.messaging.FirebaseMessaging
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.CoreInitializer
+import com.promtuz.core.AppCloseService
 import com.promtuz.core.push.PushNotifier
 import com.promtuz.core.PresenceStore
 import com.promtuz.core.adapter.CoreEventBus
@@ -88,11 +90,11 @@ class Promtuz : Application() {
             }
         }
 
-        // Foreground → nudge core for an instant reconnect (the raised idle
-        // timeout means most app switches never dropped the connection) and go
-        // Active. Background → assert Idle (the last packet before we freeze).
+        // Foreground → nudge core for an instant reconnect and go Active.
+        // Background → assert Idle (the last packet before we freeze).
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) {
+                startService(Intent(this@Promtuz, AppCloseService::class.java))
                 CoreBridge.onForeground()
                 CoreBridge.setPresence(idle = false)
             }

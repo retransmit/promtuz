@@ -96,6 +96,10 @@
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
             </intent-filter>
         </service>
+        <service
+            android:name="com.promtuz.core.AppCloseService"
+            android:exported="false"
+            android:stopWithTask="false" />
     </application>
 
 </manifest>

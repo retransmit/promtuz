@@ -27,14 +27,10 @@ use rustls::server::ResolvesServerCert;
 #[cfg(feature = "crypto")]
 use rustls::sign::CertifiedKey;
 
-/// QUIC idle timeout, applied on both ends (relay server here, libcore client
-/// in `api::init`). Long enough that a backgrounded mobile app — frozen, unable
-/// to send keepalives — keeps its connection across a typical app switch; QUIC
-/// resumes it by connection-ID path migration on the new NAT port, no
-/// handshake. Also bounds how long the relay holds a dead peer's zombie state
-/// (and false "online") before eviction. Delivery already tolerates staleness:
-/// a dead conn fails the 3 s try_deliver and gets evicted + queued.
-pub const IDLE_TIMEOUT_SECS: u64 = 240;
+/// QUIC idle timeout, applied on both ends. Foreground clients send keepalives;
+/// backgrounded mobile apps freeze and stop doing so, so this bounds zombie
+/// presence and pushes delivery onto the offline queue quickly.
+pub const IDLE_TIMEOUT_SECS: u64 = 45;
 
 /// Defaults applied to every server-side QUIC connection. Caps connection
 /// lifetime and per-connection stream budget so one misbehaving peer cannot

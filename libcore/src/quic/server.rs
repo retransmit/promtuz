@@ -584,7 +584,7 @@ impl Relay {
 
 /// Live-delivery entry point: process one relay-initiated `Deliver`,
 /// then ack on the stream — the relay's `try_deliver` waits on this
-/// ack (3s) before treating the message as delivered.
+/// ack before treating the message as delivered.
 async fn handle_deliver(
     tx: &mut SendStream, _ipk: VerifyingKey, msg: DeliverP,
     dht_client: Option<Arc<RelayDhtClient>>,

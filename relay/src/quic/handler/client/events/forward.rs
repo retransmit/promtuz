@@ -27,6 +27,8 @@ use crate::storage::MAX_QUEUED_PER_RECIPIENT;
 use crate::storage::MessageKey;
 use crate::util::systime;
 
+const LIVE_DELIVER_ACK_TIMEOUT: Duration = Duration::from_secs(15);
+
 pub(super) async fn handle_forward(
     fwd: DispatchP, ctx: ClientCtxHandle, tx: &mut SendStream,
 ) -> Result<()> {
@@ -87,7 +89,7 @@ pub(super) async fn handle_forward(
         }
         // The in-memory entry is dead (timed out, peer-reset, or never
         // ack'd). Evict it BEFORE the next path so a stale entry doesn't
-        // make us pay another 3s timeout against the corpse.
+        // make us pay another ack timeout against the corpse.
         //
         // Race-guard: only evict if the entry still points at the same
         // `Connection` we just tried — a fresh re-handshake from the
@@ -179,7 +181,7 @@ fn ack_for_summary(summary: &ForwardSummary) -> DispatchAckP {
 /// [`crate::dht::forward::handle_forward_rpc`] can reuse the exact same
 /// deliver-then-ack protocol when the recipient is online here. Keeping
 /// one implementation across the sender-side and home-side delivery
-/// paths means a future tweak (e.g. tightening the 3s ack window) lands
+/// paths means a future tweak to the ack window lands
 /// in one place and stays consistent.
 pub(crate) async fn try_deliver(
     conn: &Connection, delivery: &DeliverP,
@@ -191,8 +193,7 @@ pub(crate) async fn try_deliver(
         .await
         .map_err(|_| ConnectionError::TimedOut)?;
 
-    match tokio::time::timeout(Duration::from_secs(3), CRelayPacket::unpack(&mut deliver_rx)).await
-    {
+    match tokio::time::timeout(LIVE_DELIVER_ACK_TIMEOUT, CRelayPacket::unpack(&mut deliver_rx)).await {
         Ok(Ok(CRelayPacket::DeliverAck)) => Ok(()),
         _ => Err(ConnectionError::TimedOut),
     }

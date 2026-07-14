@@ -7,6 +7,8 @@
 //! airplane mode; the loop already no-ops on a dead network).
 
 use std::net::Ipv6Addr;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -87,10 +89,8 @@ fn init_inner(
 
     let mut transport_cfg = TransportConfig::default();
     transport_cfg.keep_alive_interval(Some(Duration::from_secs(15)));
-    // Long idle timeout so a backgrounded (frozen) app keeps its connection
-    // across an app switch — QUIC resumes it via connection-ID path migration
-    // on the new NAT port, skipping the reconnect handshake entirely. Must
-    // match the relay's server idle (both = IDLE_TIMEOUT_SECS).
+    // Must match the relay's server idle; foreground keepalives keep the link
+    // open, while a frozen background app ages out quickly.
     transport_cfg.max_idle_timeout(Some(
         Duration::from_secs(common::quic::config::IDLE_TIMEOUT_SECS)
             .try_into()
@@ -115,16 +115,28 @@ fn init_inner(
 }
 
 /// Woken when the app returns to the foreground. The relay loop races its
-/// post-disconnect backoff against this so a reconnect (needed only after a
-/// background longer than the idle timeout) fires immediately instead of
-/// waiting out the 2 s retry sleep. A no-op when the connection is still live —
-/// QUIC path migration already continued it, nothing to reconnect.
+/// post-disconnect backoff against this so a reconnect fires immediately instead
+/// of waiting out the 2 s retry sleep.
 static FOREGROUND: Lazy<tokio::sync::Notify> = Lazy::new(tokio::sync::Notify::new);
+static TASK_REMOVED: AtomicBool = AtomicBool::new(false);
 
 /// Client hook: call from the platform's app-foreground lifecycle event.
 #[uniffi::export]
 pub fn on_foreground() {
+    TASK_REMOVED.store(false, Ordering::Relaxed);
     FOREGROUND.notify_waiters();
+}
+
+/// Client hook: call when the OS task is removed. Best-effort close makes the
+/// relay mark us offline immediately instead of waiting for idle timeout.
+#[uniffi::export]
+pub fn on_task_removed() {
+    TASK_REMOVED.store(true, Ordering::Relaxed);
+    if let Some(relay) = crate::state::RELAY.read().as_ref() {
+        if let Some(conn) = &relay.connection {
+            conn.close(quinn::VarInt::from_u32(0), b"task removed");
+        }
+    }
 }
 
 /// Initialize logging. ponytail: android_logger writes to logcat on
@@ -156,6 +168,12 @@ fn start_relay_loop(seeds: Vec<ResolverSeed>) {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             };
+
+            if TASK_REMOVED.load(Ordering::Relaxed) {
+                ConnectionState::Disconnected.emit();
+                FOREGROUND.notified().await;
+                continue;
+            }
 
             if !crate::utils::has_internet() {
                 ConnectionState::NoInternet.emit();
