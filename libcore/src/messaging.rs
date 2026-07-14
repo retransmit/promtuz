@@ -381,6 +381,7 @@ async fn dispatch_envelope(
         id:      Bytes(id),
         payload: ByteVec(env_bytes),
         sig:     Bytes(sig),
+        accepted_at_ms: 0,
     };
     let bytes = CRelayPacket::Dispatch(fwd).pack().map_err(|e| anyhow!("pack dispatch: {e}"))?;
 
@@ -778,7 +779,6 @@ pub async fn attempt_send<C: DhtClient>(
     ctx: &MlsContext<'_, C>, to: [u8; 32], msg: Message,
 ) -> Result<()> {
     let msg_id = msg.inner.id;
-    let msg_timestamp = msg.inner.timestamp;
     let content = &msg.inner.content;
 
     // 1. Look up the contact.
@@ -916,6 +916,7 @@ pub async fn attempt_send<C: DhtClient>(
         id:      Bytes(id),
         payload: ByteVec(payload),
         sig:     Bytes(sig),
+        accepted_at_ms: 0,
     };
 
     // 7. Frame once, enqueue before the wire. `.pack()` (not `.ser()`) yields the
@@ -949,8 +950,9 @@ pub async fn attempt_send<C: DhtClient>(
         Ok(SRelayPacket::DispatchAck(ack)) => match delivery::outcome_for_ack(&ack) {
             LastOutcome::Durable => {
                 delivery::retire(&id);
-                Message::mark_sent(&msg_id);
-                MessageEv::Sent { id: msg_id, to, content: content.clone(), timestamp: msg_timestamp }.emit();
+                let timestamp = delivery::accepted_at_secs(&ack).expect("durable dispatch ack has timestamp");
+                Message::mark_sent(&msg_id, timestamp);
+                MessageEv::Sent { id: msg_id, to, content: content.clone(), timestamp }.emit();
             },
             LastOutcome::Terminal => {
                 delivery::retire(&id);

@@ -481,8 +481,12 @@ pub(crate) async fn handle_forward_rpc(
     }
 
     // 6. Offline (or local-deliver failed): durably enqueue.
-    let outcome =
-        super::store::enqueue_for_home(dht, &recipient_ipk, &fwd.dispatch, now_ms);
+    let outcome = super::store::enqueue_for_home(
+        dht,
+        &recipient_ipk,
+        &fwd.dispatch,
+        fwd.dispatch.accepted_at_ms,
+    );
     if matches!(outcome, ForwardOutcome::Stored) {
         dht.trigger_wake(&recipient_ipk);
     }
@@ -625,6 +629,7 @@ mod tests {
             id:      id.into(),
             payload: payload.to_vec().into(),
             sig:     sig.to_bytes().into(),
+            accepted_at_ms: 1,
         }
     }
 

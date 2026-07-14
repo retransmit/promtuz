@@ -57,6 +57,11 @@ pub(super) async fn handle_forward(
         return Ok(());
     }
 
+    // Never accept a client-provided clock. This ingress relay owns the
+    // display timestamp and carries it unchanged through every later hop.
+    let accepted_at_ms = systime().as_millis() as u64;
+    let fwd = DispatchP { accepted_at_ms, ..fwd };
+
     // Snapshot the dispatch fields we need on multiple paths *without*
     // moving `fwd` yet — the K-closest path takes the whole `DispatchP`,
     // while the local-delivery / local-queue paths build a `DeliverP`
@@ -69,12 +74,14 @@ pub(super) async fn handle_forward(
         id:      fwd.id,
         payload: fwd.payload.clone(),
         sig:     fwd.sig,
+        accepted_at_ms,
     };
     let delivery = DeliverP {
         id:      fwd.id,
         from:    fwd.from,
         payload: fwd.payload,
         sig:     fwd.sig,
+        accepted_at_ms,
     };
 
     // 3. Recipient online locally? Deliver-or-evict path. Online-locally
@@ -84,7 +91,7 @@ pub(super) async fn handle_forward(
     if let Some(conn) = recipient_conn {
         let delivered = try_deliver(&conn, &delivery).await;
         if delivered.is_ok() {
-            SRelayPacket::DispatchAck(DispatchAckP::Delivered).send(tx).await?;
+            SRelayPacket::DispatchAck(DispatchAckP::Delivered { accepted_at_ms }).send(tx).await?;
             return Ok(());
         }
         // The in-memory entry is dead (timed out, peer-reset, or never
@@ -104,10 +111,9 @@ pub(super) async fn handle_forward(
     //    mode — DHT disabled, no homes known yet, < K_MIN successes —
     //    we fall through to the local-queue safety net.
     if let Some(dht) = ctx.relay.dht.as_ref().cloned() {
-        let now_ms = systime().as_millis() as u64;
-        match forward_to_homes(dht, dispatch_for_dht, now_ms).await {
+        match forward_to_homes(dht, dispatch_for_dht, accepted_at_ms).await {
             Ok(summary) => {
-                let ack = ack_for_summary(&summary);
+                let ack = ack_for_summary(&summary, accepted_at_ms);
                 SRelayPacket::DispatchAck(ack).send(tx).await?;
                 return Ok(());
             }
@@ -164,11 +170,11 @@ pub(super) async fn handle_activity(eph: ActivityP, ctx: ClientCtxHandle) -> Res
 ///   [`DispatchAckP::Forwarded`].
 ///
 /// Pure function so it can be unit-tested without spinning up a network.
-fn ack_for_summary(summary: &ForwardSummary) -> DispatchAckP {
+fn ack_for_summary(summary: &ForwardSummary, accepted_at_ms: u64) -> DispatchAckP {
     if summary.any_delivered() {
-        DispatchAckP::Delivered
+        DispatchAckP::Delivered { accepted_at_ms }
     } else {
-        DispatchAckP::Forwarded
+        DispatchAckP::Forwarded { accepted_at_ms }
     }
 }
 
@@ -217,6 +223,7 @@ pub(crate) fn dispatch_to_deliver(d: &DispatchP) -> DeliverP {
         from:    d.from,
         payload: d.payload.clone(),
         sig:     d.sig,
+        accepted_at_ms: d.accepted_at_ms,
     }
 }
 
@@ -256,8 +263,7 @@ fn store_in_rocks(
         return Ok(DispatchAckP::QueueFull);
     }
 
-    let ts_ms = systime().as_millis() as u64;
-    let key = MessageKey::new(&recipient.0, ts_ms, &delivery.id.0);
+    let key = MessageKey::new(&recipient.0, delivery.accepted_at_ms, &delivery.id.0);
 
     // Durable write: we acknowledge `Queued` to the sender as soon as this
     // returns, so a crash before the write hits disk would silently lose the
@@ -265,7 +271,7 @@ fn store_in_rocks(
     let payload = delivery.ser()?;
     ctx.relay.store.put_sync(&ctx.relay.store.messages, key.as_bytes(), &payload)?;
 
-    Ok(DispatchAckP::Queued)
+    Ok(DispatchAckP::Queued { accepted_at_ms: delivery.accepted_at_ms })
 }
 
 #[cfg(test)]
@@ -289,8 +295,8 @@ mod tests {
         let mut s = ForwardSummary::default();
         s.delivered_at.push(id_for(1));
         s.stored_at.push(id_for(2));
-        match ack_for_summary(&s) {
-            DispatchAckP::Delivered => {}
+        match ack_for_summary(&s, 1) {
+            DispatchAckP::Delivered { accepted_at_ms: 1 } => {}
             other => panic!("expected Delivered, got {other:?}"),
         }
     }
@@ -302,8 +308,8 @@ mod tests {
         let mut s = ForwardSummary::default();
         s.stored_at.push(id_for(1));
         s.stored_at.push(id_for(2));
-        match ack_for_summary(&s) {
-            DispatchAckP::Forwarded => {}
+        match ack_for_summary(&s, 1) {
+            DispatchAckP::Forwarded { accepted_at_ms: 1 } => {}
             other => panic!("expected Forwarded, got {other:?}"),
         }
     }

@@ -723,7 +723,7 @@ async fn process_deliver(
                         AppPayload::Reply { reply_to, content } => (content, Some(reply_to)),
                         _ => unreachable!(),
                     };
-                    let timestamp = systime().as_secs();
+                    let timestamp = msg.accepted_at_ms / 1_000;
                     match Message::save_incoming(*msg.from, &msg.id.0, &content, timestamp, reply_to) {
                         Ok(Some(saved)) => {
                             MessageEv::Received {

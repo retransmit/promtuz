@@ -385,6 +385,7 @@ mod tests {
             id:      id.into(),
             payload: payload.to_vec().into(),
             sig:     sig.to_bytes().into(),
+            accepted_at_ms: 1,
         }
     }
 

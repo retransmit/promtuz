@@ -126,6 +126,10 @@ pub struct DispatchP {
     pub id:      Bytes<16>,
     pub payload: ByteVec,
     pub sig:     Bytes<64>,
+    /// Unix milliseconds stamped by the first relay that accepts this dispatch.
+    /// Clients send zero; the authenticated ingress relay overwrites it after
+    /// verifying `sig`. It deliberately stays outside the sender signature.
+    pub accepted_at_ms: u64,
 }
 
 /// Relay → Client (relay-verified delivery)
@@ -137,6 +141,9 @@ pub struct DeliverP {
     pub from:    Bytes<32>,
     pub payload: ByteVec,
     pub sig:     Bytes<64>,
+    /// Origin relay acceptance time, copied unchanged through queues and DHT
+    /// forwarding. Recipients use it rather than local receive time.
+    pub accepted_at_ms: u64,
 }
 
 /// Activity bits for [`ActivityP::activity`]. OR them for "several at once".
@@ -231,8 +238,8 @@ pub enum PresenceMode {
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum DispatchAckP {
-    Queued,
-    Delivered,
+    Queued { accepted_at_ms: u64 },
+    Delivered { accepted_at_ms: u64 },
     NotFound,
     InvalidSig,
     /// Recipient's per-user RocksDB queue is at capacity. Sender should back
@@ -249,7 +256,7 @@ pub enum DispatchAckP {
     /// The dispatch is queued at K_MIN homes; eventual delivery depends on
     /// the recipient draining one of those homes on reconnect. Sender
     /// has no further proof of delivery — read receipts are out of scope.
-    Forwarded,
+    Forwarded { accepted_at_ms: u64 },
     Error { reason: String },
 }
 

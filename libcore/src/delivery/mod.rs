@@ -40,9 +40,21 @@ pub fn outcome_for_ack(ack: &DispatchAckP) -> LastOutcome {
         // `put_sync` fsync (see forward.rs::store_in_rocks) — a durable handoff,
         // so the message is "sent" even if the recipient is offline. Treating it
         // as non-durable was the "stuck pending until the recipient logs in" bug.
-        DispatchAckP::Forwarded | DispatchAckP::Delivered | DispatchAckP::Queued => Durable,
+        DispatchAckP::Forwarded { .. }
+        | DispatchAckP::Delivered { .. }
+        | DispatchAckP::Queued { .. } => Durable,
         DispatchAckP::QueueFull | DispatchAckP::Error { .. } => Reachable,
         DispatchAckP::NotFound | DispatchAckP::InvalidSig => Terminal,
+    }
+}
+
+/// Relay acceptance time accompanies every durable dispatch acknowledgement.
+pub fn accepted_at_secs(ack: &DispatchAckP) -> Option<u64> {
+    match ack {
+        DispatchAckP::Forwarded { accepted_at_ms }
+        | DispatchAckP::Delivered { accepted_at_ms }
+        | DispatchAckP::Queued { accepted_at_ms } => Some(accepted_at_ms / 1_000),
+        _ => None,
     }
 }
 
@@ -179,6 +191,7 @@ pub async fn reconcile() {
 
     for row in due(now) {
         let op = OpType::from_u8(row.op_type).unwrap_or(OpType::Message);
+        let mut accepted_timestamp = None;
         let outcome = match op {
             OpType::KpPublish => {
                 let Some(dht) = dht_client.clone() else { continue }; // no dht client → retry next reconnect
@@ -204,6 +217,7 @@ pub async fn reconcile() {
                         && let Ok(SRelayPacket::DispatchAck(ack)) =
                             SRelayPacket::unpack(&mut recv).await
                     {
+                        accepted_timestamp = accepted_at_secs(&ack);
                         outcome_for_ack(&ack)
                     } else {
                         LastOutcome::Silence
@@ -226,7 +240,10 @@ pub async fn reconcile() {
                     if matches!(outcome, LastOutcome::Terminal) {
                         mark_message_failed(&row.id, "relay rejected the message");
                     } else {
-                        mark_message_sent(&row.id);
+                        mark_message_sent(
+                            &row.id,
+                            accepted_timestamp.expect("durable dispatch ack has timestamp"),
+                        );
                     }
                 }
             },
@@ -250,8 +267,8 @@ pub async fn reconcile() {
 /// Flip the message keyed by `dispatch_id` (the outbox row id) to `sent` and
 /// emit the UI event, mirroring the live send path's Durable arm. No-op if no
 /// such message (e.g. a non-Message op).
-fn mark_message_sent(dispatch_id: &[u8]) {
-    if let Some(m) = Message::mark_by_dispatch_id(dispatch_id, STATUS_SENT) {
+fn mark_message_sent(dispatch_id: &[u8], timestamp: u64) {
+    if let Some(m) = Message::mark_by_dispatch_id(dispatch_id, STATUS_SENT, Some(timestamp)) {
         MessageEv::Sent { id: m.id, to: m.peer_ipk, content: m.content, timestamp: m.timestamp }
             .emit();
     }
@@ -261,7 +278,7 @@ fn mark_message_sent(dispatch_id: &[u8]) {
 /// mirroring the live send path's Terminal arm so a rejected/undeliverable
 /// message doesn't fail silently.
 fn mark_message_failed(dispatch_id: &[u8], reason: &str) {
-    if let Some(m) = Message::mark_by_dispatch_id(dispatch_id, STATUS_FAILED) {
+    if let Some(m) = Message::mark_by_dispatch_id(dispatch_id, STATUS_FAILED, None) {
         MessageEv::Failed { id: m.id, to: m.peer_ipk, reason: reason.into() }.emit();
     }
 }
@@ -273,9 +290,9 @@ mod tests {
     #[test]
     fn outcome_for_ack_maps_all_variants() {
         use LastOutcome::*;
-        assert!(matches!(outcome_for_ack(&DispatchAckP::Delivered), Durable));
-        assert!(matches!(outcome_for_ack(&DispatchAckP::Forwarded), Durable));
-        assert!(matches!(outcome_for_ack(&DispatchAckP::Queued), Durable));
+        assert!(matches!(outcome_for_ack(&DispatchAckP::Delivered { accepted_at_ms: 1 }), Durable));
+        assert!(matches!(outcome_for_ack(&DispatchAckP::Forwarded { accepted_at_ms: 1 }), Durable));
+        assert!(matches!(outcome_for_ack(&DispatchAckP::Queued { accepted_at_ms: 1 }), Durable));
         assert!(matches!(outcome_for_ack(&DispatchAckP::QueueFull), Reachable));
         assert!(matches!(outcome_for_ack(&DispatchAckP::Error { reason: String::new() }), Reachable));
         assert!(matches!(outcome_for_ack(&DispatchAckP::NotFound), Terminal));

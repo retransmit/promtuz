@@ -63,7 +63,7 @@ use crate::types::bytes::Bytes;
 /// signing transcript here and gates the app-plaintext format
 /// ([`AppPayload`]).
 ///
-/// Diverges from [`crate::PROTOCOL_VERSION`] (= 4): that constant governs
+/// Diverges from [`crate::PROTOCOL_VERSION`] (= 5): that constant governs
 /// the relay-auth handshake and is a wider flag day to bump. This one is
 /// peer-to-peer only, so a bump is just a client-coordinated redeploy —
 /// cheap by comparison, so it moves independently as `AppPayload` variants
