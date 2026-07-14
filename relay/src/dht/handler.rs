@@ -531,6 +531,9 @@ pub(crate) async fn handle_dht_request(
         DhtRequest::Forward(fwd) => {
             DhtResponse::Forward(super::forward::handle_forward_rpc(dht, fwd, now_ms()).await)
         }
+        DhtRequest::ActivityForward(activity) => DhtResponse::ActivityForward(
+            super::forward::handle_activity_forward_rpc(dht, activity, now_ms()).await,
+        ),
         DhtRequest::QueueFetch(req) => DhtResponse::QueueFetch(
             super::queue_drain::handle_queue_fetch_rpc(
                 dht,

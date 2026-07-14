@@ -56,6 +56,7 @@ use thiserror::Error;
 
 use crate::PROTOCOL_VERSION;
 use crate::proto::RelayId;
+use crate::proto::client_rel::ActivityP;
 use crate::types::bytes::Bytes;
 
 //===:===:===:===:===:===:===:===:===:===:===:===:===||
@@ -660,6 +661,18 @@ pub struct ForwardResp {
     pub outcome: ForwardOutcome,
 }
 
+/// Sender relay → recipient home relay: deliver a signed activity only when
+/// its recipient is connected locally. Homes never store this packet.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityForward {
+    pub activity: ActivityP,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityForwardResp {
+    pub delivered: bool,
+}
+
 // --- QueueFetch (recipient_relay → home_relay) --------------------------
 
 /// Domain-separation tag for the recipient-user signature on a
@@ -985,6 +998,8 @@ pub enum DhtRequest {
     /// Sticky-home: sender-relay → home-relay deliver-or-queue. Handled
     /// in `relay/src/dht/handler.rs`.
     Forward(Forward),
+    /// Ephemeral activity fan-out to recipient homes; never persisted.
+    ActivityForward(ActivityForward),
     /// Sticky-home: recipient-relay → home-relay drain request.
     QueueFetch(QueueFetch),
     /// Sticky-home: recipient-relay → home-relay post-delivery GC of
@@ -1028,6 +1043,8 @@ pub enum DhtResponse {
     FindNode(FindNodeResp),
     /// Sticky-home — reply to [`DhtRequest::Forward`].
     Forward(ForwardResp),
+    /// Reply to [`DhtRequest::ActivityForward`].
+    ActivityForward(ActivityForwardResp),
     /// Sticky-home — reply to [`DhtRequest::QueueFetch`].
     QueueFetch(QueueFetchResp),
     /// Sticky-home — reply to [`DhtRequest::QueueFetchAck`].

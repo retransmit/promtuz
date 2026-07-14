@@ -126,6 +126,7 @@ impl RpcClass {
             // `mls/kp.rs` for the anti-pinning policy; this per-peer
             // bucket is the coarser first line.
             DhtRequest::Forward(_)
+            | DhtRequest::ActivityForward(_)
             | DhtRequest::QueueFetch(_)
             | DhtRequest::KeyPackagePublish(_)
             | DhtRequest::KeyPackageFetch(_)

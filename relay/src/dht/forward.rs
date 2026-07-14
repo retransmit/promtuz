@@ -27,7 +27,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::proto::Sender;
+use common::proto::client_rel::ActivityP;
 use common::proto::client_rel::DispatchP;
+use common::proto::client_rel::SRelayPacket;
+use common::proto::client_rel::activity_sig_message;
 use common::proto::client_rel::dispatch_sig_message;
 use common::proto::dht_p2p::DhtPacket;
 use common::proto::dht_p2p::DhtRequest;
@@ -35,6 +39,8 @@ use common::proto::dht_p2p::DhtResponse;
 use common::proto::dht_p2p::Forward;
 use common::proto::dht_p2p::ForwardOutcome;
 use common::proto::dht_p2p::ForwardResp;
+use common::proto::dht_p2p::ActivityForward;
+use common::proto::dht_p2p::ActivityForwardResp;
 use common::proto::dht_p2p::NodeDescriptor;
 use common::proto::dht_p2p::forward_signing_input;
 use common::proto::pack::Packer;
@@ -271,6 +277,55 @@ pub(crate) async fn forward_to_homes(
     }
 
     Ok(summary)
+}
+
+/// Fan an ephemeral activity to every known recipient home. Unlike message
+/// forwarding, success is best-effort: an absent recipient is dropped.
+pub(crate) async fn forward_activity_to_homes(dht: Arc<Dht>, activity: ActivityP) {
+    let target = NodeId::from_bytes(activity.to.0);
+    let peers = dht.routing.read().find_closest(&target, K);
+    let mut set = tokio::task::JoinSet::new();
+    for peer in peers {
+        let dht = dht.clone();
+        let activity = activity.clone();
+        set.spawn(async move {
+            let Some(conn) = super::lookup::connect_to_peer(&dht, &peer).await.ok() else { return };
+            let Ok(bytes) = DhtPacket::Request(DhtRequest::ActivityForward(ActivityForward { activity })).pack() else { return };
+            let Ok((mut tx, mut rx)) = conn.open_bi().await else { return };
+            if tx.write_all(&bytes).await.is_err() || tx.finish().is_err() { return }
+            let _ = DhtPacket::unpack(&mut rx).await;
+        });
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(FORWARD_TIMEOUT_MS);
+    while !set.is_empty() {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() { set.abort_all(); break }
+        if timeout(remaining, set.join_next()).await.is_err() { set.abort_all(); break }
+    }
+}
+
+/// Deliver a remote activity only to a currently-connected recipient.
+pub(crate) async fn handle_activity_forward_rpc(
+    dht: &Arc<Dht>, forward: ActivityForward, now_ms: u64,
+) -> ActivityForwardResp {
+    let activity = forward.activity;
+    if now_ms.abs_diff(activity.timestamp) > 30_000 {
+        return ActivityForwardResp { delivered: false };
+    }
+    let valid = (|| {
+        let key = VerifyingKey::from_bytes(&activity.from).ok()?;
+        let sig = Signature::from_slice(&*activity.sig).ok()?;
+        key.verify_strict(&activity_sig_message(
+            &activity.to, &activity.from, activity.activity, activity.timestamp,
+        ), &sig).ok()
+    })().is_some();
+    if !valid { return ActivityForwardResp { delivered: false } }
+    let conn = dht.clients.as_ref().and_then(|clients| clients.read().get(&activity.to.0).cloned());
+    let Some(conn) = conn else { return ActivityForwardResp { delivered: false } };
+    let delivered = if let Ok((mut tx, _)) = conn.open_bi().await {
+        SRelayPacket::Activity(activity).send(&mut tx).await.is_ok() && tx.finish().is_ok()
+    } else { false };
+    ActivityForwardResp { delivered }
 }
 
 /// Construct a fully-signed [`Forward`] for `dispatch` using `dht.signing_key`

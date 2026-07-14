@@ -153,6 +153,9 @@ pub(super) async fn handle_activity(eph: ActivityP, ctx: ClientCtxHandle) -> Res
     }
     let recipient_conn = { ctx.relay.clients.read().get(&*eph.to).cloned() };
     let Some(conn) = recipient_conn else {
+        if let Some(dht) = ctx.relay.dht.as_ref().cloned() {
+            tokio::spawn(crate::dht::forward::forward_activity_to_homes(dht, eph));
+        }
         return Ok(());
     };
     if let Ok((mut tx, _rx)) = conn.open_bi().await {
