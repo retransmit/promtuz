@@ -34,6 +34,7 @@ import uniffi.core.editMessage as ffiEditMessage
 import uniffi.core.markRead as ffiMarkRead
 import uniffi.core.markConversationRead as ffiMarkConversationRead
 import uniffi.core.unreadCounts as ffiUnreadCounts
+import uniffi.core.verifyUpdateManifest as ffiVerifyUpdateManifest
 import uniffi.core.reactMessage as ffiReactMessage
 import uniffi.core.reactionsFor as ffiReactionsFor
 import uniffi.core.setActivity as ffiSetActivity
@@ -80,6 +81,10 @@ object CoreBridge {
 
     /** Cheap identity check; safe to call before [CoreInitializer.start]. */
     fun shouldLaunchApp(): Boolean = ffiShouldLaunchApp()
+
+    /** Verify signed update metadata before its bytes are decoded as JSON. */
+    fun verifyUpdateManifest(manifest: ByteArray, signature: ByteArray): Boolean =
+        ffiVerifyUpdateManifest(manifest, signature)
 
     /** Are we discoverable (KeyPackage quorum-published)? Gate the share QR on this. */
     fun kpPublishReady(): Boolean = ffiKpPublishReady()

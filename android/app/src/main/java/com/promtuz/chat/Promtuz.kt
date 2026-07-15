@@ -11,6 +11,7 @@ import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.chat.di.appModule
 import com.promtuz.chat.di.vmModule
 import com.promtuz.chat.ui.appearance.AppearanceStore
+import com.promtuz.chat.update.UpdateRepository
 import com.promtuz.chat.utils.logs.AppLog
 import com.promtuz.chat.utils.logs.AppLogger
 import com.google.firebase.messaging.FirebaseMessaging
@@ -90,6 +91,12 @@ class Promtuz : Application() {
             }
         }
 
+        val updates: UpdateRepository = startKoin {
+            androidLogger()
+            androidContext(this@Promtuz)
+            modules(appModule, vmModule)
+        }.koin.get()
+
         // Foreground → nudge core for an instant reconnect and go Active.
         // Background → assert Idle (the last packet before we freeze).
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
@@ -97,18 +104,11 @@ class Promtuz : Application() {
                 startService(Intent(this@Promtuz, AppCloseService::class.java))
                 CoreBridge.onForeground()
                 CoreBridge.setPresence(idle = false)
+                updates.check()
             }
 
             override fun onStop(owner: LifecycleOwner) = CoreBridge.setPresence(idle = true)
         })
-
-        startKoin {
-            androidLogger()
-            androidContext(this@Promtuz)
-            modules(
-                appModule, vmModule
-            )
-        }
 
         super.onCreate()
     }

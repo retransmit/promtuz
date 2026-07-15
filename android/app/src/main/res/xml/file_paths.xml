@@ -4,5 +4,8 @@
         <cache-path
             name="shared_images"
             path="images/" />
+        <cache-path
+            name="update_apks"
+            path="updates/" />
     </paths>
 </resources>
