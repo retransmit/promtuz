@@ -17,10 +17,9 @@ val localProperties = Properties().apply {
     }
 }
 
-// Release signing from a gitignored keystore.properties (never the debug
-// key). Absent file OR any missing key -> release is left unsigned, forcing
-// proper setup rather than silently shipping a debug-signed APK (and avoiding
-// a file(null) NPE when the file exists but is incomplete).
+// Release signing comes from gitignored keystore.properties or temporary
+// release-script environment variables. Missing credentials leave release
+// unsigned rather than silently using another signing identity.
 val keystorePropsFile = rootProject.file("keystore.properties")
 val keystoreProps = Properties().apply {
     if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
@@ -28,6 +27,16 @@ val keystoreProps = Properties().apply {
 val hasReleaseSigning = keystorePropsFile.exists() &&
     listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
         .all { keystoreProps.getProperty(it) != null }
+
+val publishedVersionCode = providers.gradleProperty("promtuzVersionCode").get().toInt()
+val publishedVersionName = providers.gradleProperty("promtuzVersionName").get()
+val promptedSigning = mapOf(
+    "storeFile" to System.getenv("PROMTUZ_ANDROID_KEYSTORE"),
+    "storePassword" to System.getenv("PROMTUZ_ANDROID_STORE_PASSWORD"),
+    "keyAlias" to System.getenv("PROMTUZ_ANDROID_KEY_ALIAS"),
+    "keyPassword" to System.getenv("PROMTUZ_ANDROID_KEY_PASSWORD"),
+)
+val hasPromptedSigning = promptedSigning.values.all { !it.isNullOrBlank() }
 
 // Resolver bootstrap seeds, injected from a gitignored secrets.properties so
 // the OSS repo never commits infra endpoints. Format: <IPK_HEX>::<host[:port]>
@@ -71,16 +80,20 @@ android {
         applicationId = "com.promtuz.chat"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = publishedVersionCode
+        versionName = publishedVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField("String", "RESOLVER_SEEDS", "\"$resolverSeedsLiteral\"")
 
-        ndk {
-            // minSdk 31 => every device is 64-bit. arm64 for devices, x86_64 for emulators.
-            abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
+    }
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "x86_64")
+            isUniversalApk = false
         }
     }
     packaging {
@@ -98,19 +111,19 @@ android {
 
     signingConfigs {
         getByName("debug") {
-            val storePath = localProperties.getProperty("debug.store.file")
+            val storePath = promptedSigning["storeFile"] ?: localProperties.getProperty("debug.store.file")
             if (storePath != null) {
                 storeFile = file(storePath)
-                storePassword = localProperties.getProperty("debug.store.password")
-                keyAlias = localProperties.getProperty("debug.key.alias")
-                keyPassword = localProperties.getProperty("debug.key.password")
+                storePassword = promptedSigning["storePassword"] ?: localProperties.getProperty("debug.store.password")
+                keyAlias = promptedSigning["keyAlias"] ?: localProperties.getProperty("debug.key.alias")
+                keyPassword = promptedSigning["keyPassword"] ?: localProperties.getProperty("debug.key.password")
             }
         }
-        if (hasReleaseSigning) create("release") {
-            storeFile = file(keystoreProps.getProperty("storeFile"))
-            storePassword = keystoreProps.getProperty("storePassword")
-            keyAlias = keystoreProps.getProperty("keyAlias")
-            keyPassword = keystoreProps.getProperty("keyPassword")
+        if (hasPromptedSigning || hasReleaseSigning) create("release") {
+            storeFile = file(promptedSigning["storeFile"] ?: keystoreProps.getProperty("storeFile"))
+            storePassword = promptedSigning["storePassword"] ?: keystoreProps.getProperty("storePassword")
+            keyAlias = promptedSigning["keyAlias"] ?: keystoreProps.getProperty("keyAlias")
+            keyPassword = promptedSigning["keyPassword"] ?: keystoreProps.getProperty("keyPassword")
         }
     }
 
@@ -121,7 +134,7 @@ android {
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
             )
-            signingConfig = if (hasReleaseSigning) signingConfigs.getByName("release") else null
+            signingConfig = if (hasPromptedSigning || hasReleaseSigning) signingConfigs.getByName("release") else null
         }
         // Perf measurement: AOT-compiled, non-debuggable (no Compose debug checks,
         // no JIT cold start), debug-signed so it installs anywhere. Minify stays
