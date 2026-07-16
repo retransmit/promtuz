@@ -28,12 +28,11 @@ fun AboutScreen(updates: UpdateVM = koinViewModel()) {
     val channel = if (BuildConfig.DEBUG) "Debug" else "Release"
     var showSheet by remember { mutableStateOf(false) }
 
-    FlexibleScreen({ Text("About") }) { padding, _ ->
+    FlexibleScreen({ Text("About Promtuz") }) { padding, _ ->
         Column(
             Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp, vertical = 18.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text("Promtuz", style = MaterialTheme.typography.headlineMedium)
             Text(
                 "${packageInfo.versionName}  ·  $channel channel",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
