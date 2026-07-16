@@ -69,6 +69,12 @@ class UpdateRepository(private val context: Context) {
     }
 
     fun check() {
+        // A foreground auto-check must not stomp an update the user is already
+        // downloading or about to install — the verified APK is on disk; don't send them back to "Download".
+        when (_state.value) {
+            is UpdateState.Downloading, is UpdateState.Ready, is UpdateState.PermissionNeeded -> return
+            else -> {}
+        }
         if (!checking.compareAndSet(false, true)) return
         scope.launch {
             try {
@@ -152,6 +158,8 @@ class UpdateRepository(private val context: Context) {
             _state.value = UpdateState.PermissionNeeded(manifest, apk)
             return
         }
+        // Permission is ours — leave PermissionNeeded so a resume doesn't re-launch the installer in a loop.
+        _state.value = UpdateState.Ready(manifest, apk)
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", apk)
         context.startActivity(
             Intent(Intent.ACTION_VIEW)
