@@ -96,9 +96,10 @@ pub struct Relay {
     pub presence_leases: Arc<RwLock<HashMap<[u8; 32], common::proto::dht_p2p::PresenceLease>>>,
     pub presence_versions: RwLock<HashMap<[u8; 32], u64>>,
 
-    /// Clients that flagged themselves Idle → the unix-ms they did. Absence =
-    /// Active. Populated by `SetPresence`, cleared on Active or disconnect.
-    pub presence_mode: RwLock<HashMap<[u8; 32], u64>>,
+    /// Clients that asserted foreground-active → the unix-ms they did. Absence
+    /// = backgrounded (reads Offline; connection alone is not presence).
+    /// Populated by `SetPresence(Active)`, cleared on Idle or disconnect.
+    pub active_clients: RwLock<HashMap<[u8; 32], u64>>,
 
     /// `IPK → push-pseudonym P` for offline-wake. Populated by
     /// `CRelayPacket::RegisterPush`; read by the DHT enqueue path to trigger a
@@ -222,7 +223,7 @@ impl Relay {
             presence_subs: RwLock::new(HashMap::new()),
             presence_leases,
             presence_versions: RwLock::new(HashMap::new()),
-            presence_mode: RwLock::new(HashMap::new()),
+            active_clients: RwLock::new(HashMap::new()),
             push_pseudonyms,
         }
     }

@@ -1,11 +1,12 @@
 //! Presence + last-seen + idle (same-relay MVP).
 //!
-//! The relay is the presence authority — it holds the connected-client map, so
-//! it derives Online/Offline itself. `Idle` it can't observe (a frozen app is
-//! indistinguishable from a quiet one until the idle timeout), so the client
-//! asserts it via `SetPresence`. A client `SubscribePresence`s with its contact
-//! set; the relay replies with a snapshot and thereafter pushes single-entry
-//! deltas as contacts connect / go idle / disconnect.
+//! The relay holds the connected-client map, but connection alone is NOT
+//! presence — a background wake-drain is connected too. Online requires an
+//! explicit foreground assertion (`SetPresence(Active)`); a connected client
+//! that hasn't asserted reads as `Offline{last_seen}`. A client
+//! `SubscribePresence`s with its contact set; the relay replies with a snapshot
+//! and thereafter pushes single-entry deltas as contacts assert / background /
+//! disconnect.
 //!
 //! Authorization is **mutual**: A learns B's presence only when A subscribed to
 //! B *and* B subscribed to A. `Relay::presence_subs` is both lists at once.
@@ -67,41 +68,43 @@ pub(super) async fn handle_subscribe(sub: SubscribePresenceP, ctx: ClientCtxHand
     let snapshot: Vec<PresenceP> = {
         let subs = relay.presence_subs.read();
         let clients = relay.clients.read();
-        let idle = relay.presence_mode.read();
+        let active = relay.active_clients.read();
         contacts
             .iter()
             .filter(|c| is_mutual(relay, &subs, c, &me))
-            .map(|c| PresenceP { who: Bytes(*c), state: state_of(relay, &clients, &idle, &me, c) })
+            .map(|c| PresenceP { who: Bytes(*c), state: state_of(relay, &clients, &active, &me, c) })
             .collect()
     };
     if !snapshot.is_empty() {
         push(&ctx.conn, snapshot).await;
     }
 
-    // Announce our ACTUAL state, not a hardcoded Online: a background wake-drain
-    // reconnect re-subscribes too and must not read as Active. Mirrors state_of.
-    let state = match relay.presence_mode.read().get(&me) {
-        Some(&since) => PresenceState::Idle { since },
-        None => PresenceState::Online,
+    // Announce our ACTUAL state: connection alone is not presence, so a
+    // background wake-drain re-subscribe reads Offline until it asserts Active.
+    let state = match relay.active_clients.read().get(&me) {
+        Some(_) => PresenceState::Online,
+        None => PresenceState::Offline { last_seen: relay.store.get_last_seen(&me).unwrap_or(0) },
     };
     announce(relay, &contacts, &me, state, systime().as_millis() as u64).await;
     Ok(())
 }
 
-/// Handle a `SetPresence`: update our idle flag and push the new state to our
-/// mutual online contacts.
+/// Handle a `SetPresence`: update our foreground-active flag and push the new
+/// state to our mutual online contacts.
 pub(super) async fn handle_set_presence(mode: PresenceMode, ctx: ClientCtxHandle) -> Result<()> {
     let me = ctx.ipk.to_bytes();
     let relay = &ctx.relay;
+    let now = systime().as_millis() as u64;
     let state = match mode {
-        PresenceMode::Idle => {
-            let now = systime().as_millis() as u64;
-            relay.presence_mode.write().insert(me, now);
-            PresenceState::Idle { since: now }
-        },
         PresenceMode::Active => {
-            relay.presence_mode.write().remove(&me);
+            relay.active_clients.write().insert(me, now);
             PresenceState::Online
+        },
+        // Idle = backgrounded / not foreground. Stamp last-seen on the way down.
+        PresenceMode::Idle => {
+            relay.active_clients.write().remove(&me);
+            let _ = relay.store.put_last_seen(&me, now);
+            PresenceState::Offline { last_seen: now }
         },
     };
     let contacts = relay.presence_subs.read().get(&me).cloned().unwrap_or_default();
@@ -109,13 +112,13 @@ pub(super) async fn handle_set_presence(mode: PresenceMode, ctx: ClientCtxHandle
     Ok(())
 }
 
-/// On disconnect: persist last-seen, drop the idle flag, tell mutual online
+/// On disconnect: persist last-seen, drop the active flag, tell mutual online
 /// contacts we're gone. Called after the clients-map eviction, so we no longer
 /// read as online to ourselves.
 pub(crate) async fn on_disconnect(relay: &RelayRef, me: &[u8; 32]) {
     let now = systime().as_millis() as u64;
     let _ = relay.store.put_last_seen(me, now);
-    relay.presence_mode.write().remove(me);
+    relay.active_clients.write().remove(me);
 
     let my_contacts = relay.presence_subs.read().get(me).cloned().unwrap_or_default();
     let targets: Vec<Connection> = {
@@ -199,17 +202,14 @@ fn is_mutual(
         .unwrap_or_else(|| relay.store.has_presence_consent(contact, me))
 }
 
-/// Derive a contact's state: connected → Idle{since} if it flagged idle, else
-/// Online; not connected → Offline{last_seen} (0 = unknown).
+/// Derive a contact's state: connected AND foreground-asserted → Online;
+/// otherwise Offline{last_seen} (0 = unknown). Connection alone is not presence.
 fn state_of(
-    relay: &RelayRef, clients: &HashMap<[u8; 32], Connection>, idle: &HashMap<[u8; 32], u64>,
+    relay: &RelayRef, clients: &HashMap<[u8; 32], Connection>, active: &HashMap<[u8; 32], u64>,
     viewer: &[u8; 32], c: &[u8; 32],
 ) -> PresenceState {
-    if clients.contains_key(c) {
-        match idle.get(c) {
-            Some(&since) => PresenceState::Idle { since },
-            None => PresenceState::Online,
-        }
+    if clients.contains_key(c) && active.contains_key(c) {
+        PresenceState::Online
     } else {
         relay.store.get_presence_state(viewer, c).unwrap_or(PresenceState::Offline {
             last_seen: relay.store.get_last_seen(c).unwrap_or(0),

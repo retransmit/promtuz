@@ -261,11 +261,12 @@ impl Relay {
         });
 
         // Re-assert real fg/bg presence FIRST: a headless push wake-drain
-        // reconnects with no UI alive, and the relay defaults a reconnect to
-        // Online — so without this it reads as Active. Ahead of the push
-        // registrations (which await network RPCs and can stall) so a UI
-        // re-subscribe can't beat it to the wire. Runs here (after the
-        // RELAY.write above) so set_presence sees the live connection.
+        // reconnects with no UI alive. The relay now defaults a reconnect to
+        // Offline (connection alone is not presence), so this is what re-asserts
+        // Active on a live-FOREGROUND reconnect. Ahead of the push registrations
+        // (which await network RPCs and can stall) so a UI re-subscribe can't
+        // beat it to the wire. Runs here (after the RELAY.write above) so
+        // set_presence sees the live connection.
         //
         // Then register our push-pseudonym so this home can wake us when
         // offline, and (re)register P→token with a gateway if we hold a token.

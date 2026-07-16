@@ -595,7 +595,7 @@ pub async fn set_presence(idle: bool) -> Result<()> {
 }
 
 /// Re-send our last-known presence mode. Called on every relay (re)connect
-/// so the relay's presence_mode reflects real fg/bg even when no UI is alive
+/// so the relay's active_clients reflects real fg/bg even when no UI is alive
 /// (e.g. a headless push wake-drain). Self-heals a dropped SetPresence.
 pub async fn reassert_presence() -> Result<()> {
     set_presence(PRESENCE_IDLE.load(Ordering::Relaxed)).await
