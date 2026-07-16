@@ -604,6 +604,7 @@ mod tests {
             payload: vec![4u8, 5, 6].into(),
             sig:     [7u8; 64].into(),
             accepted_at_ms: 1,
+            wake:    false,
         };
         let deliver = dispatch_to_deliver(dispatch.clone());
         assert_eq!(deliver.id, dispatch.id);
@@ -634,6 +635,7 @@ mod tests {
             payload: vec![id].into(),
             sig:     [0u8; 64].into(),
             accepted_at_ms: 1,
+            wake:    false,
         };
 
         // Local drains A, B (from=1); remote returns B, C (from=2). B overlaps.

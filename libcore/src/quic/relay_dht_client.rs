@@ -221,6 +221,8 @@ impl DhtClient for RelayDhtClient {
             payload: ByteVec(payload),
             sig:     Bytes(sig),
             accepted_at_ms: 0,
+            // First-contact welcome: the peer must be woken to receive it.
+            wake:    true,
         };
 
         match self.rpc(CRelayPacket::Dispatch(fwd)).await? {

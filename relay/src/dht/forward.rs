@@ -241,7 +241,10 @@ pub(crate) async fn forward_to_homes(
             ForwardOutcome::Delivered => summary.delivered_at.push(self_id),
             ForwardOutcome::Stored => {
                 summary.stored_at.push(self_id);
-                dht.trigger_wake(&user_ipk_bytes);
+                // Only new content push-wakes; receipts/edits/etc. wait for drain.
+                if dispatch.wake {
+                    dht.trigger_wake(&user_ipk_bytes);
+                }
             },
             other => summary.failed_at.push(HomeReply { node_id: self_id, outcome: other }),
         }
@@ -735,7 +738,7 @@ pub(crate) async fn handle_forward_rpc(dht: &Arc<Dht>, fwd: Forward, now_ms: u64
         &fwd.dispatch,
         fwd.dispatch.accepted_at_ms,
     );
-    if matches!(outcome, ForwardOutcome::Stored) {
+    if matches!(outcome, ForwardOutcome::Stored) && fwd.dispatch.wake {
         dht.trigger_wake(&recipient_ipk);
     }
     ForwardResp { outcome }
@@ -924,6 +927,7 @@ mod tests {
             payload: payload.to_vec().into(),
             sig: sig.to_bytes().into(),
             accepted_at_ms: 1,
+            wake: false,
         }
     }
 

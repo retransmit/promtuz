@@ -372,6 +372,9 @@ async fn dispatch_envelope(
         payload:        ByteVec(env_bytes),
         sig:            Bytes(sig),
         accepted_at_ms: 0,
+        // Control traffic (receipt/edit/delete/react/pair-ack/pair-decline):
+        // deliver on next drain, never push-wake.
+        wake:           false,
     };
     let bytes = CRelayPacket::Dispatch(fwd).pack().map_err(|e| anyhow!("pack dispatch: {e}"))?;
 
@@ -1000,6 +1003,8 @@ pub async fn attempt_send<C: DhtClient>(
         payload:        ByteVec(payload),
         sig:            Bytes(sig),
         accepted_at_ms: 0,
+        // New content (text/reply): push-wake an offline peer.
+        wake:           true,
     };
 
     // 7. Frame once, enqueue before the wire. `.pack()` (not `.ser()`) yields the length-prefixed

@@ -1457,6 +1457,7 @@ mod tests {
             payload:        payload.to_vec().into(),
             sig:            sig.to_bytes().into(),
             accepted_at_ms: 1,
+            wake:           false,
         }
     }
 

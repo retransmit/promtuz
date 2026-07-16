@@ -132,6 +132,10 @@ pub struct DispatchP {
     /// Clients send zero; the authenticated ingress relay overwrites it after
     /// verifying `sig`. It deliberately stays outside the sender signature.
     pub accepted_at_ms: u64,
+    /// Plaintext push hint the relay reads (outside `sig`): true only for new
+    /// content (text/reply/welcome) that should push-wake an offline peer.
+    /// Receipts/edits/deletes/reactions/pair-acks set false — queued, never woken.
+    pub wake: bool,
 }
 
 /// Relay → Client (relay-verified delivery)

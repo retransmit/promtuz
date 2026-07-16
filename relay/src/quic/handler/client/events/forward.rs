@@ -76,6 +76,7 @@ pub(super) async fn handle_forward(
         payload: fwd.payload.clone(),
         sig:     fwd.sig,
         accepted_at_ms,
+        wake:    fwd.wake,
     };
     let delivery = DeliverP {
         id:      fwd.id,
