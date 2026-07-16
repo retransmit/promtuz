@@ -54,6 +54,7 @@ fun HomeTopBar(
             )
         },
         actions = {
+            AppUpdateIcon()
             HomeMoreMenu(appViewModel)
         })
 }
