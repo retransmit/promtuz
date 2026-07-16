@@ -8,9 +8,11 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.core.content.FileProvider
+import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.core.CoreBridge
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -62,11 +64,28 @@ class UpdateRepository(private val context: Context) {
         private val log = { Timber.tag(TAG) }
     }
 
-    private val channel = if (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+    private val nativeChannel = if (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
         "debug"
     } else {
         "release"
     }
+    val channel: String get() = ChatPrefs.updateChannel ?: nativeChannel
+
+    /** Cross-channel switch: drop any in-flight/staged update from the old channel, then re-check. */
+    fun switchChannel(newChannel: String) {
+        if (newChannel == channel) return
+        ChatPrefs.updateChannel = newChannel
+        scope.launch {
+            downloadJob?.cancelAndJoin()
+            _state.value = UpdateState.None
+            check()
+        }
+    }
+
+    // Same-versionCode installs are allowed when crossing channels (the binaries
+    // differ); the OS rejects downgrades either way.
+    private fun minInstallableCode(): Long =
+        installedVersionCode() + if (channel == nativeChannel) 1 else 0
 
     fun check() {
         // A foreground auto-check must not stomp an update the user is already
@@ -88,7 +107,7 @@ class UpdateRepository(private val context: Context) {
                 require(CoreBridge.verifyUpdateManifest(rawManifest, signature)) { "Update signature could not be verified." }
                 val manifest = json.decodeFromString<UpdateManifest>(rawManifest.decodeToString())
                 validateManifest(manifest, abi)
-                if (manifest.versionCode.toLong() > installedVersionCode()) {
+                if (manifest.versionCode.toLong() >= minInstallableCode()) {
                     _state.value = UpdateState.Available(manifest)
                     log().v("New Update Available, ${installedVersionName()} (${installedVersionCode()}) -> ${manifest.versionName} (${manifest.versionCode})")
                 } else {
@@ -107,7 +126,7 @@ class UpdateRepository(private val context: Context) {
         downloadJob = scope.launch {
             val destination = File(updatesDirectory(), manifest.apk)
             try {
-                require(manifest.versionCode.toLong() > installedVersionCode()) { "This update is no longer newer than the installed app." }
+                require(manifest.versionCode.toLong() >= minInstallableCode()) { "This update is no longer newer than the installed app." }
                 _state.value = UpdateState.Downloading(manifest, 0f)
                 destination.delete()
                 val digest = MessageDigest.getInstance("SHA-256")

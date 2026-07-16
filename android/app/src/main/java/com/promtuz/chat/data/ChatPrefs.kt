@@ -40,6 +40,11 @@ object ChatPrefs {
         get() = runCatching { NotifBuzz.valueOf(prefs.getString(NOTIF_BUZZ, "")!!) }.getOrDefault(NotifBuzz.EveryMessage)
         set(value) = prefs.edit { putString(NOTIF_BUZZ, value.name) }
 
+    /** In-app update channel override ("debug"/"release"); null = follow the installed build type. */
+    var updateChannel: String?
+        get() = prefs.getString(UPDATE_CHANNEL, null)
+        set(value) = prefs.edit { putString(UPDATE_CHANNEL, value) }
+
     fun init(context: Context) {
         prefs = context.getSharedPreferences("chat_flags", Context.MODE_PRIVATE)
         _pinned.value = prefs.getStringSet(PINNED, emptySet()).orEmpty().toSet()
@@ -69,6 +74,7 @@ object ChatPrefs {
     private const val NOTIF_ENABLED = "notif_enabled"
     private const val NOTIF_PREVIEW = "notif_preview"
     private const val NOTIF_BUZZ = "notif_buzz"
+    private const val UPDATE_CHANNEL = "update_channel"
 }
 
 /** New-message alert cadence, persisted via [ChatPrefs.notifBuzz]. */

@@ -6,6 +6,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -27,6 +30,7 @@ fun AboutScreen(updates: UpdateVM = koinViewModel()) {
     val packageInfo = remember { context.packageManager.getPackageInfo(context.packageName, 0) }
     val channel = if (BuildConfig.DEBUG) "Debug" else "Release"
     var showSheet by remember { mutableStateOf(false) }
+    var updateChannel by remember { mutableStateOf(updates.channel) }
 
     FlexibleScreen({ Text("About Promtuz") }) { padding, _ ->
         Column(
@@ -38,6 +42,26 @@ fun AboutScreen(updates: UpdateVM = koinViewModel()) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodyLarge,
             )
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    "Update channel",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelLarge,
+                )
+                SingleChoiceSegmentedButtonRow {
+                    val channels = listOf("release", "debug")
+                    channels.forEachIndexed { index, option ->
+                        SegmentedButton(
+                            selected = updateChannel == option,
+                            onClick = {
+                                updateChannel = option
+                                updates.switchChannel(option)
+                            },
+                            shape = SegmentedButtonDefaults.itemShape(index, channels.size),
+                        ) { Text(option.replaceFirstChar { it.uppercase() }) }
+                    }
+                }
+            }
             OutlinedButton(onClick = { updates.check(); showSheet = true }) { Text("Check for updates") }
         }
     }
