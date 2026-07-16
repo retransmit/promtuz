@@ -9,7 +9,6 @@ use tokio::io::AsyncWriteExt;
 use crate::proto::RelayId;
 use crate::proto::pack::Packer;
 use crate::sysutils::SystemLoad;
-use crate::trace;
 use crate::types::bytes::Bytes;
 
 /// Domain separation tag mixed into the [`LifetimeP::RelayHello`] signed
@@ -165,9 +164,6 @@ pub enum ResolverPacket {
 impl ResolverPacket {
     pub async fn send(self, tx: &mut (impl AsyncWriteExt + Unpin)) -> anyhow::Result<()> {
         let packet = self.pack()?;
-
-        trace!("sent packet ({}B) {}", packet.len(), hex::encode(&packet));
-
         tx.write_all(&packet).await?;
         Ok(tx.flush().await?)
     }

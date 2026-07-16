@@ -386,7 +386,6 @@ impl ResolverLink {
         .await?;
 
         send.finish()?;
-        debug!("heartbeat -> resolver({})", conn.remote_address());
         Ok(())
     }
 

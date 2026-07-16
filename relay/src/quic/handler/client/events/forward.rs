@@ -11,6 +11,7 @@ use common::proto::client_rel::SRelayPacket;
 use common::proto::client_rel::dispatch_sig_message;
 use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
+use common::debug;
 use common::trace;
 use common::types::bytes::Bytes;
 use ed25519_dalek::Signature;
@@ -91,6 +92,11 @@ pub(super) async fn handle_forward(
     if let Some(conn) = recipient_conn {
         let delivered = try_deliver(&conn, &delivery).await;
         if delivered.is_ok() {
+            debug!(
+                "dispatch {}: delivered live to {} (recipient online here)",
+                hex::encode(&delivery.id.0[..8]),
+                hex::encode(&recipient.0[..8])
+            );
             SRelayPacket::DispatchAck(DispatchAckP::Delivered { accepted_at_ms }).send(tx).await?;
             return Ok(());
         }
@@ -238,7 +244,11 @@ pub(crate) fn dispatch_to_deliver(d: &DispatchP) -> DeliverP {
 fn store_in_rocks(
     ctx: &ClientCtxHandle, recipient: Bytes<32>, delivery: DeliverP,
 ) -> Result<DispatchAckP> {
-    trace!("FORWARD: recipient {} not connected locally, queuing", hex::encode(recipient));
+    debug!(
+        "dispatch {}: recipient {} offline — queued locally (fallback)",
+        hex::encode(&delivery.id.0[..8]),
+        hex::encode(&recipient.0[..8])
+    );
 
     // Per-recipient cap (Part B3). fjall's `prefix()` is an exact scan, so
     // we just count the recipient's keys. Bounded: stop as soon as we hit

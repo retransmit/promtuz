@@ -35,26 +35,26 @@ pub async fn connect_to_any_seed(seeds: &[ResolverSeed]) -> Result<Connection, D
         let addr = match seed.addr.resolve(DEFAULT_RESOLVER_PORT).await {
             Ok(a) => a,
             Err(err) => {
-                log::error!("ERROR: resolver {} resolve failed: {}", seed.addr, err);
+                log::error!("resolver {} resolve failed: {}", seed.addr, err);
                 last_err = Some(err);
                 continue;
             },
         };
 
-        log::info!("INFO: connecting to resolver: {} ({})", seed.addr, addr);
+        log::info!("connecting to resolver {} ({})", seed.addr, addr);
 
         let connecting = endpoint.connect(addr, &seed.key.to_string()).map_err(quinn_err)?;
         match tokio::time::timeout(Duration::from_secs(10), connecting).await {
             Ok(Ok(conn)) => {
-                log::info!("INFO: connected to resolver: {}", addr);
+                log::info!("connected to resolver {}", addr);
                 return Ok(conn);
             },
             Ok(Err(err)) => {
-                log::error!("ERROR: resolver {} connection failed: {}", addr, err);
+                log::error!("resolver {} connection failed: {}", addr, err);
                 last_err = Some(err.into());
             },
             Err(_) => {
-                log::warn!("WARN: resolver {} timed out after 10s", addr);
+                log::warn!("resolver {} timed out after 10s", addr);
                 last_err = Some(io::Error::new(io::ErrorKind::TimedOut, "resolver connect timed out"));
             },
         }

@@ -237,9 +237,12 @@ pub async fn reconcile() {
                 // offline-then-delivered message stays pending forever and a
                 // rejected one fails silently. KpPublish has no message row.
                 if matches!(op, OpType::Message) {
+                    let id = hex::encode(&row.id[..row.id.len().min(4)]);
                     if matches!(outcome, LastOutcome::Terminal) {
+                        warn!("MESSAGE: {id} rejected on retry — {outcome:?}");
                         mark_message_failed(&row.id, "relay rejected the message");
                     } else {
+                        debug!("MESSAGE: {id} delivered on retry — {outcome:?}");
                         mark_message_sent(
                             &row.id,
                             accepted_timestamp.expect("durable dispatch ack has timestamp"),
