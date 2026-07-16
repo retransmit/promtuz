@@ -260,9 +260,19 @@ impl Relay {
             }
         });
 
-        // Register our push-pseudonym so this home can wake us when offline,
-        // and (re)register P→token with a gateway if we hold a push token.
+        // Re-assert real fg/bg presence FIRST: a headless push wake-drain
+        // reconnects with no UI alive, and the relay defaults a reconnect to
+        // Online — so without this it reads as Active. Ahead of the push
+        // registrations (which await network RPCs and can stall) so a UI
+        // re-subscribe can't beat it to the wire. Runs here (after the
+        // RELAY.write above) so set_presence sees the live connection.
+        //
+        // Then register our push-pseudonym so this home can wake us when
+        // offline, and (re)register P→token with a gateway if we hold a token.
         tokio::spawn(async {
+            if let Err(e) = crate::messaging::reassert_presence().await {
+                debug!("PRESENCE: reassert on connect failed: {e}");
+            }
             if let Err(e) = crate::push::register_push().await {
                 warn!("register_push failed: {e}");
             }
@@ -739,6 +749,7 @@ async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>)
                                 timestamp,
                             }
                             .emit();
+                            info!("MESSAGE: received from {}", hex::encode(&msg.from[..4]));
                             // Auto-Delivered receipt (high-water-mark = this id).
                             // Spawned so we don't delay the relay's DeliverAck.
                             let from = *msg.from;

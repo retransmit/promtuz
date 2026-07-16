@@ -55,6 +55,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 use anyhow::anyhow;
@@ -86,6 +88,7 @@ use common::types::bytes::Bytes;
 use ed25519_dalek::Signature;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::VerifyingKey;
+use log::debug;
 use log::error;
 use log::info;
 use log::warn;
@@ -563,10 +566,15 @@ fn next_presence_lease_version(now: u64) -> Result<u64> {
     Ok(version)
 }
 
+/// Process-wide fg/bg intent. Defaults to Idle: a bare/backgrounded process
+/// (e.g. a headless push wake-drain) is Idle until the UI foregrounds it.
+static PRESENCE_IDLE: AtomicBool = AtomicBool::new(true);
+
 /// Tell the relay our activity mode: `idle = true` on backgrounding (sent as
 /// the last packet before the app freezes), `false` on return. Fire-and-forget;
 /// the relay updates the state it reports to our mutual contacts.
 pub async fn set_presence(idle: bool) -> Result<()> {
+    PRESENCE_IDLE.store(idle, Ordering::Relaxed);
     let mode = if idle {
         common::proto::client_rel::PresenceMode::Idle
     } else {
@@ -584,6 +592,13 @@ pub async fn set_presence(idle: bool) -> Result<()> {
         let _ = tx.finish();
     }
     Ok(())
+}
+
+/// Re-send our last-known presence mode. Called on every relay (re)connect
+/// so the relay's presence_mode reflects real fg/bg even when no UI is alive
+/// (e.g. a headless push wake-drain). Self-heals a dropped SetPresence.
+pub async fn reassert_presence() -> Result<()> {
+    set_presence(PRESENCE_IDLE.load(Ordering::Relaxed)).await
 }
 
 /// Pairing: fetch `to`'s KeyPackage, build the 1:1 group, and
@@ -1007,11 +1022,12 @@ pub async fn attempt_send<C: DhtClient>(
         return Ok(());
     };
 
-    let Ok((mut send, mut recv)) = conn.open_bi().await else { return Ok(()) };
-    if send.write_all(&dispatch_bytes).await.is_err() {
+    let Ok((mut send, mut recv)) = conn.open_bi().await else {
+        debug!("MESSAGE: {} send stream failed to open (connection gone); left in outbox", hex::encode(&to[..4]));
         return Ok(());
-    }
-    if send.finish().is_err() {
+    };
+    if send.write_all(&dispatch_bytes).await.is_err() || send.finish().is_err() {
+        debug!("MESSAGE: {} interrupted mid-send (transport drop); left in outbox", hex::encode(&to[..4]));
         return Ok(());
     }
 
@@ -1022,11 +1038,13 @@ pub async fn attempt_send<C: DhtClient>(
                 let timestamp =
                     delivery::accepted_at_secs(&ack).expect("durable dispatch ack has timestamp");
                 Message::mark_sent(&msg_id, timestamp);
+                info!("MESSAGE: {} sent — {ack:?}", hex::encode(&to[..4]));
                 MessageEv::Sent { id: msg_id, to, content: content.clone(), timestamp }.emit();
             },
             LastOutcome::Terminal => {
                 delivery::retire(&id);
                 Message::mark_failed(&msg_id);
+                warn!("MESSAGE: {} rejected by relay — {ack:?}", hex::encode(&to[..4]));
                 MessageEv::Failed { id: msg_id, to, reason: format!("relay rejected: {ack:?}") }
                     .emit();
             },
@@ -1038,8 +1056,12 @@ pub async fn attempt_send<C: DhtClient>(
             },
             LastOutcome::Silence => {},
         },
-        Ok(_other) => {},
-        Err(_) => {},
+        Ok(_other) => {
+            debug!("MESSAGE: {} unexpected reply to dispatch; left in outbox", hex::encode(&to[..4]));
+        },
+        Err(_) => {
+            debug!("MESSAGE: {} no relay ack (transport drop); left in outbox for retry", hex::encode(&to[..4]));
+        },
     }
 
     Ok(())

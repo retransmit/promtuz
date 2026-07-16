@@ -78,8 +78,13 @@ pub(super) async fn handle_subscribe(sub: SubscribePresenceP, ctx: ClientCtxHand
         push(&ctx.conn, snapshot).await;
     }
 
-    // Subscribing = foregrounded, so announce Online.
-    announce(relay, &contacts, &me, PresenceState::Online, systime().as_millis() as u64).await;
+    // Announce our ACTUAL state, not a hardcoded Online: a background wake-drain
+    // reconnect re-subscribes too and must not read as Active. Mirrors state_of.
+    let state = match relay.presence_mode.read().get(&me) {
+        Some(&since) => PresenceState::Idle { since },
+        None => PresenceState::Online,
+    };
+    announce(relay, &contacts, &me, state, systime().as_millis() as u64).await;
     Ok(())
 }
 
