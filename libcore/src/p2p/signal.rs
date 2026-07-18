@@ -18,8 +18,8 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 /// Peer IPK → the live session waiting for that peer's candidate offer.
-static LISTENERS: Lazy<Mutex<HashMap<[u8; 32], mpsc::UnboundedSender<Vec<SocketAddr>>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+type Listeners = Mutex<HashMap<[u8; 32], mpsc::UnboundedSender<Vec<SocketAddr>>>>;
+static LISTENERS: Lazy<Listeners> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Start listening for `peer`'s candidate offers. Returns the receiver;
 /// a later offer with no live receiver deregisters the slot.

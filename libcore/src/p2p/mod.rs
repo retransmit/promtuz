@@ -119,6 +119,7 @@ fn disco_key(peer: &[u8; 32]) -> Result<DiscoKey> {
 /// A live direct connection to a peer.
 pub struct PeerLink {
     conn: Connection,
+    dialer: bool,
 }
 
 impl PeerLink {
@@ -129,8 +130,8 @@ impl PeerLink {
     /// One bi-stream ping/pong to prove the link end-to-end. Dialer sends
     /// `ping` and expects `pong`; the acceptor answers. Used by the debug
     /// connect to confirm a punched link actually carries data.
-    pub async fn verify_roundtrip(&self, dialer: bool) -> Result<()> {
-        if dialer {
+    pub async fn verify_roundtrip(&self) -> Result<()> {
+        if self.dialer {
             let (mut send, mut recv) = self.conn.open_bi().await?;
             send.write_all(b"ping").await?;
             send.finish()?;
@@ -195,7 +196,7 @@ async fn run_session(
             .await
             .ok_or_else(|| anyhow!("hole-punch failed"))?;
         let conn = ep.endpoint.connect(addr, PEER_SNI)?.await?;
-        Ok(PeerLink { conn })
+        Ok(PeerLink { conn, dialer: true })
     } else {
         // Acceptor: run the punch in the background purely to open our NAT
         // (its validation result doesn't matter — the hole is what counts),
@@ -216,6 +217,6 @@ async fn run_session(
         // session is possible.
         let conn = incoming.accept()?.await?;
         engine.abort();
-        Ok(PeerLink { conn })
+        Ok(PeerLink { conn, dialer: false })
     }
 }
