@@ -175,6 +175,8 @@ impl AsyncUdpSocket for PunchSocket {
             // the peer under this bridge's token.
             Some((relay, token)) => {
                 let framed = RelayMsg::TurnData { token, payload: transmit.contents }.encode();
+                // TEMP diagnostic: TURN send path (strip once handshake works).
+                log::info!("P2P: TURN send {}B -> relay {}", transmit.contents.len(), relay);
                 self.io.try_send_to(&framed, relay).map(|_| ())
             },
             None => self.io.try_send_to(transmit.contents, transmit.destination).map(|_| ()),
@@ -214,6 +216,8 @@ impl AsyncUdpSocket for PunchSocket {
             };
             if let Some((token, plen)) = turn {
                 let Some(synth) = self.turn.lock().synth_for(&token) else { continue };
+                // TEMP diagnostic: TURN recv path (strip once handshake works).
+                log::info!("P2P: TURN recv {plen}B <- relay, as {synth}");
                 // Present the bridged QUIC payload to quinn as if it came
                 // direct from the peer's synthetic address.
                 let off = len - plen;

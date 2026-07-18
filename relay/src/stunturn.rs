@@ -199,13 +199,18 @@ async fn handle(
                 br.other(src, now); // register the source; no data to forward
             }
         },
-        Some(RelayMsg::TurnData { token, .. }) => {
+        Some(RelayMsg::TurnData { token, payload }) => {
             let now = Instant::now();
             let dst = get_or_insert(bridges, token, src, now).and_then(|br| br.other(src, now));
-            if let Some(dst) = dst {
+            match dst {
                 // Forward verbatim — the receiver parses the token and hands
                 // the QUIC payload to its own stack.
-                let _ = sock.send_to(pkt, dst).await;
+                Some(dst) => {
+                    // TEMP diagnostic: strip once TURN handshake works.
+                    info!("TURN fwd {}B {} -> {}", payload.len(), src, dst);
+                    let _ = sock.send_to(pkt, dst).await;
+                },
+                None => info!("TURN drop {}B from {} (no peer for token)", payload.len(), src),
             }
         },
         // StunResp is a reply, never inbound here; junk decodes to None.
