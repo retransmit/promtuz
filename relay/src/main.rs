@@ -20,6 +20,7 @@ mod dht;
 mod quic;
 mod relay;
 mod storage;
+mod stunturn;
 mod util;
 
 #[tokio::main]
@@ -65,6 +66,11 @@ async fn main() -> Result<()> {
 
     // Control socket for `pzrelay clear-db` (and future subcommands).
     tokio::spawn(control::serve(relay.store.clone(), control_sock, cancel.clone()));
+
+    // STUN echo + TURN bridge for P2P hole-punch assist, sharing the QUIC
+    // socket (peeled off by the wrapper in `Relay::endpoint`).
+    let assist = relay.assist.lock().take().expect("assist inbox is taken exactly once");
+    tokio::spawn(stunturn::serve(assist, cancel.clone()));
 
     // Capture `client_handle` (Arc-shared, survives reconnects) before
     // `attach()` consumes the link — the DHT bootstrap RPCs need it.

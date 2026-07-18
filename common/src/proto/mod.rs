@@ -14,6 +14,7 @@ pub mod client_rel;
 pub mod client_res;
 pub mod dht_p2p;
 pub mod mls_wire;
+pub mod p2p_relay;
 pub mod pack;
 pub mod peer;
 pub mod push;

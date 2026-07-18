@@ -15,10 +15,13 @@ use common::quic::protorole::ProtoRole;
 use common::warn;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::VerifyingKey;
+use parking_lot::Mutex;
 use parking_lot::RwLock;
 use quinn::ClientConfig;
 use quinn::Connection;
 use quinn::Endpoint;
+use quinn::EndpointConfig;
+use quinn::TokioRuntime;
 
 use crate::dht::Dht;
 use crate::storage::db::Store;
@@ -64,6 +67,10 @@ pub struct Relay {
     /// SystemTime in ms since EPOCH when relay is started first
     // pub start_ms: u128,
     pub endpoint: Endpoint,
+
+    /// Peeled STUN/TURN assist datagrams + a socket handle for the assist
+    /// task. `main` takes it once to spawn `stunturn::serve`.
+    pub assist: Mutex<Option<crate::stunturn::AssistInbox>>,
 
     pub cfg: AppConfig,
 
@@ -115,7 +122,7 @@ impl Relay {
     /// (so libcore can pin SPKI against `RelayDescriptor.pubkey`),
     /// every other ALPN keeps the operator's CA-issued cert for the
     /// existing trust chain.
-    fn endpoint(cfg: &AppConfig, node_signing: &SigningKey) -> Endpoint {
+    fn endpoint(cfg: &AppConfig, node_signing: &SigningKey) -> (Endpoint, crate::stunturn::AssistInbox) {
         use ProtoRole as PR;
 
         graceful!(setup_crypto_provider(), "installing the crypto provider");
@@ -130,14 +137,27 @@ impl Relay {
             "building the TLS server config"
         );
 
+        // Bind the QUIC socket ourselves and hand quinn a wrapper that peels
+        // off P2P hole-punch assist datagrams (STUN/TURN) — so the one open
+        // UDP port carries both, no extra port or firewall rule.
+        let std_sock =
+            graceful!(std::net::UdpSocket::bind(cfg.network.bind_addr()), "binding the QUIC socket");
+        let (socket, assist) =
+            graceful!(crate::stunturn::wrap_socket(std_sock), "wrapping the QUIC socket");
+
         let endpoint = graceful!(
-            Endpoint::server(server_cfg, cfg.network.bind_addr()),
+            Endpoint::new_with_abstract_socket(
+                EndpointConfig::default(),
+                Some(server_cfg),
+                socket,
+                Arc::new(TokioRuntime),
+            ),
             "starting the QUIC endpoint"
         );
         if let Ok(addr) = endpoint.local_addr() {
             info!("relay listening at QUIC({:?})", addr);
         }
-        endpoint
+        (endpoint, assist)
     }
 
     pub fn new(cfg: AppConfig) -> Self {
@@ -146,7 +166,7 @@ impl Relay {
 
         info!("initializing Relay with ID({key})");
 
-        let mut endpoint = Self::endpoint(&cfg, &keys.signing);
+        let (mut endpoint, assist) = Self::endpoint(&cfg, &keys.signing);
 
         let roots = graceful!(load_root_ca(&cfg.network.root_ca_path), "loading the root CA");
 
@@ -219,6 +239,7 @@ impl Relay {
             store,
             dht,
             endpoint,
+            assist: Mutex::new(Some(assist)),
             clients,
             presence_subs: RwLock::new(HashMap::new()),
             presence_leases,
