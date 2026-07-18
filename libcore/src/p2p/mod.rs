@@ -13,4 +13,5 @@
 #![allow(dead_code)]
 
 mod disco;
+mod punch;
 mod socket;
