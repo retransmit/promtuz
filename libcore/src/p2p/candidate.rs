@@ -30,7 +30,13 @@ pub fn local_candidates(port: u16) -> Vec<SocketAddr> {
 /// two peers on one LAN punch through it.
 fn is_unroutable(ip: &IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            // 169.254/16 link-local, plus 192.0.0.0/24 (IETF special-use —
+            // includes the 464XLAT CLAT address v6-only carriers like Jio
+            // synthesize; it's not a real, reachable v4).
+            v4.is_link_local() || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+        },
         // `Ipv6Addr::is_unicast_link_local` is unstable, so match prefixes
         // directly: fe80::/10 link-local, fec0::/10 site-local.
         IpAddr::V6(v6) => {
@@ -53,6 +59,8 @@ mod tests {
         assert!(is_unroutable(&"fe80::1".parse::<Ipv6Addr>().unwrap().into()));
         // deprecated site-local (what the emulator advertised)
         assert!(is_unroutable(&"fec0::5054:ff:fe12:3456".parse::<Ipv6Addr>().unwrap().into()));
+        // Jio's 464XLAT CLAT fake-v4
+        assert!(is_unroutable(&"192.0.0.2".parse::<Ipv4Addr>().unwrap().into()));
         // routable addresses (private LAN v4 + global v6) are kept
         assert!(!is_unroutable(&"192.168.1.5".parse::<Ipv4Addr>().unwrap().into()));
         assert!(!is_unroutable(&"2409:4117::1".parse::<Ipv6Addr>().unwrap().into()));
