@@ -839,6 +839,11 @@ async fn process_deliver(msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>)
                 Ok(AppPayload::P2p { candidates }) => {
                     // Candidate offer for a direct connection — hand to the
                     // P2P layer (routed to the waiting session), never stored.
+                    info!(
+                        "P2P: received offer from {} ({} candidates)",
+                        hex::encode(&msg.from[..4]),
+                        candidates.len()
+                    );
                     crate::p2p::deliver_offer(*msg.from, candidates);
                 },
                 Err(e) => {

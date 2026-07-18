@@ -189,12 +189,21 @@ async fn run_session(
         .ok_or_else(|| anyhow!("candidate listener closed"))?;
 
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("no identity"))?.ipk();
+    let role = if our_ipk < peer { "dialer" } else { "acceptor" };
+    log::info!(
+        "P2P[{}]: {} — {} peer candidates: {:?}",
+        hex::encode(&peer[..4]),
+        role,
+        peer_cands.len(),
+        peer_cands
+    );
 
     if our_ipk < peer {
         // Dialer: punch, then connect to the address that answered.
         let addr = punch::punch(&ep.pokes, &mut poke_rx, key, peer_cands, PUNCH_TIMEOUT)
             .await
             .ok_or_else(|| anyhow!("hole-punch failed"))?;
+        log::info!("P2P[{}]: punched, dialing {}", hex::encode(&peer[..4]), addr);
         let conn = ep.endpoint.connect(addr, PEER_SNI)?.await?;
         Ok(PeerLink { conn, dialer: true })
     } else {
