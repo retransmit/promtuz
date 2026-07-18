@@ -23,6 +23,7 @@ mod socket;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,6 +31,7 @@ use std::time::Duration;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
+use common::proto::p2p_relay::RelayMsg;
 use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
@@ -44,8 +46,10 @@ use crate::data::identity::Identity;
 use crate::mls::group::MlsGroupHandle;
 use crate::mls::provider::PromtuzMlsProvider;
 use disco::DiscoKey;
+use signal::Offer;
 use socket::Poke;
 use socket::PokeSender;
+use socket::TurnRoutes;
 
 /// Inbound P2P candidate offer, routed from the MLS dispatch
 /// (`quic/server.rs`) to the session waiting for that peer.
@@ -59,6 +63,9 @@ const PEER_SNI: &str = "peer";
 /// relay, and the auto-accept side needs a round trip to answer.
 const SIGNAL_TIMEOUT: Duration = Duration::from_secs(30);
 const PUNCH_TIMEOUT: Duration = Duration::from_secs(10);
+/// The acceptor waits this long for the inbound connection — long enough for
+/// the dialer to exhaust its punch window and fall back to TURN.
+const ACCEPT_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// Peers we're mid-connect to. Guards against a second session (e.g. the
 /// auto-accept below) racing a button-initiated one for the same peer.
@@ -72,9 +79,12 @@ type Sessions = Arc<Mutex<HashMap<[u8; 8], mpsc::UnboundedSender<Poke>>>>;
 /// sender, and the routing table its receive loop feeds.
 struct P2pEndpoint {
     endpoint: Endpoint,
-    pokes: PokeSender,
-    port: u16,
+    pokes:    PokeSender,
+    port:     u16,
     sessions: Sessions,
+    /// Token → synthetic-address routing for TURN-bridged sessions, shared
+    /// with the socket's send/recv demux.
+    turn:     Arc<Mutex<TurnRoutes>>,
 }
 
 static P2P: OnceCell<P2pEndpoint> = OnceCell::new();
@@ -84,11 +94,12 @@ static P2P: OnceCell<P2pEndpoint> = OnceCell::new();
 /// runtime.
 fn endpoint() -> Result<&'static P2pEndpoint> {
     P2P.get_or_try_init(|| {
-        let (endpoint, pokes, mut inbox) = socket::build_endpoint()?;
-        let port = endpoint.local_addr()?.port();
-        log::info!("P2P: endpoint bound to {:?}", endpoint.local_addr());
+        let built = socket::build_endpoint()?;
+        let port = built.endpoint.local_addr()?.port();
+        log::info!("P2P: endpoint bound to {:?}", built.endpoint.local_addr());
         let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
 
+        let mut inbox = built.inbox;
         let routes = sessions.clone();
         RUNTIME.spawn(async move {
             while let Some((src, bytes)) = inbox.recv().await {
@@ -100,14 +111,20 @@ fn endpoint() -> Result<&'static P2pEndpoint> {
             }
         });
 
-        Ok(P2pEndpoint { endpoint, pokes, port, sessions })
+        Ok(P2pEndpoint {
+            endpoint: built.endpoint,
+            pokes: built.pokes,
+            port,
+            sessions,
+            turn: built.turn,
+        })
     })
 }
 
-/// The shared disco key for `peer` — the same 40 bytes both sides derive
-/// from the MLS group exporter (32-byte AEAD key + 8-byte channel tag), so
-/// no separate key exchange is needed.
-fn disco_key(peer: &[u8; 32]) -> Result<DiscoKey> {
+/// The shared disco key + TURN token for `peer`, both derived from the MLS
+/// group exporter so neither needs a separate exchange: the 40-byte disco
+/// secret (32-byte AEAD key + 8-byte channel tag) and a 16-byte TURN token.
+fn session_secrets(peer: &[u8; 32]) -> Result<(DiscoKey, [u8; 16])> {
     let provider = PromtuzMlsProvider::shared();
     let gid = Contact::get(peer)
         .and_then(|c| c.inner.mls_group_id)
@@ -122,7 +139,20 @@ fn disco_key(peer: &[u8; 32]) -> Result<DiscoKey> {
     key.copy_from_slice(&secret[..32]);
     let mut chan = [0u8; 8];
     chan.copy_from_slice(&secret[32..40]);
-    Ok(DiscoKey::new(&key, chan))
+    let tsec = group
+        .export_secret(&provider, "promtuz/p2p/turn", &[], 16)
+        .map_err(|e| anyhow!("export turn token: {e}"))?;
+    let mut token = [0u8; 16];
+    token.copy_from_slice(&tsec[..16]);
+    Ok((DiscoKey::new(&key, chan), token))
+}
+
+/// Our home relay's address — where the TURN bridge lives (assist shares
+/// the relay's QUIC port). `None` if we have no relay on record.
+fn home_relay_turn_addr() -> Option<SocketAddr> {
+    let relay = crate::data::relay::Relay::fetch_best().ok()?;
+    let ip: IpAddr = relay.host.parse().ok()?;
+    Some(SocketAddr::new(ip, relay.port))
 }
 
 /// A live direct connection to a peer.
@@ -176,7 +206,7 @@ pub async fn connect(peer: [u8; 32]) -> Result<PeerLink> {
 
 async fn connect_inner(peer: [u8; 32]) -> Result<PeerLink> {
     let ep = endpoint()?;
-    let key = disco_key(&peer)?;
+    let (key, token) = session_secrets(&peer)?;
     let chan = key.channel();
 
     // Route this session's pokes and listen for the peer's offer before we
@@ -185,9 +215,10 @@ async fn connect_inner(peer: [u8; 32]) -> Result<PeerLink> {
     ep.sessions.lock().insert(chan, poke_tx);
     let mut offers = signal::listen(peer);
 
-    let result = run_session(ep, key, poke_rx, &mut offers, peer).await;
+    let result = run_session(ep, key, token, poke_rx, &mut offers, peer).await;
 
     ep.sessions.lock().remove(&chan);
+    ep.turn.lock().unregister(&token);
     signal::stop(peer);
 
     // Prove the link both ways as part of connecting (dialer pings, acceptor
@@ -201,46 +232,72 @@ async fn connect_inner(peer: [u8; 32]) -> Result<PeerLink> {
 async fn run_session(
     ep: &'static P2pEndpoint,
     key: DiscoKey,
+    token: [u8; 16],
     mut poke_rx: mpsc::UnboundedReceiver<Poke>,
-    offers: &mut mpsc::UnboundedReceiver<Vec<SocketAddr>>,
+    offers: &mut mpsc::UnboundedReceiver<Offer>,
     peer: [u8; 32],
 ) -> Result<PeerLink> {
-    // Publish our candidates, wait for theirs.
-    signal::send_offer(peer, candidate::local_candidates(ep.port)).await?;
-    let peer_cands = timeout(SIGNAL_TIMEOUT, offers.recv())
+    // Publish our candidates + home relay, wait for theirs.
+    let our_relay = home_relay_turn_addr();
+    signal::send_offer(peer, candidate::local_candidates(ep.port), our_relay).await?;
+    let offer = timeout(SIGNAL_TIMEOUT, offers.recv())
         .await
         .map_err(|_| anyhow!("timed out waiting for peer candidates"))?
         .ok_or_else(|| anyhow!("candidate listener closed"))?;
+    let peer_cands = offer.candidates;
 
     let our_ipk = Identity::get().ok_or_else(|| anyhow!("no identity"))?.ipk();
-    let role = if our_ipk < peer { "dialer" } else { "acceptor" };
+    let dialer = our_ipk < peer;
     log::info!(
         "P2P[{}]: {} — {} peer candidates: {:?}",
         hex::encode(&peer[..4]),
-        role,
+        if dialer { "dialer" } else { "acceptor" },
         peer_cands.len(),
         peer_cands
     );
 
-    if our_ipk < peer {
-        // Dialer: punch, then connect to the address that answered.
-        let addr = punch::punch(&ep.pokes, &mut poke_rx, key, peer_cands, PUNCH_TIMEOUT)
-            .await
-            .ok_or_else(|| anyhow!("hole-punch failed"))?;
-        log::info!("P2P[{}]: punched, dialing {}", hex::encode(&peer[..4]), addr);
+    // TURN fallback: bridge through the dialer's home relay — both ends must
+    // use the same one. Register it now so it's ready if the punch fails, and
+    // send a TurnAlloc so the relay learns our address for the bridge.
+    let turn_relay = if dialer { our_relay } else { offer.relay };
+    let turn_synth = match turn_relay {
+        Some(tr) => {
+            let synth = ep.turn.lock().register(token, tr);
+            let _ = ep.pokes.send(tr, &RelayMsg::TurnAlloc { token }.encode()).await;
+            Some(synth)
+        },
+        None => None,
+    };
+
+    if dialer {
+        // Dialer: punch, then connect to whichever path opened — the
+        // validated direct address, else the TURN bridge's synthetic address.
+        let punched = punch::punch(&ep.pokes, &mut poke_rx, key, peer_cands, PUNCH_TIMEOUT).await;
+        let addr = match (punched, turn_synth) {
+            (Some(a), _) => {
+                log::info!("P2P[{}]: punched, dialing {}", hex::encode(&peer[..4]), a);
+                a
+            },
+            (None, Some(s)) => {
+                log::info!("P2P[{}]: punch failed, dialing via TURN", hex::encode(&peer[..4]));
+                s
+            },
+            (None, None) => bail!("hole-punch failed and no relay for TURN"),
+        };
         let conn = ep.endpoint.connect(addr, PEER_SNI)?.await?;
         Ok(PeerLink { conn, dialer: true })
     } else {
         // Acceptor: run the punch in the background purely to open our NAT
         // (its validation result doesn't matter — the hole is what counts),
-        // and accept the dialer's connection.
+        // and accept the dialer's connection — direct, or presented from the
+        // synthetic address by the socket if it arrived over TURN.
         let pokes = ep.pokes.clone();
         let engine = RUNTIME.spawn(async move {
             let mut rx = poke_rx;
             let _ = punch::punch(&pokes, &mut rx, key, peer_cands, PUNCH_TIMEOUT).await;
         });
         log::info!("P2P[{}]: acceptor — waiting for inbound QUIC", hex::encode(&peer[..4]));
-        let incoming = timeout(PUNCH_TIMEOUT, ep.endpoint.accept())
+        let incoming = timeout(ACCEPT_TIMEOUT, ep.endpoint.accept())
             .await
             .map_err(|_| anyhow!("timed out waiting for inbound connection"))?
             .ok_or_else(|| anyhow!("endpoint closed"))?;
@@ -250,10 +307,10 @@ async fn run_session(
             incoming.remote_address()
         );
         // ponytail: MVP accepts the first inbound. Only this peer knows our
-        // punched address (we sent candidates over E2E MLS), and peer TLS
-        // gates on a valid IPK cert — but the real filter is matching the
-        // accepted connection's IPK to `peer`; add when >1 concurrent
-        // session is possible.
+        // punched address (candidates went over E2E MLS) and the TURN token
+        // (MLS-derived), and peer TLS gates on a valid IPK cert — but the
+        // real filter is matching the accepted connection's IPK to `peer`;
+        // add when >1 concurrent session is possible.
         let conn = incoming.accept()?.await?;
         engine.abort();
         Ok(PeerLink { conn, dialer: false })

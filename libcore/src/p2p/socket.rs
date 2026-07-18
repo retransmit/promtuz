@@ -1,20 +1,20 @@
-//! The P2P socket: one UDP port that carries both QUIC and our disco
-//! pokes, so the NAT hole a poke opens is the one the QUIC handshake
-//! reuses.
+//! The P2P socket: one UDP port that carries QUIC, our disco pokes, and
+//! relay-assist datagrams, so the NAT hole a poke opens is the one the QUIC
+//! handshake reuses.
 //!
-//! On receive it splits the two: a datagram that looks like disco
-//! ([`disco::peek_channel`]) is handed to the punch layer over `inbox`
-//! and never reaches quinn; everything else is a QUIC packet. Pokes go
-//! out through [`PokeSender`] on the same socket. quinn drives QUIC
-//! through the [`quinn::AsyncUdpSocket`] trait as usual, and
-//! `grease_quic_bit(false)` (set in [`build_endpoint`]) makes it drop any
-//! stray poke that reaches it.
+//! On receive it splits them: a datagram that looks like disco
+//! ([`disco::peek_channel`]) goes to the punch layer over `inbox`; a
+//! relay-assist `TurnData` datagram is unwrapped and presented to quinn as
+//! if it came direct from the peer's synthetic address ([`TurnRoutes`]);
+//! everything else is a QUIC packet. Pokes and TURN sends go out through
+//! [`PokeSender`] / [`AsyncUdpSocket::try_send`] on the same socket.
 //!
-//! ponytail: naive one-datagram-per-recv, no GSO/GRO — fine for the
-//! pokes and the handshake. If bulk device-to-device transfer throughput
-//! needs it, back this with `quinn::udp::UdpSocketState` and split GRO
-//! batches by stride before the disco/QUIC demux.
+//! ponytail: naive one-datagram-per-recv, no GSO/GRO — fine for the pokes
+//! and the handshake. If bulk device-to-device transfer throughput needs
+//! it, back this with `quinn::udp::UdpSocketState` and split GRO batches by
+//! stride before the demux.
 
+use std::collections::HashMap;
 use std::io;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
@@ -24,6 +24,8 @@ use std::task::Context;
 use std::task::Poll;
 
 use anyhow::Result;
+use common::proto::p2p_relay::RelayMsg;
+use parking_lot::Mutex;
 use quinn::AsyncUdpSocket;
 use quinn::Endpoint;
 use quinn::EndpointConfig;
@@ -41,8 +43,68 @@ use crate::quic::peer_identity::PeerIdentity;
 /// An inbound disco poke: the sender's address and the raw sealed bytes.
 pub type Poke = (SocketAddr, Vec<u8>);
 
-/// Sends disco pokes on the P2P socket — the same port quinn uses, so
-/// pokes and the QUIC handshake share one NAT mapping.
+/// Where a TURN-bridged session's quinn packets really go.
+#[derive(Debug)]
+struct Route {
+    relay: SocketAddr,
+    token: [u8; 16],
+}
+
+/// Maps between TURN bridge tokens and the synthetic peer addresses quinn
+/// uses for them. Shared between the session manager (which registers a
+/// bridge) and the socket (which wraps outbound and unwraps inbound TURN
+/// datagrams). The synthetic address is a pure quinn-side handle — packets
+/// to it are redirected to the relay, never sent to it.
+#[derive(Debug, Default)]
+pub struct TurnRoutes {
+    by_synth: HashMap<SocketAddr, Route>,
+    by_token: HashMap<[u8; 16], SocketAddr>,
+    next:     u32,
+}
+
+impl TurnRoutes {
+    /// Register (idempotently) a bridge to `relay` under `token`, returning
+    /// the synthetic, unreachable peer address quinn should dial/accept for
+    /// it.
+    pub fn register(&mut self, token: [u8; 16], relay: SocketAddr) -> SocketAddr {
+        if let Some(&synth) = self.by_token.get(&token) {
+            return synth;
+        }
+        self.next += 1;
+        let n = self.next;
+        // A unique address in the RFC 6666 discard prefix (100::/64): never
+        // routable, never a real candidate — a pure quinn-side handle.
+        let synth = SocketAddr::new(
+            Ipv6Addr::new(0x0100, 0, 0, 0, 0, 0, (n >> 16) as u16, n as u16).into(),
+            9,
+        );
+        self.by_synth.insert(synth, Route { relay, token });
+        self.by_token.insert(token, synth);
+        synth
+    }
+
+    pub fn unregister(&mut self, token: &[u8; 16]) {
+        if let Some(synth) = self.by_token.remove(token) {
+            self.by_synth.remove(&synth);
+        }
+    }
+
+    /// If `dest` is a synthetic TURN address, the `(relay, token)` its quinn
+    /// packets must be wrapped and sent to.
+    fn wrap_target(&self, dest: SocketAddr) -> Option<(SocketAddr, [u8; 16])> {
+        self.by_synth.get(&dest).map(|r| (r.relay, r.token))
+    }
+
+    /// The synthetic address for an inbound TURN datagram's token, if we
+    /// have a session for it.
+    fn synth_for(&self, token: &[u8; 16]) -> Option<SocketAddr> {
+        self.by_token.get(token).copied()
+    }
+}
+
+/// Sends disco pokes (and relay-assist control) on the P2P socket — the
+/// same port quinn uses, so pokes and the QUIC handshake share one NAT
+/// mapping.
 #[derive(Clone)]
 pub struct PokeSender {
     io: Arc<UdpSocket>,
@@ -54,19 +116,22 @@ impl PokeSender {
     }
 }
 
-/// The custom socket handed to quinn. Peels disco off the QUIC stream.
+/// The custom socket handed to quinn. Peels disco + TURN off the QUIC
+/// stream.
 #[derive(Debug)]
 pub struct PunchSocket {
-    io: Arc<UdpSocket>,
+    io:       Arc<UdpSocket>,
     inbox_tx: mpsc::UnboundedSender<Poke>,
+    turn:     Arc<Mutex<TurnRoutes>>,
 }
 
 /// What one bound P2P socket yields: the socket for quinn, a poke sender,
-/// and the inbound-poke stream for the punch layer.
+/// the inbound-poke stream, and the shared TURN routing table.
 pub struct Bound {
     pub socket: Arc<PunchSocket>,
-    pub pokes: PokeSender,
-    pub inbox: mpsc::UnboundedReceiver<Poke>,
+    pub pokes:  PokeSender,
+    pub inbox:  mpsc::UnboundedReceiver<Poke>,
+    pub turn:   Arc<Mutex<TurnRoutes>>,
 }
 
 impl PunchSocket {
@@ -77,10 +142,12 @@ impl PunchSocket {
         std_sock.set_nonblocking(true)?;
         let io = Arc::new(UdpSocket::from_std(std_sock)?);
         let (inbox_tx, inbox) = mpsc::unbounded_channel();
+        let turn = Arc::new(Mutex::new(TurnRoutes::default()));
         Ok(Bound {
-            socket: Arc::new(Self { io: io.clone(), inbox_tx }),
+            socket: Arc::new(Self { io: io.clone(), inbox_tx, turn: turn.clone() }),
             pokes: PokeSender { io },
             inbox,
+            turn,
         })
     }
 }
@@ -93,23 +160,23 @@ impl AsyncUdpSocket for PunchSocket {
     fn try_send(&self, transmit: &udp::Transmit) -> io::Result<()> {
         // max_transmit_segments defaults to 1, so quinn never sets a GSO
         // segment_size — contents is a single datagram.
-        let r = self.io.try_send_to(transmit.contents, transmit.destination).map(|_| ());
-        if let Err(e) = &r
-            && e.kind() != io::ErrorKind::WouldBlock
-        {
-            // TEMP diagnostic: a failing QUIC send stalls the handshake.
-            log::warn!("P2P sock: send {}B to {} failed: {e}", transmit.contents.len(), transmit.destination);
+        let wrap = self.turn.lock().wrap_target(transmit.destination);
+        match wrap {
+            // TURN path: wrap the QUIC datagram so the relay forwards it to
+            // the peer under this bridge's token.
+            Some((relay, token)) => {
+                let framed = RelayMsg::TurnData { token, payload: transmit.contents }.encode();
+                self.io.try_send_to(&framed, relay).map(|_| ())
+            },
+            None => self.io.try_send_to(transmit.contents, transmit.destination).map(|_| ()),
         }
-        r
     }
 
     fn poll_recv(
-        &self,
-        cx: &mut Context,
-        bufs: &mut [io::IoSliceMut<'_>],
-        meta: &mut [udp::RecvMeta],
+        &self, cx: &mut Context, bufs: &mut [io::IoSliceMut<'_>], meta: &mut [udp::RecvMeta],
     ) -> Poll<io::Result<usize>> {
-        // Drain pokes; return on the first real QUIC datagram (or Pending).
+        // Drain disco + TURN; return on the first real QUIC datagram (or
+        // Pending).
         loop {
             let (len, src) = {
                 let mut rb = tokio::io::ReadBuf::new(&mut bufs[0]);
@@ -124,10 +191,25 @@ impl AsyncUdpSocket for PunchSocket {
                 let _ = self.inbox_tx.send((src, bufs[0][..len].to_vec()));
                 continue;
             }
+            // Relay-assist? Only TURN data is a QUIC datagram bound for
+            // quinn. Extract just Copy data so bufs[0]'s borrow ends before
+            // we may rewrite it in place.
+            let turn = match RelayMsg::decode(&bufs[0][..len]) {
+                Some(RelayMsg::TurnData { token, payload }) => Some((token, payload.len())),
+                Some(_) => continue, // StunResp etc. — not a QUIC datagram
+                None => None,
+            };
+            if let Some((token, plen)) = turn {
+                let Some(synth) = self.turn.lock().synth_for(&token) else { continue };
+                // Present the bridged QUIC payload to quinn as if it came
+                // direct from the peer's synthetic address.
+                let off = len - plen;
+                bufs[0].copy_within(off..len, 0);
+                meta[0] =
+                    udp::RecvMeta { addr: synth, len: plen, stride: plen, ecn: None, dst_ip: None };
+                return Poll::Ready(Ok(1));
+            }
             meta[0] = udp::RecvMeta { addr: src, len, stride: len, ecn: None, dst_ip: None };
-            // TEMP diagnostic: shows whether the peer's QUIC Initial actually
-            // reaches this socket (vs. only disco crossing).
-            log::info!("P2P sock: <- quic {len}B from {src}");
             return Poll::Ready(Ok(1));
         }
     }
@@ -149,11 +231,19 @@ impl UdpPoller for PokePoller {
     }
 }
 
+/// A freshly built P2P endpoint and the handles the session manager needs.
+pub struct BuiltEndpoint {
+    pub endpoint: Endpoint,
+    pub pokes:    PokeSender,
+    pub inbox:    mpsc::UnboundedReceiver<Poke>,
+    pub turn:     Arc<Mutex<TurnRoutes>>,
+}
+
 /// Build the P2P endpoint on a fresh punch socket. Client and server
 /// configs are both the self-signed peer identity — we dial some peers
 /// and accept others on the one endpoint. `grease_quic_bit(false)` lets a
 /// stray poke be dropped rather than mis-parsed as QUIC.
-pub fn build_endpoint() -> Result<(Endpoint, PokeSender, mpsc::UnboundedReceiver<Poke>)> {
+pub fn build_endpoint() -> Result<BuiltEndpoint> {
     let bound = PunchSocket::bind((Ipv6Addr::UNSPECIFIED, 0).into())?;
     let identity = PeerIdentity::initialize()?;
 
@@ -167,7 +257,7 @@ pub fn build_endpoint() -> Result<(Endpoint, PokeSender, mpsc::UnboundedReceiver
         Arc::new(TokioRuntime),
     )?;
     endpoint.set_default_client_config(build_peer_client_cfg(&identity)?);
-    Ok((endpoint, bound.pokes, bound.inbox))
+    Ok(BuiltEndpoint { endpoint, pokes: bound.pokes, inbox: bound.inbox, turn: bound.turn })
 }
 
 #[cfg(test)]
@@ -179,12 +269,29 @@ mod tests {
 
     fn empty_meta() -> udp::RecvMeta {
         udp::RecvMeta {
-            addr: (Ipv4Addr::UNSPECIFIED, 0).into(),
-            len: 0,
+            addr:   (Ipv4Addr::UNSPECIFIED, 0).into(),
+            len:    0,
             stride: 0,
-            ecn: None,
+            ecn:    None,
             dst_ip: None,
         }
+    }
+
+    #[test]
+    fn turn_route_maps_token_and_synth() {
+        let mut r = TurnRoutes::default();
+        let relay: SocketAddr = "9.9.9.9:443".parse().unwrap();
+        let s1 = r.register([1; 16], relay);
+        let s2 = r.register([2; 16], relay);
+        assert_ne!(s1, s2); // distinct synthetic address per token
+        assert_eq!(r.register([1; 16], relay), s1); // idempotent
+        assert_eq!(r.wrap_target(s1), Some((relay, [1; 16])));
+        assert_eq!(r.synth_for(&[1; 16]), Some(s1));
+        // a real (non-synthetic) address passes straight through
+        assert_eq!(r.wrap_target("1.2.3.4:5".parse().unwrap()), None);
+        r.unregister(&[1; 16]);
+        assert_eq!(r.wrap_target(s1), None);
+        assert_eq!(r.synth_for(&[1; 16]), None);
     }
 
     /// A poke reaches the punch inbox; a non-poke surfaces to quinn. Runs
@@ -210,7 +317,7 @@ mod tests {
                 match std::future::poll_fn(|cx| sock_b.poll_recv(cx, &mut bufs, &mut meta)).await {
                     Ok(_) => {
                         let _ = quic_tx.send((meta[0].addr, bufs[0][..meta[0].len].to_vec()));
-                    }
+                    },
                     Err(_) => break,
                 }
             }

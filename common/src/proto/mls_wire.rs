@@ -105,11 +105,15 @@ pub enum AppPayload {
     /// inbound MLS message, which proves the group works end-to-end and flips
     /// the inviter's contact PENDING → PAIRED. Not stored as a message.
     PairAck,
-    /// Peer-to-peer connection offer: the sender's candidate addresses
-    /// for a direct QUIC hole-punch. A control message — routed to the
+    /// Peer-to-peer connection offer: the sender's candidate addresses for a
+    /// direct QUIC hole-punch, plus its home relay's address for the TURN
+    /// fallback when the punch can't land. A control message — routed to the
     /// P2P transport, never shown as a chat message. Appended last so
     /// postcard's ordinal tags for older variants hold.
-    P2p { candidates: Vec<SocketAddr> },
+    P2p {
+        candidates: Vec<SocketAddr>,
+        relay:      Option<SocketAddr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

@@ -19,20 +19,27 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
+/// A peer's connection offer: where to reach them directly, plus their home
+/// relay for the TURN fallback.
+#[derive(Debug, Clone)]
+pub struct Offer {
+    pub candidates: Vec<SocketAddr>,
+    pub relay:      Option<SocketAddr>,
+}
+
 /// Peer IPK → the live session waiting for that peer's candidate offer.
-type Listeners = Mutex<HashMap<[u8; 32], mpsc::UnboundedSender<Vec<SocketAddr>>>>;
+type Listeners = Mutex<HashMap<[u8; 32], mpsc::UnboundedSender<Offer>>>;
 static LISTENERS: Lazy<Listeners> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Offers that arrived before their session was listening. Best-effort,
 /// no TTL — the next [`listen`] drains it, [`stop`] clears it. Fine for
 /// the near-simultaneous connect the transport does; a real freshness
 /// bound comes with the wake-rendezvous later.
-static PENDING: Lazy<Mutex<HashMap<[u8; 32], Vec<SocketAddr>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static PENDING: Lazy<Mutex<HashMap<[u8; 32], Offer>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Start listening for `peer`'s candidate offers. Returns the receiver;
 /// any offer that already arrived is delivered immediately.
-pub fn listen(peer: [u8; 32]) -> mpsc::UnboundedReceiver<Vec<SocketAddr>> {
+pub fn listen(peer: [u8; 32]) -> mpsc::UnboundedReceiver<Offer> {
     let (tx, rx) = mpsc::unbounded_channel();
     LISTENERS.lock().insert(peer, tx.clone());
     if let Some(buffered) = PENDING.lock().remove(&peer) {
@@ -44,14 +51,15 @@ pub fn listen(peer: [u8; 32]) -> mpsc::UnboundedReceiver<Vec<SocketAddr>> {
 
 /// Route an inbound candidate offer to the session listening for `from`,
 /// or buffer it for a session that registers momentarily later.
-pub fn deliver(from: [u8; 32], candidates: Vec<SocketAddr>) {
+pub fn deliver(from: [u8; 32], candidates: Vec<SocketAddr>, relay: Option<SocketAddr>) {
+    let offer = Offer { candidates, relay };
     let listener = LISTENERS.lock().get(&from).cloned();
     match listener {
-        Some(tx) if tx.send(candidates.clone()).is_ok() => {
+        Some(tx) if tx.send(offer.clone()).is_ok() => {
             log::info!(
                 "P2P: delivered offer from {} ({} candidates) to session",
                 hex::encode(&from[..4]),
-                candidates.len()
+                offer.candidates.len()
             );
         },
         _ => {
@@ -61,10 +69,10 @@ pub fn deliver(from: [u8; 32], candidates: Vec<SocketAddr>) {
                 "P2P: offer from {} ({} candidates), no session (listening for {:?}) — \
                  buffering + auto-accepting",
                 hex::encode(&from[..4]),
-                candidates.len(),
+                offer.candidates.len(),
                 listening
             );
-            PENDING.lock().insert(from, candidates);
+            PENDING.lock().insert(from, offer);
             // Auto-accept: the peer wants a direct link and we're not already
             // reaching for them, so start a session. It drains the buffered
             // offer and answers. (Consent gate — may_connect — comes later.)
@@ -84,15 +92,19 @@ pub fn stop(peer: [u8; 32]) {
     PENDING.lock().remove(&peer);
 }
 
-/// Send our candidate addresses to `peer` over the MLS channel.
-pub async fn send_offer(peer: [u8; 32], candidates: Vec<SocketAddr>) -> Result<()> {
+/// Send our candidate addresses (and home relay, for TURN) to `peer` over
+/// the MLS channel.
+pub async fn send_offer(
+    peer: [u8; 32], candidates: Vec<SocketAddr>, relay: Option<SocketAddr>,
+) -> Result<()> {
     log::info!(
-        "P2P: sending offer to {} ({} candidates: {:?})",
+        "P2P: sending offer to {} ({} candidates: {:?}, relay {:?})",
         hex::encode(&peer[..4]),
         candidates.len(),
-        candidates
+        candidates,
+        relay
     );
-    crate::messaging::send_control(peer, AppPayload::P2p { candidates }).await
+    crate::messaging::send_control(peer, AppPayload::P2p { candidates, relay }).await
 }
 
 #[cfg(test)]
@@ -105,8 +117,8 @@ mod tests {
         let mut rx = listen(peer);
 
         let cands: Vec<SocketAddr> = vec!["1.2.3.4:5".parse().unwrap()];
-        deliver(peer, cands.clone());
-        assert_eq!(rx.try_recv().unwrap(), cands);
+        deliver(peer, cands.clone(), None);
+        assert_eq!(rx.try_recv().unwrap().candidates, cands);
         stop(peer);
     }
 
@@ -114,11 +126,14 @@ mod tests {
     fn offer_before_listener_is_buffered_then_drained() {
         let peer = [43u8; 32];
         let cands: Vec<SocketAddr> = vec!["9.9.9.9:9".parse().unwrap()];
+        let relay: SocketAddr = "5.5.5.5:443".parse().unwrap();
         // arrives before anyone listens → buffered, no panic
-        deliver(peer, cands.clone());
-        // the late session still gets it
+        deliver(peer, cands.clone(), Some(relay));
+        // the late session still gets it, relay included
         let mut rx = listen(peer);
-        assert_eq!(rx.try_recv().unwrap(), cands);
+        let got = rx.try_recv().unwrap();
+        assert_eq!(got.candidates, cands);
+        assert_eq!(got.relay, Some(relay));
         stop(peer);
     }
 }
