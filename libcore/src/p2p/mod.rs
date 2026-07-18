@@ -199,6 +199,15 @@ async fn reflexive_probe(
     }
 }
 
+/// Aborts a background task when dropped — bounds a session's TURN
+/// keepalive to the session's lifetime across every return path.
+struct AbortGuard(tokio::task::JoinHandle<()>);
+impl Drop for AbortGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// A live direct connection to a peer.
 pub struct PeerLink {
     conn: Connection,
@@ -306,16 +315,30 @@ async fn run_session(
     );
 
     // TURN fallback: bridge through the dialer's home relay — both ends must
-    // use the same one. Register it now so it's ready if the punch fails, and
-    // send a TurnAlloc so the relay learns our address for the bridge.
+    // use the same one. Register it now so it's ready if the punch fails.
     let turn_relay = if dialer { our_relay } else { offer.relay };
-    let turn_synth = match turn_relay {
+    let (turn_synth, _keepalive) = match turn_relay {
         Some(tr) => {
             let synth = ep.turn.lock().register(token, tr);
-            let _ = ep.pokes.send(tr, &RelayMsg::TurnAlloc { token }.encode()).await;
-            Some(synth)
+            // Re-send the TurnAlloc every few seconds to keep the NAT mapping
+            // to the relay warm. A symmetric NAT (the case that forced TURN)
+            // drops an idle per-destination mapping, and the ~10s punch window
+            // is all relay-silence — without this the return path is stranded
+            // at a stale source the relay never registered.
+            let pokes = ep.pokes.clone();
+            let alloc = RelayMsg::TurnAlloc { token }.encode();
+            let keepalive = RUNTIME.spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(4));
+                loop {
+                    tick.tick().await; // fires immediately, then every 4s
+                    if pokes.send(tr, &alloc).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            (Some(synth), Some(AbortGuard(keepalive)))
         },
-        None => None,
+        None => (None, None),
     };
 
     if dialer {
