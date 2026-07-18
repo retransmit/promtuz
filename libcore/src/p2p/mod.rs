@@ -137,10 +137,12 @@ fn endpoint() -> Result<&'static P2pEndpoint> {
     })
 }
 
-/// The shared disco key + TURN token for `peer`, both derived from the MLS
-/// group exporter so neither needs a separate exchange: the 40-byte disco
-/// secret (32-byte AEAD key + 8-byte channel tag) and a 16-byte TURN token.
-fn session_secrets(peer: &[u8; 32]) -> Result<(DiscoKey, [u8; 16])> {
+/// The shared disco key for `peer`, derived from the MLS group exporter (a
+/// 40-byte secret → 32-byte AEAD key + 8-byte channel tag) so the punch
+/// needs no separate key exchange. The TURN token is *not* derived here — it
+/// rides the offer (see [`run_session`]), so the bridge pairs even if the
+/// two sides' groups/epochs differ.
+fn disco_key(peer: &[u8; 32]) -> Result<DiscoKey> {
     let provider = PromtuzMlsProvider::shared();
     let gid = Contact::get(peer)
         .and_then(|c| c.inner.mls_group_id)
@@ -155,12 +157,16 @@ fn session_secrets(peer: &[u8; 32]) -> Result<(DiscoKey, [u8; 16])> {
     key.copy_from_slice(&secret[..32]);
     let mut chan = [0u8; 8];
     chan.copy_from_slice(&secret[32..40]);
-    let tsec = group
-        .export_secret(&provider, "promtuz/p2p/turn", &[], 16)
-        .map_err(|e| anyhow!("export turn token: {e}"))?;
-    let mut token = [0u8; 16];
-    token.copy_from_slice(&tsec[..16]);
-    Ok((DiscoKey::new(&key, chan), token))
+    Ok(DiscoKey::new(&key, chan))
+}
+
+/// A fresh random TURN bridge token.
+fn rand_token() -> [u8; 16] {
+    use ed25519_dalek::ed25519::signature::rand_core::OsRng;
+    use ed25519_dalek::ed25519::signature::rand_core::RngCore;
+    let mut t = [0u8; 16];
+    OsRng.fill_bytes(&mut t);
+    t
 }
 
 /// Our home relay's address — where the TURN bridge lives (assist shares
@@ -208,6 +214,15 @@ struct AbortGuard(tokio::task::JoinHandle<()>);
 impl Drop for AbortGuard {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+/// Deregisters a session's TURN route when dropped, across every return
+/// path (the token is decided inside the session, not the caller).
+struct TurnGuard(&'static P2pEndpoint, [u8; 16]);
+impl Drop for TurnGuard {
+    fn drop(&mut self) {
+        self.0.turn.lock().unregister(&self.1);
     }
 }
 
@@ -262,7 +277,7 @@ pub async fn connect(peer: [u8; 32]) -> Result<PeerLink> {
 
 async fn connect_inner(peer: [u8; 32]) -> Result<PeerLink> {
     let ep = endpoint()?;
-    let (key, token) = session_secrets(&peer)?;
+    let key = disco_key(&peer)?;
     let chan = key.channel();
 
     // Route this session's pokes and listen for the peer's offer before we
@@ -271,10 +286,9 @@ async fn connect_inner(peer: [u8; 32]) -> Result<PeerLink> {
     ep.sessions.lock().insert(chan, poke_tx);
     let mut offers = signal::listen(peer);
 
-    let result = run_session(ep, key, token, poke_rx, &mut offers, peer).await;
+    let result = run_session(ep, key, poke_rx, &mut offers, peer).await;
 
     ep.sessions.lock().remove(&chan);
-    ep.turn.lock().unregister(&token);
     signal::stop(peer);
 
     // Prove the link both ways as part of connecting (dialer pings, acceptor
@@ -288,7 +302,6 @@ async fn connect_inner(peer: [u8; 32]) -> Result<PeerLink> {
 async fn run_session(
     ep: &'static P2pEndpoint,
     key: DiscoKey,
-    token: [u8; 16],
     mut poke_rx: mpsc::UnboundedReceiver<Poke>,
     offers: &mut mpsc::UnboundedReceiver<Offer>,
     peer: [u8; 32],
@@ -307,14 +320,15 @@ async fn run_session(
     .await;
     let reflexive = *refl_rx.borrow();
 
-    // Publish our candidates (local + reflexive) and home relay, wait for
-    // theirs.
+    // Publish our candidates (local + reflexive), home relay, and a random
+    // bridge token, wait for theirs.
     let our_relay = home_relay_turn_addr();
+    let my_token = rand_token();
     let mut cands = candidate::local_candidates(ep.port);
     if let Some(r) = reflexive {
         cands.push(r);
     }
-    signal::send_offer(peer, cands, our_relay).await?;
+    signal::send_offer(peer, cands, our_relay, my_token).await?;
     let offer = timeout(SIGNAL_TIMEOUT, offers.recv())
         .await
         .map_err(|_| anyhow!("timed out waiting for peer candidates"))?
@@ -331,19 +345,21 @@ async fn run_session(
         peer_cands
     );
 
-    // TURN fallback: bridge through the dialer's home relay — both ends must
-    // use the same one. Register it now so it's ready if the punch fails.
+    // TURN fallback: bridge through the dialer's home relay under the
+    // dialer's token — both ends must agree on relay + token. Register it now
+    // so it's ready if the punch fails.
+    let turn_token = if dialer { my_token } else { offer.token };
     let turn_relay = if dialer { our_relay } else { offer.relay };
-    let (turn_synth, _keepalive) = match turn_relay {
+    let (turn_synth, _guards) = match turn_relay {
         Some(tr) => {
-            let synth = ep.turn.lock().register(token, tr);
+            let synth = ep.turn.lock().register(turn_token, tr);
             // Re-send the TurnAlloc every few seconds to keep the NAT mapping
             // to the relay warm. A symmetric NAT (the case that forced TURN)
             // drops an idle per-destination mapping, and the ~10s punch window
             // is all relay-silence — without this the return path is stranded
             // at a stale source the relay never registered.
             let pokes = ep.pokes.clone();
-            let alloc = RelayMsg::TurnAlloc { token }.encode();
+            let alloc = RelayMsg::TurnAlloc { token: turn_token }.encode();
             let keepalive = RUNTIME.spawn(async move {
                 let mut tick = tokio::time::interval(Duration::from_secs(4));
                 loop {
@@ -353,7 +369,7 @@ async fn run_session(
                     }
                 }
             });
-            (Some(synth), Some(AbortGuard(keepalive)))
+            (Some(synth), Some((AbortGuard(keepalive), TurnGuard(ep, turn_token))))
         },
         None => (None, None),
     };
