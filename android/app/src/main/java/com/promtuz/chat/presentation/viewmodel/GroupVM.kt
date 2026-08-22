@@ -201,6 +201,34 @@ class GroupVM(app: AppVM) : ViewModel() {
             }
     }
 
+    /**
+     * Take this chat and its keys off the device, then step back to the home
+     * list. The group itself carries on for everyone else.
+     *
+     * The way out for a founder core would otherwise refuse: a group whose keys
+     * are broken can be neither managed nor left, so refusing to delete it only
+     * makes the trap permanent. Nothing detects that brokenness, though — the
+     * only gate is [ownerIsStuck] (founder, others still in), so
+     * every stuck founder is offered this, healthy group or not, and on a
+     * healthy one it leaves everybody in a group nobody can ever add to, remove
+     * from or rename. The dialog is where that gets said; a second call site
+     * owes the user the same warning.
+     *
+     * Local only — nobody is told and everyone else keeps the group.
+     */
+    fun deleteAnyway() = viewModelScope.launch {
+        _work.value = GroupWork.Busy
+        runCatching { CoreBridge.deleteConversation(conversation, force = true) }
+            .onSuccess {
+                _work.value = GroupWork.Idle
+                navigator.reset(Routes.App)
+            }
+            .onFailure {
+                Timber.tag(TAG).e(it, "force delete failed")
+                _work.value = GroupWork.Failed(it.reason("Could not delete this chat"))
+            }
+    }
+
     fun clearError() { _work.value = GroupWork.Idle }
 
     private companion object {

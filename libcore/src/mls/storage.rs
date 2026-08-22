@@ -25,6 +25,7 @@
 
 use std::sync::Arc;
 
+use openmls::prelude::GroupId;
 use openmls_traits::storage::traits;
 use openmls_traits::storage::StorageProvider;
 use openmls_traits::storage::CURRENT_VERSION;
@@ -420,6 +421,32 @@ impl PromtuzStorageProvider {
     }
     fn encode_key<K: Serialize>(key: &K) -> Result<Vec<u8>> {
         Self::encode(key)
+    }
+
+    /// Erase everything the storage layer holds for one group.
+    ///
+    /// A mop-up behind openmls's own `MlsGroup::delete` rather than a
+    /// substitute for it. Two things are past `delete`'s reach. The
+    /// `mls_group_size` sidecar, which is promtuz's own and kept by deltas, so
+    /// it outlives the rows it counted and keeps charging a group that no
+    /// longer exists against the per-group budget. And every row of a group too
+    /// broken to open — `delete` needs the group loaded first, so half-written
+    /// state has no other way out of the table. `EPOCH_KEY_PAIRS` filed under
+    /// an epoch other than the current one is the same story: `delete` names
+    /// only the epoch and leaf it is standing on.
+    ///
+    /// The leaf signing key is *not* among them, and must not be: it lives
+    /// under the empty group id (`SIGNATURE_KEY_PAIR` in the unscoped
+    /// keystore), which a 32-byte group id can never encode to. Scoping is
+    /// therefore by construction — see [`super::group::MlsGroupHandle::delete`].
+    pub(crate) fn forget_group(&self, group_id: &[u8; 32]) -> Result<()> {
+        let key = Self::encode_group_id(&GroupId::from_slice(group_id))?;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute("DELETE FROM mls_storage WHERE group_id = ?1", params![&key])?;
+        tx.execute("DELETE FROM mls_group_size WHERE group_id = ?1", params![&key])?;
+        tx.commit()?;
+        Ok(())
     }
 }
 

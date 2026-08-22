@@ -38,6 +38,22 @@ pub struct Partial {
     pub updated_at: u64,
 }
 
+impl Partial {
+    /// `DONE` *and* the bytes are still there — the question both readers of a
+    /// finished transfer actually ask.
+    ///
+    /// The state alone can't answer it. Clearing a chat unlinks the `.part`
+    /// while a live pull holds the fd, and that pull's next progress write puts
+    /// the row straight back, leaving `DONE` over a path that is gone. A
+    /// `file_id` is a content hash, so every later message carrying the same
+    /// content resolves to that row; nothing re-pulls a file the row calls
+    /// finished and [`gc_dead_partials`] spares `DONE`, so the hash would stay
+    /// poisoned for good. One `stat` per read settles it.
+    pub fn is_complete(&self) -> bool {
+        self.state == DONE && std::path::Path::new(&self.path).exists()
+    }
+}
+
 const MIGRATION_ARRAY: &[M] = &[M::up(
     r#"--sql
         CREATE TABLE retention (
@@ -188,6 +204,46 @@ pub fn gc_dead_partials(older_than: u64) -> Vec<String> {
     paths
 }
 
+/// Forget a receiver transfer outright — its bytes and its row — for a
+/// `file_id` no message points at any more.
+///
+/// The state-based [`gc_dead_partials`] can't do this: the case that matters is
+/// a `DONE` partial, which it spares by design. Both halves go together because
+/// a `file_id` is a content hash: a surviving `DONE` row would answer the same
+/// content arriving in some later message with a `local_path` to a file nobody
+/// kept.
+///
+/// Best-effort throughout — a caller clearing a chat is not failed over a file
+/// that won't unlink, and a `.part` that was never downloaded is simply absent.
+pub fn forget_partial(file_id: &[u8; 32]) {
+    let conn = TRANSFERS_DB.lock();
+    // The row's own `path` is what `get_media` hands out as `local_path`, so
+    // that is the file to remove. Only "no such row" is a plain miss; a read
+    // that failed says so. Either way the canonical location is where a `.part`
+    // is written, so it stays the file to try.
+    let sql = "SELECT path FROM partials WHERE file_id = ?1";
+    let path = match conn.query_row(sql, params![file_id], |r| r.get::<_, String>(0)) {
+        Ok(p) => p,
+        Err(rusqlite::Error::QueryReturnedNoRows) => partial_path(file_id),
+        Err(e) => {
+            log::warn!("transfer: partial path read failed: {e}");
+            partial_path(file_id)
+        },
+    };
+
+    // The row goes first. A DELETE that failed after the unlink would leave a
+    // `DONE` row standing over bytes that are gone; a row dropped while the
+    // `.part` survives only leaks disk, which the doc already accepts.
+    if let Err(e) = conn.execute("DELETE FROM partials WHERE file_id = ?1", params![file_id]) {
+        log::warn!("transfer: partial row for a forgotten file survives: {e}");
+    }
+    if let Err(e) = std::fs::remove_file(&path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("transfer: {path} left on disk: {e}");
+    }
+}
+
 /// Every `file_id` whose partial is resumable — HELD (sender was offline) or
 /// ACTIVE (a pull the process died mid-way, so nothing drives it now). The
 /// reconnect retry re-drives each; the in-memory DOWNLOADING guard skips any a
@@ -224,7 +280,10 @@ mod tests {
                 have: 0,
                 state,
                 path: partial_path(&fid),
-                updated_at: 0,
+                // Past any cutoff a sibling test sweeps with: `gc_dead_partials`
+                // reaps FAILED/HELD across the whole process-global DB, and this
+                // test is about which *states* resume, not about age.
+                updated_at: 9_000,
             })
             .unwrap();
         };
@@ -297,5 +356,64 @@ mod tests {
 
         assert!(partial_get(&[0xd3; 32]).is_some(), "fresh FAILED row spared");
         assert!(std::path::Path::new(&fresh).exists(), "fresh FAILED .part kept");
+    }
+
+    /// A file_id is a content hash, so a row outliving its bytes would tell a
+    /// later message carrying the same content that the file is DONE and on
+    /// disk. Row and bytes leave together or not at all.
+    #[test]
+    fn forget_partial_takes_the_row_and_the_bytes() {
+        let dir = std::env::temp_dir().join("promtuz-transfers-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+
+        let fid = [0xf1; 32];
+        let path = format!("{}/forget-f1.part", dir.display());
+        std::fs::write(&path, b"bytes").unwrap();
+        partial_put(&Partial {
+            file_id: fid,
+            source_ipk: [9u8; 32],
+            total: 5,
+            chunk_size: 5,
+            manifest: None,
+            have: 1,
+            // DONE is exactly the state gc_dead_partials refuses to touch.
+            state: DONE,
+            path: path.clone(),
+            updated_at: 9_000,
+        })
+        .unwrap();
+
+        forget_partial(&fid);
+
+        assert!(partial_get(&fid).is_none(), "the row is gone");
+        assert!(!std::path::Path::new(&path).exists(), "and so are the bytes");
+    }
+
+    /// Nothing re-pulls a file the row calls finished, so a `DONE` row that
+    /// outlived its `.part` would poison that content hash for good. Reading
+    /// the state without the disk is what makes that possible.
+    #[test]
+    fn a_done_row_without_its_bytes_is_not_complete() {
+        let path = std::env::temp_dir().join("promtuz-ghost.part").display().to_string();
+        let _ = std::fs::remove_file(&path);
+        let mut p = Partial {
+            file_id: [0xf2; 32],
+            source_ipk: [9u8; 32],
+            total: 5,
+            chunk_size: 5,
+            manifest: None,
+            have: 1,
+            state: DONE,
+            path: path.clone(),
+            updated_at: 9_000,
+        };
+
+        assert!(!p.is_complete(), "DONE over a file that isn't there is not done");
+        std::fs::write(&path, b"bytes").unwrap();
+        assert!(p.is_complete(), "DONE with its bytes is");
+        p.state = ACTIVE;
+        assert!(!p.is_complete(), "and a pull still running never is");
+        std::fs::remove_file(&path).unwrap();
     }
 }

@@ -59,6 +59,7 @@ fun HomeChatList(innerPadding: PaddingValues, appViewModel: AppVM, menuState: Ho
                 onPin = { ChatPrefs.togglePin(chat.conversationHex, !chat.pinned) },
                 onMute = { ChatPrefs.toggleMute(chat.conversationHex, !chat.muted) },
                 onMarkRead = { appViewModel.markConversationRead(chat.conversationHex) },
+                onClearHistory = { appViewModel.clearHistory(chat.conversationHex) },
                 onDelete = { appViewModel.deleteChat(chat) },
                 onLeaveAndDelete = { appViewModel.leaveAndDelete(chat) },
                 modifier = Modifier.animateItem(),

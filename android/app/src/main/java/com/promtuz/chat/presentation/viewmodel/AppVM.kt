@@ -2,6 +2,7 @@ package com.promtuz.chat.presentation.viewmodel
 
 import android.app.Application
 import android.content.Context
+import android.widget.Toast
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.navigation3.runtime.NavBackStack
@@ -15,6 +16,7 @@ import com.promtuz.chat.navigation.Routes
 import com.promtuz.chat.presentation.state.InviteSheet
 import com.promtuz.chat.security.RecoveryStore
 import com.promtuz.chat.utils.extensions.fromHex
+import com.promtuz.chat.utils.extensions.reason
 import com.promtuz.chat.utils.extensions.toHex
 import com.promtuz.core.CoreBridge
 import com.promtuz.core.observeQuery
@@ -167,30 +169,67 @@ class AppVM(
     }
 
     /**
-     * Drop a chat from this device. Local only — for a group you are still in,
-     * it comes back the moment someone posts, because the MLS group is
-     * untouched. Leaving is [leaveGroup], deliberately a separate act.
+     * Drop a chat from this device, keys included. Local and silent, but final
+     * for a group: its messages stop arriving and nobody in it is told.
+     * Leaving is [leaveGroup], deliberately a separate act, and the one that
+     * tells them.
      *
      * A direct chat still forgets the contact: there is no membership to keep,
      * and half-forgetting one is what leaves a phantom row behind.
+     *
+     * [onDone] runs once the chat is really gone, so a caller that navigates
+     * away on it can't strand the user somewhere the chat still exists.
      */
-    fun deleteChat(summary: ChatSummary) = viewModelScope.launch {
+    fun deleteChat(summary: ChatSummary, onDone: () -> Unit = {}) = viewModelScope.launch {
         val result = if (summary.isGroup) {
             runCatching { bridge.deleteConversation(summary.conversationHex.fromHex()) }
         } else {
             summary.peerHex?.let { runCatching { bridge.forgetContact(it.fromHex()) } }
                 ?: Result.success(Unit)
         }
-        result.onFailure { Timber.tag(TAG).e(it, "delete chat failed") }
+        result.onSuccess { onDone() }
+            .onFailure { complain(it, "Couldn't delete this chat") }
     }
 
-    /** Leave a group, then drop it — the "leave and delete" path off the modal. */
-    fun leaveAndDelete(summary: ChatSummary) = viewModelScope.launch {
-        runCatching { bridge.leaveGroup(summary.conversationHex.fromHex()) }
-            .onFailure { Timber.tag(TAG).e(it, "leave failed; keeping the chat") }
+    /** Empty a chat of its messages, keeping the chat and, for a group, our place in it. */
+    fun clearHistory(conversationHex: String) = viewModelScope.launch {
+        runCatching { bridge.clearConversationHistory(conversationHex.fromHex()) }
+            .onFailure { complain(it, "Couldn't clear this chat") }
+    }
+
+    /**
+     * Say a refusal out loud. The home list is a plain list with no error state
+     * of its own, and these acts are one-shot and deliberate: a tap that quietly
+     * does nothing reads as a broken app, and core's own message is usually the
+     * whole explanation.
+     *
+     * ponytail: a Toast, not a snackbar the scaffold hosts — no anchor and no
+     * retry action. Enough for a refusal there is nothing to retry about; wire
+     * a host when one of these grows a next step.
+     */
+    private fun complain(e: Throwable, fallback: String) {
+        val why = e.reason(fallback)
+        Timber.tag(TAG).e(e, "$fallback: $why")
+        Toast.makeText(context, why, Toast.LENGTH_LONG).show()
+    }
+
+    /**
+     * Leave a group, then drop it — the "leave and delete" path off the modal.
+     * Leaving needs the network, so this one really can fail; [onDone] runs only
+     * when it didn't, and the chat stays put when it did.
+     */
+    fun leaveAndDelete(summary: ChatSummary, onDone: () -> Unit = {}) = viewModelScope.launch {
+        val conv = summary.conversationHex.fromHex()
+        runCatching { bridge.leaveGroup(conv) }
+            .onFailure { complain(it, "Couldn't leave this group") }
             .onSuccess {
-                runCatching { bridge.deleteConversation(summary.conversationHex.fromHex()) }
-                    }
+                // A delete that fails here leaves the chat on the home list in a
+                // left-but-present state, which is not "gone" — so [onDone] waits
+                // on it too.
+                runCatching { bridge.deleteConversation(conv) }
+                    .onSuccess { onDone() }
+                    .onFailure { complain(it, "Left the group, but the chat wouldn't delete") }
+            }
     }
 
     /** A `/pair` deeplink arrived: decode it and raise the confirmation sheet. */
@@ -272,7 +311,6 @@ class AppVM(
                 alertedAt = c.alertedAt.toLong(),
                 amMember = c.amMember,
                 canLeave = c.canLeave,
-                canDelete = c.canDelete,
                 ownerIsStuck = c.ownerIsStuck,
             )
         }.sortedByDescending { it.timestampMs }

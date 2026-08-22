@@ -107,10 +107,10 @@ pub struct GroupMeta {
     /// Who founded it, and so who administers it.
     ///
     /// Carried here rather than inferred from whoever sent us the Welcome: a
-    /// deleted group re-opens on the next message that arrives in it, and the
-    /// sender of that message is whoever happened to speak first. Reading the
-    /// owner from the context means every member agrees on it however they
-    /// came to learn about the group.
+    /// group whose state landed without a conversation is homed by the next
+    /// message to arrive in it, and the sender of that message is whoever
+    /// happened to speak first. Reading the owner from the context means every
+    /// member agrees on it however they came to learn about the group.
     #[serde(with = "serde_bytes")]
     pub founder: [u8; 32],
 }
@@ -777,5 +777,85 @@ mod tests {
             .export_secret(&provider, "test-label", b"test-context", 32)
             .expect("export");
         assert_eq!(secret.len(), 32);
+    }
+
+    // -------------------------------------------------------------
+    // Tests 11-12: dropping one group's state, over real openmls state.
+    // -------------------------------------------------------------
+
+    /// A provider plus the connection under it, so a test can count the rows
+    /// each group actually occupies.
+    fn provider_with_conn() -> (PromtuzMlsProvider, Arc<Mutex<Connection>>) {
+        let mut raw = Connection::open_in_memory().expect("in-memory db");
+        apply_mls_migrations(&mut raw);
+        let conn = Arc::new(Mutex::new(raw));
+        (PromtuzMlsProvider::new(Arc::clone(&conn)), conn)
+    }
+
+    /// Distinct groups holding `mls_storage` rows, and rows in the size
+    /// sidecar. The `group_id` column is the CBOR-encoded `GroupId` openmls
+    /// hands the provider, never the raw 32 bytes, so the tally is by count
+    /// and by what still loads rather than by matching an id here.
+    fn tally(conn: &Arc<Mutex<Connection>>) -> (i64, i64) {
+        let conn = conn.lock();
+        let groups = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT group_id) FROM mls_storage WHERE length(group_id) > 0",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count groups");
+        let sidecar = conn
+            .query_row("SELECT COUNT(*) FROM mls_group_size", [], |r| r.get(0))
+            .expect("count sidecar");
+        (groups, sidecar)
+    }
+
+    /// What deleting a group conversation must leave of that group: nothing.
+    /// `delete_conversation`'s `purge_mls_group` runs exactly these two steps
+    /// and needs both — openmls's own `delete` keeps no account of the size
+    /// sidecar, so the row is still standing when it returns.
+    ///
+    /// This is as close as a unit test gets: `delete_conversation` resolves
+    /// `Identity::get()` and `PromtuzMlsProvider::shared()`, both real files,
+    /// so *that* it purges is not covered here — only that purging is total.
+    #[test]
+    fn purging_a_group_leaves_no_storage_rows_for_it() {
+        let (provider, conn) = provider_with_conn();
+        let alice = Party::new(&provider, 1);
+        let live = [0x11; 32];
+        let doomed = [0x22; 32];
+        create_group(&provider, &alice, &live);
+        let mut group = create_group(&provider, &alice, &doomed);
+        assert_eq!(tally(&conn), (2, 2));
+
+        group.delete(&provider).expect("openmls delete");
+        assert_eq!(tally(&conn), (1, 2), "openmls's delete is not the whole job");
+
+        provider.storage().forget_group(&doomed).expect("forget");
+
+        assert_eq!(tally(&conn), (1, 1));
+        assert!(MlsGroupHandle::load(&provider, &doomed).expect("load").is_none());
+        assert!(MlsGroupHandle::load(&provider, &live).expect("load").is_some());
+    }
+
+    /// Removal takes the whole group and nothing else — including the
+    /// `mls_group_size` sidecar, which is kept by deltas and so survives the
+    /// rows it counted.
+    #[test]
+    fn forget_group_takes_the_sidecar_and_leaves_the_neighbour() {
+        let (provider, conn) = provider_with_conn();
+        let alice = Party::new(&provider, 1);
+        let live = [0x11; 32];
+        let orphan = [0x22; 32];
+        create_group(&provider, &alice, &live);
+        create_group(&provider, &alice, &orphan);
+        assert_eq!(tally(&conn), (2, 2));
+
+        provider.storage().forget_group(&orphan).expect("forget");
+
+        assert_eq!(tally(&conn), (1, 1));
+        assert!(MlsGroupHandle::load(&provider, &live).expect("load").is_some());
+        assert!(MlsGroupHandle::load(&provider, &orphan).expect("load").is_none());
     }
 }

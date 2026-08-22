@@ -167,15 +167,22 @@ impl Drop for PullGuard {
 /// the media row, dial (or reuse) the P2P link, and run the resumable pull.
 /// No-op when the file is already downloaded or a pull is in flight.
 pub async fn download(file_id: [u8; 32]) -> anyhow::Result<()> {
-    if store::partial_get(&file_id).is_some_and(|p| p.state == store::DONE) {
+    if store::partial_get(&file_id).is_some_and(|p| p.is_complete()) {
         return Ok(());
     }
     if !DOWNLOADING.lock().insert(file_id) {
         return Ok(());
     }
     let _guard = PullGuard(file_id);
-    let (peer, offered_size) = crate::data::media::attachment_offer(&file_id)?
-        .ok_or_else(|| anyhow::anyhow!("no media row for that file_id"))?;
+    // No message names this file: its chat was cleared or deleted. A partial
+    // left behind (a pull that was mid-flight when the rows went, re-inserted
+    // by its own progress writes) would otherwise be re-driven to this same
+    // dead end on every reconnect, since nothing downstream ever marks it
+    // FAILED for the gc to reap.
+    let Some((peer, offered_size)) = crate::data::media::attachment_offer(&file_id)? else {
+        store::forget_partial(&file_id);
+        anyhow::bail!("no media row for that file_id");
+    };
     let link = match crate::p2p::link(peer).await {
         Ok(l) => l,
         Err(e) => {
@@ -299,7 +306,16 @@ pub async fn resume_incomplete_downloads() {
 async fn pull(
     link: &crate::p2p::PeerLink, file_id: [u8; 32], offered_size: u64, local: &wire::Auth,
 ) -> anyhow::Result<()> {
-    let have0 = store::partial_get(&file_id).map(|p| p.have).unwrap_or(0);
+    // A watermark is only as good as the bytes beneath it. Clearing a chat
+    // unlinks the `.part` under a live pull, and a resume trusting `have` would
+    // ask for the tail alone and promote a file with nothing in front of it.
+    // The same rule as the crash-safety contract above, at its limit.
+    let have0 = store::partial_get(&file_id)
+        .map(|p| {
+            let on_disk = std::fs::metadata(&p.path).map(|m| m.len()).unwrap_or(0);
+            (p.have as u64).min(on_disk / p.chunk_size.max(1) as u64) as u32
+        })
+        .unwrap_or(0);
     let (mut s, mut r) = link.open_stream().await?;
     auth::exchange(&link.conn, &mut s, &mut r, link.ipk, local).await?;
     wire::write_frame(&mut s, &wire::Pull { file_id, have: have0 }).await?;
@@ -413,6 +429,32 @@ mod tests {
         assert!(!should_auto_download(&unpaired, AUTO_MAX, true), "unpaired never");
         assert!(!should_auto_download(&paired, AUTO_MAX, false), "metered never");
         assert!(!should_auto_download(&paired, AUTO_MAX + 1, true), "oversize never");
+    }
+
+    /// A partial whose chat is gone has nothing to resume toward — and nothing
+    /// downstream to mark it FAILED for the gc — so the re-drive is what reaps it.
+    #[tokio::test]
+    async fn download_with_no_media_row_forgets_the_partial() {
+        let dir = std::env::temp_dir().join("promtuz-transfers-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+
+        let fid = [0xf3u8; 32];
+        store::partial_put(&store::Partial {
+            file_id: fid,
+            source_ipk: [1u8; 32],
+            total: 100,
+            chunk_size: 50,
+            manifest: None,
+            have: 1,
+            state: store::ACTIVE,
+            path: store::partial_path(&fid),
+            updated_at: 0,
+        })
+        .unwrap();
+
+        assert!(download(fid).await.is_err(), "no message names it");
+        assert!(store::partial_get(&fid).is_none(), "ghost row reaped");
     }
 
     #[test]

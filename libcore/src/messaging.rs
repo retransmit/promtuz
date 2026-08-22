@@ -1838,16 +1838,20 @@ fn process_pair_decline_inbound(sender_ipk: [u8; 32], d: PairDeclineP) -> Result
     Ok(())
 }
 
-/// Post-restore self-heal: a known contact sent into a group we hold no
-/// state for — mint a fresh group + Welcome toward them so the NEXT
-/// messages flow (the mirror of the send path's "no local state;
+/// Post-restore self-heal: a known contact sent into our 1:1 group with them
+/// and we hold no state for it — mint a fresh group + Welcome toward them so
+/// the NEXT messages flow (the mirror of the send path's "no local state;
 /// recreating"). The lost ciphertext stays lost (forward secrecy).
+///
+/// The pair group only. Every kind of dead id arrives here, and minting a 1:1
+/// off a group chat's would put a DM on the sender's device that neither of us
+/// asked for.
 ///
 /// Mint-storm guard: a backlog of N dead-group messages must re-establish
 /// once, not N times. Under the per-recipient lock, recreate only while the
-/// contact row still points at the dead gid (or none); the first heal
-/// repoints it, so the rest of the backlog skips. Best-effort — a failure
-/// (e.g. KP stash miss) just waits for the peer's next message to retry.
+/// contact row still points at the dead gid; the first heal repoints it, so
+/// the rest of the backlog skips. Best-effort — a failure (e.g. KP stash
+/// miss) just waits for the peer's next message to retry.
 async fn heal_dead_group<C: DhtClient>(
     ctx: &MlsContext<'_, C>, sender_ipk: [u8; 32], dead_gid: &[u8; 32],
 ) {
@@ -1860,9 +1864,16 @@ async fn heal_dead_group<C: DhtClient>(
     let lock = group_create_lock(&sender_ipk);
     let _guard = lock.lock().await;
 
+    // The dead id must still be the pair group on the contact row. Anything
+    // else is a group chat's id, or a pair we already re-established while this
+    // envelope sat in the queue. A row with no pair group at all is ambiguous —
+    // a restore taken before the peer's Welcome landed looks the same as a
+    // group-chat contact we never DMed — and minting a DM at the wrong one is
+    // the worse mistake, so that case is left to our own first send, whose
+    // lazy create heals it.
     let current = Contact::get(&sender_ipk).and_then(|c| c.inner.mls_group_id);
-    if !(current.is_none() || current == Some(*dead_gid)) {
-        return; // already re-established since this envelope was queued
+    if current != Some(*dead_gid) {
+        return;
     }
     match lazy_create_group(ctx, &our_ipk, &ipk_signer, &sender_ipk).await {
         Ok(g) => {

@@ -20,10 +20,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -45,7 +48,8 @@ import dev.chrisbanes.haze.hazeEffect
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
-    val navigator = koinInject<AppVM>().navigator
+    val appVM = koinInject<AppVM>()
+    val navigator = appVM.navigator
     val backHandle = LocalOnBackPressedDispatcherOwner.current
     val colors = MaterialTheme.colorScheme
     val chatTheme = LocalChatColors.current
@@ -58,6 +62,23 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
     val muted by chatVM.muted.collectAsState()
     val typingMembers by chatVM.typingMembers.collectAsState()
 
+    // Delete needs the same standing the home list uses to decide what to offer
+    // (can we leave, did we found it, are we still a member), and that already
+    // lives on the home summaries — one source, not a second read of our own.
+    // The lookup is derived so a message in some other chat doesn't recompose
+    // this bar, and keyed on the id because that is a plain getter rather than
+    // a State the derivation could re-read.
+    val chats by appVM.chats.collectAsState()
+    val summary by remember(chatVM.conversationHex) {
+        derivedStateOf { chats.firstOrNull { it.conversationHex == chatVM.conversationHex } }
+    }
+    var confirmClear by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+
+    // The summaries come back empty on a transient FFI failure, which hides the
+    // delete dialog without answering it; a flag left standing would raise it
+    // again unasked once the list recovers.
+    LaunchedEffect(summary == null) { if (summary == null) confirmDelete = false }
 
     // Who's typing, named — a group can have several at once, and "3 people
     // typing…" reads better than three names past a couple.
@@ -156,10 +177,21 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                             })
                     )
                     add(
-                        listOf(
-                            MenuAction("Clear History", R.drawable.oi_clear_list) {},
-                            MenuAction("Delete Chat", R.drawable.oi_trash, destructive = true) {},
-                        ),
+                        buildList {
+                            add(
+                                MenuAction("Clear History", R.drawable.oi_clear_list) {
+                                    confirmClear = true
+                                },
+                            )
+                            // The dialog needs the summary to know what it is
+                            // deleting; while it hasn't arrived there is nothing
+                            // honest to offer, so offer nothing.
+                            if (summary != null) add(
+                                MenuAction("Delete Chat", R.drawable.oi_trash, destructive = true) {
+                                    confirmDelete = true
+                                },
+                            )
+                        },
                     )
                 },
             )
@@ -171,6 +203,32 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
             .hazeEffect(haze, chatBarHaze()),
         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
     )
+
+    if (confirmClear) ClearHistoryDialog(
+        name = name,
+        onConfirm = { confirmClear = false; appVM.clearHistory(chatVM.conversationHex) },
+        onDismiss = { confirmClear = false },
+    )
+    // Both paths take the chat we are reading out from under us, so the step
+    // back to the list waits on the work landing: a leave that fails keeps the
+    // chat, and the screen showing it is where the user should still be.
+    //
+    // That wait runs on AppVM, a Koin `single`, so it outlives this screen —
+    // leaving needs the network and deleting needs the DB, and the user can be
+    // in Settings by the time either lands. Step back only while this chat is
+    // still what's on top, or the pop lands on whatever they moved to.
+    val popThisChat = {
+        val top = navigator.backStack.lastOrNull()
+        if ((top as? Routes.Chat)?.conversation == chatVM.conversationHex) navigator.back()
+    }
+    summary?.let { chat ->
+        if (confirmDelete) DeleteChatDialog(
+            chat = chat,
+            onDelete = { confirmDelete = false; appVM.deleteChat(chat, popThisChat) },
+            onLeaveAndDelete = { confirmDelete = false; appVM.leaveAndDelete(chat, popThisChat) },
+            onDismiss = { confirmDelete = false },
+        )
+    }
 }
 
 /** "1 member" / "4 members" — a group of one is a real state after a removal. */

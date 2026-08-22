@@ -6,9 +6,11 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -263,7 +265,17 @@ fun NavStage(
         layers.forEachIndexed { i, (entry, mod, exit) ->
             key(entry.contentKey) {
                 val isTop = entry.contentKey == topKey
-                Box(Modifier.fillMaxSize().then(mod).onPlaced { if (isTop) placed.value = true }) {
+                // Every card paints its own ground. Two cards are on screen at once during
+                // a push or a back-swipe, so a screen that leaves its background to a
+                // Scaffold — or forgets one — reads as see-through onto the card behind it.
+                // After `mod` so the fill lands inside the card's clip, not around it.
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .then(mod)
+                        .background(MaterialTheme.colorScheme.background)
+                        .onPlaced { if (isTop) placed.value = true },
+                ) {
                     CompositionLocalProvider(
                         LocalNavCardExiting provides exit,
                         LocalNavEnterSettled provides (!isTop || !showPush),

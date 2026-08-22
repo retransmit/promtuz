@@ -77,6 +77,7 @@ import uniffi.core.addGroupMember as ffiAddGroupMember
 import uniffi.core.removeGroupMember as ffiRemoveGroupMember
 import uniffi.core.leaveGroup as ffiLeaveGroup
 import uniffi.core.deleteConversation as ffiDeleteConversation
+import uniffi.core.clearConversationHistory as ffiClearConversationHistory
 import uniffi.core.setConversationPinned as ffiSetConversationPinned
 import uniffi.core.setConversationMuted as ffiSetConversationMuted
 import uniffi.core.setAlertedAt as ffiSetAlertedAt
@@ -202,12 +203,18 @@ object CoreBridge {
         withContext(Dispatchers.IO) { ffiConversationWith(peerIpk) }
 
     /**
-     * Drop a conversation and its history from this device. Local only: a group
-     * you are still in re-opens on the next message, because the MLS group is
-     * left alone. Refused for a group you founded while others remain.
+     * Drop a conversation, its history and its keys from this device. Nobody is
+     * told and no membership changes, but a group's messages stop arriving and
+     * the chat does not come back — leaving is the separate act that tells the
+     * others. Refused for a group you founded while others remain, unless
+     * [force] — the escape hatch for a group whose own state is what broke.
      */
-    suspend fun deleteConversation(conversationId: ByteArray) =
-        withContext(Dispatchers.IO) { ffiDeleteConversation(conversationId) }
+    suspend fun deleteConversation(conversationId: ByteArray, force: Boolean = false) =
+        withContext(Dispatchers.IO) { ffiDeleteConversation(conversationId, force) }
+
+    /** Empty a chat of its messages but keep the chat. Local only, always allowed. */
+    suspend fun clearConversationHistory(conversationId: ByteArray) =
+        withContext(Dispatchers.IO) { ffiClearConversationHistory(conversationId) }
 
     suspend fun setConversationPinned(id: ByteArray, pinned: Boolean) =
         withContext(Dispatchers.IO) { ffiSetConversationPinned(id, pinned) }

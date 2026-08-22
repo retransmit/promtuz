@@ -15,8 +15,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -62,6 +64,7 @@ fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel(
 
     var draftTitle by remember(title) { mutableStateOf(title) }
     var adding by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
 
     val active = members.filter { it.active }
     // Anyone in the address book who isn't already here.
@@ -187,6 +190,22 @@ fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel(
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.onSurfaceVariant,
                 )
+                // Being unable to leave is not a reason to be stuck with the
+                // chat: dropping our copy is ours alone to do.
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { confirmDelete = true }
+                        .padding(horizontal = 20.dp, vertical = 16.dp),
+                    horizontalArrangement = Arrangement.Start,
+                ) {
+                    Text(
+                        "Delete this chat anyway",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = colors.error,
+                    )
+                }
             } else if (canLeave) {
                 Row(
                     Modifier
@@ -207,6 +226,25 @@ fun GroupInfoScreen(conversationHex: String, viewModel: GroupVM = koinViewModel(
         }
     }
     }
+
+    if (confirmDelete) AlertDialog(
+        onDismissRequest = { confirmDelete = false },
+        title = { Text("Delete this chat?") },
+        text = {
+            Text(
+                "This removes your copy and its messages from this device. Nobody " +
+                    "is told and everyone else keeps the group — but you created " +
+                    "it, so no one will ever be able to add, remove or rename " +
+                    "anyone in it again. This can't be undone.",
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { confirmDelete = false; viewModel.deleteAnyway() }) {
+                Text("Delete", color = colors.error)
+            }
+        },
+        dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
+    )
 }
 
 @Composable

@@ -59,6 +59,7 @@ fun HomeChatListItem(
     onPin: () -> Unit,
     onMute: () -> Unit,
     onMarkRead: () -> Unit,
+    onClearHistory: () -> Unit,
     onDelete: () -> Unit,
     onLeaveAndDelete: () -> Unit,
     modifier: Modifier = Modifier,
@@ -69,6 +70,7 @@ fun HomeChatListItem(
     val unread = chat.unreadCount > 0
 
     var confirmDelete by remember { mutableStateOf(false) }
+    var confirmClear by remember { mutableStateOf(false) }
     val interaction = remember { MutableInteractionSource() }
     val rowCoord = remember { object { var c: LayoutCoordinates? = null } }
 
@@ -78,7 +80,10 @@ fun HomeChatListItem(
             add(MenuAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.oi_bell_on else R.drawable.oi_bell_slash) { onMute() })
             if (unread) add(MenuAction("Mark read", R.drawable.oi_message_check) { onMarkRead() })
         },
-        listOf(MenuAction("Delete chat", R.drawable.oi_trash, destructive = true) { confirmDelete = true }),
+        listOf(
+            MenuAction("Clear history", R.drawable.oi_clear_list) { confirmClear = true },
+            MenuAction("Delete chat", R.drawable.oi_trash, destructive = true) { confirmDelete = true },
+        ),
     )
 
     Box(modifier) {
@@ -207,6 +212,11 @@ fun HomeChatListItem(
             onLeaveAndDelete = { confirmDelete = false; onLeaveAndDelete() },
             onDismiss = { confirmDelete = false },
         )
+        if (confirmClear) ClearHistoryDialog(
+            name = chat.name,
+            onConfirm = { confirmClear = false; onClearHistory() },
+            onDismiss = { confirmClear = false },
+        )
     }
 }
 
@@ -271,12 +281,12 @@ private fun UnreadBadge(count: Int, muted: Boolean, colors: ColorScheme) {
 
 /**
  * Deleting a group and leaving one are different acts, and the dialog says so
- * rather than quietly picking. Delete is local — the group carries on without
- * you and the chat returns on the next message — so offering only that would
- * be a trapdoor for someone who meant to get out.
+ * rather than quietly picking. Delete is silent — the group carries on without
+ * you and nobody there learns you have gone — so offering only that would be a
+ * trapdoor for someone who meant to say goodbye.
  */
 @Composable
-private fun DeleteChatDialog(
+fun DeleteChatDialog(
     chat: ChatSummary,
     onDelete: () -> Unit,
     onLeaveAndDelete: () -> Unit,
@@ -292,7 +302,9 @@ private fun DeleteChatDialog(
                     "\"${chat.name}\" still has ${chat.memberCount - 1} other " +
                         (if (chat.memberCount == 2) "member" else "members") +
                         ". Remove them first — leaving now would leave the group with " +
-                        "nobody able to manage it.",
+                        "nobody able to manage it.\n\n" +
+                        "If the group is broken past that, Group info can drop your " +
+                        "own copy of it.",
                 )
             },
             confirmButton = { TextButton(onClick = onDismiss) { Text("Got it") } },
@@ -309,9 +321,9 @@ private fun DeleteChatDialog(
                         "Delete your chat with ${chat.name}? This removes the contact and " +
                             "all messages on this device. This can't be undone."
                     chat.amMember ->
-                        "This clears \"${chat.name}\" from this device but keeps you in it, " +
-                            "so the chat comes back the next time someone posts. Leave the " +
-                            "group to stop receiving it."
+                        "Delete \"${chat.name}\" and its messages from this device? You " +
+                            "stop receiving it, and nobody in it is told — they keep " +
+                            "posting to someone who isn't there. Leave to tell them."
                     else ->
                         "Delete \"${chat.name}\" and its messages from this device? " +
                             "You already left, so nothing new will arrive."
@@ -331,6 +343,30 @@ private fun DeleteChatDialog(
                 }
             }
         },
+    )
+}
+
+/**
+ * Clearing is not leaving and not deleting — the chat stays, and so does
+ * everyone else's copy. Confirmed all the same: the messages don't come back.
+ */
+@Composable
+fun ClearHistoryDialog(name: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Clear history?") },
+        text = {
+            Text(
+                "Delete every message in \"$name\" from this device. The chat itself " +
+                    "stays, and nobody else loses anything. This can't be undone.",
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("Clear", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
 

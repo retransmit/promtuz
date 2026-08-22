@@ -223,6 +223,21 @@ pub fn process_welcome(
         )));
     }
 
+    // The envelope's `group_id` is signed by the sender but says nothing about
+    // the state inside the Welcome, so a paired contact can make the two
+    // disagree. `home_for_group` reads the real id off the group while every
+    // other path takes the envelope's word, and both must mean one group.
+    // Checked before `into_group`, like the roster, so a mismatch writes no
+    // state to then have to clean up.
+    let inner_gid = staged.group_context().group_id().as_slice();
+    if inner_gid != envelope.group_id.0 {
+        return Err(MlsGroupError::Internal(format!(
+            "Welcome carries group {} but the envelope claims {}",
+            hex::encode(inner_gid),
+            hex::encode(envelope.group_id.0)
+        )));
+    }
+
     let mls_group = staged.into_group(provider).map_err(MlsGroupError::from_openmls)?;
     let handle = MlsGroupHandle::wrap(mls_group);
 

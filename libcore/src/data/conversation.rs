@@ -40,6 +40,34 @@ fn mint_conversation_id() -> [u8; 16] {
     Ulid::new().to_bytes()
 }
 
+/// Have the transfer store forget attachments whose media rows are now
+/// committed away — otherwise clearing a chat to be rid of a photo keeps the
+/// photo. The store owns both the bytes and the row that finds them, so the
+/// removal happens there rather than by reaching into its storage layout.
+///
+/// Re-checked against the whole of `message_media` first: the same content can
+/// hang off a second row in another chat, and the rows are the source of truth.
+///
+/// Runs with `MESSAGES_DB` held and takes `TRANSFERS_DB` inside it. That is the
+/// only direction the two are ever held in — every `TRANSFERS_DB` scope lives
+/// in `transfer::store` and none reaches back for `MESSAGES_DB`. One that did
+/// would close the cycle and hang, as would a commit hook that called into core
+/// rather than just waking the UI.
+fn unlink_orphaned_media(conn: &Connection, file_ids: &[[u8; 32]]) {
+    for fid in file_ids {
+        let sql = "SELECT 1 FROM message_media WHERE file_id = ?1 LIMIT 1";
+        match conn.query_row(sql, [fid.as_slice()], |_| Ok(())) {
+            // Nothing names it any more. Only this answer frees the bytes.
+            Err(rusqlite::Error::QueryReturnedNoRows) =>
+                crate::transfer::store::forget_partial(fid),
+            // A row still names it — or the read that decides just failed, and
+            // a failure to consult the source of truth is not permission to
+            // delete what another chat may still be showing. Keep the file.
+            _ => {},
+        }
+    }
+}
+
 pub struct Conversation;
 
 impl Conversation {
@@ -312,6 +340,13 @@ impl Conversation {
         Ok(())
     }
 
+    /// Whether `member` runs this conversation *now*.
+    ///
+    /// Scoped to the active roster. A role row outlives its owner's membership
+    /// so their old messages still attribute to a name, and reading that row as
+    /// standing leaves someone who is out of the group still gating what the
+    /// people in it may do — and still held to a founder's duty not to strand a
+    /// group whose fate stopped being theirs.
     pub fn is_admin(id: &[u8; 16], member: &[u8; 32]) -> bool {
         let conn = MESSAGES_DB.lock();
         Self::is_admin_tx(&conn, id, member)
@@ -319,7 +354,8 @@ impl Conversation {
 
     pub fn is_admin_tx(conn: &Connection, id: &[u8; 16], member: &[u8; 32]) -> bool {
         conn.query_row(
-            "SELECT role FROM conversation_members WHERE conversation_id = ?1 AND member_ipk = ?2",
+            "SELECT role FROM conversation_members \
+             WHERE conversation_id = ?1 AND member_ipk = ?2 AND active = 1",
             (id.as_slice(), member.as_slice()),
             |r| r.get::<_, i64>(0),
         )
@@ -349,22 +385,58 @@ impl Conversation {
             .unwrap_or_default()
     }
 
+    /// Empty a conversation of its history, keeping the chat and its roster.
+    pub fn clear_history(id: &[u8; 16]) -> Result<()> {
+        let mut conn = MESSAGES_DB.lock();
+        let tx = conn.transaction()?;
+        let orphaned = Self::clear_history_tx(&tx, id)?;
+        tx.commit()?;
+        unlink_orphaned_media(&conn, &orphaned);
+        Ok(())
+    }
+
+    /// Every table scoped to a conversation, emptied — the shared half of
+    /// clearing and deleting, so neither can forget one of them. Returns the
+    /// `file_id`s whose rows it just dropped, for the caller to unlink *after*
+    /// the transaction commits: a rollback must not leave the bytes gone.
+    ///
+    /// `seen_dispatch` is deliberately spared: it is keyed on the sender, not
+    /// the conversation, and dropping its rows would let a redelivered dispatch
+    /// be decrypted a second time — which the MLS ratchet answers with a hard
+    /// SecretReuseError.
+    pub fn clear_history_tx(conn: &Connection, id: &[u8; 16]) -> Result<Vec<[u8; 32]>> {
+        // `message_media.file_id` is the only pointer at a received
+        // attachment's bytes on disk, and the transfer store's GC reaps
+        // FAILED/HELD partials alone — so these rows are the last chance to
+        // know the files are there at all.
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT file_id FROM message_media \
+             WHERE conversation_id = ?1 AND file_id IS NOT NULL",
+        )?;
+        let orphaned: Vec<[u8; 32]> =
+            stmt.query_map([id.as_slice()], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+
+        for table in
+            ["messages", "reactions", "read_state", "member_read_state", "message_media"]
+        {
+            conn.execute(
+                &format!("DELETE FROM {table} WHERE conversation_id = ?1"),
+                [id.as_slice()],
+            )?;
+        }
+        Ok(orphaned)
+    }
+
     /// Drop a conversation and everything scoped to it.
     pub fn delete(id: &[u8; 16]) -> Result<()> {
         let mut conn = MESSAGES_DB.lock();
         let tx = conn.transaction()?;
-        // `seen_dispatch` is deliberately spared: it is keyed on the sender,
-        // not the conversation, and dropping its rows would let a redelivered
-        // dispatch be decrypted a second time — which the MLS ratchet answers
-        // with a hard SecretReuseError.
-        for table in
-            ["messages", "reactions", "read_state", "member_read_state", "message_media"]
-        {
-            tx.execute(&format!("DELETE FROM {table} WHERE conversation_id = ?1"), [id.as_slice()])?;
-        }
+        let orphaned = Self::clear_history_tx(&tx, id)?;
         tx.execute("DELETE FROM conversation_members WHERE conversation_id = ?1", [id.as_slice()])?;
         tx.execute("DELETE FROM conversations WHERE id = ?1", [id.as_slice()])?;
         tx.commit()?;
+        unlink_orphaned_media(&conn, &orphaned);
         Ok(())
     }
 
@@ -643,6 +715,64 @@ mod tests {
         assert!(
             Conversation::get_tx(&conn, &first).unwrap().mls_group_id.is_none(),
             "evicted conversation keeps its rows but loses the pointer"
+        );
+    }
+
+    /// Clearing is emptying, not deleting: the chat has to still be there to
+    /// keep talking in afterwards, roster and all.
+    #[test]
+    fn clearing_history_empties_the_messages_and_keeps_the_chat() {
+        let conn = open_in_memory();
+        let me = [1u8; 32];
+        let group = Conversation::join_group_tx(&conn, &[2u8; 32], &[me, [2u8; 32], [3u8; 32]])
+            .expect("join");
+
+        conn.execute(
+            "INSERT INTO messages (id, conversation_id, content, outgoing, timestamp, status) \
+             VALUES ('01H', ?1, 'said something', 0, 100, 1)",
+            [group.as_slice()],
+        )
+        .unwrap();
+
+        Conversation::clear_history_tx(&conn, &group).expect("clear");
+
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages WHERE conversation_id = ?1", [group.as_slice()], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "the history is gone");
+        assert!(Conversation::get_tx(&conn, &group).is_some(), "the chat itself survives");
+        assert_eq!(
+            Conversation::recipients_tx(&conn, &group, Some(me)).len(),
+            2,
+            "and so does everyone in it"
+        );
+    }
+
+    /// A media row is the only pointer at the attachment's bytes on disk, so a
+    /// clear that doesn't name what it orphans leaves the file there with
+    /// nothing left that knows it exists.
+    #[test]
+    fn clearing_history_hands_back_the_attachments_it_orphans() {
+        let conn = open_in_memory();
+        let group =
+            Conversation::join_group_tx(&conn, &[2u8; 32], &[[1u8; 32], [2u8; 32]]).expect("join");
+        let file = [0xab; 32];
+
+        conn.execute(
+            "INSERT INTO message_media (conversation_id, dispatch_id, kind, mime, file_id) \
+             VALUES (?1, X'01', 0, 'image/png', ?2)",
+            (group.as_slice(), file.as_slice()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            Conversation::clear_history_tx(&conn, &group).expect("clear"),
+            vec![file],
+            "the file_id comes back for the caller to unlink"
+        );
+        assert!(
+            Conversation::clear_history_tx(&conn, &group).expect("clear again").is_empty(),
+            "and only while a row still points at it"
         );
     }
 }

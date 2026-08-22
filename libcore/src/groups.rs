@@ -382,13 +382,26 @@ fn no_keys_error(who: &[u8; 32], e: anyhow::Error) -> anyhow::Error {
 ///
 /// The way out is to empty the group first; handing it to another member is the
 /// obvious next step and needs a wire event of its own.
+///
+/// Only binds someone still in the group — [`Conversation::is_admin`] reads the
+/// active roster, so a creator who is already out is nobody's admin and their
+/// own copy is theirs alone to drop.
 pub(crate) fn require_not_stranding_the_group(
     conversation: &[u8; 16], who: &[u8; 32],
 ) -> Result<()> {
-    if !Conversation::is_admin(conversation, who) {
+    let conn = crate::db::messages::MESSAGES_DB.lock();
+    require_not_stranding_the_group_tx(&conn, conversation, who)
+}
+
+fn require_not_stranding_the_group_tx(
+    conn: &rusqlite::Connection, conversation: &[u8; 16], who: &[u8; 32],
+) -> Result<()> {
+    if !Conversation::is_admin_tx(conn, conversation, who) {
         return Ok(());
     }
-    let others = Conversation::recipients(conversation).len();
+    // Everyone but `who`: the duty is theirs, so they are the one excluded,
+    // not whoever happens to be signed in.
+    let others = Conversation::recipients_tx(conn, conversation, Some(*who)).len();
     if others > 0 {
         bail!(
             "you created this group — remove the other {} member{} before leaving it",
@@ -431,4 +444,32 @@ fn leaf_for(
     provider: &PromtuzMlsProvider, group: &MlsGroupHandle, our_ipk: &[u8; 32],
 ) -> Result<openmls_basic_credential::SignatureKeyPair> {
     crate::messaging::leaf_signer_for_group(provider, group, our_ipk)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::messages::open_in_memory;
+
+    /// The founder's duty is to the group they are in. Once they are out — a
+    /// commit dropped them, or a restore brought back a roster without them —
+    /// there is nobody left for them to strand, and refusing to let them drop
+    /// their own copy pins a chat to the home list that nothing can ever
+    /// remove.
+    #[test]
+    fn a_founder_who_has_left_may_still_delete_their_copy() {
+        let conn = open_in_memory();
+        let me = [1u8; 32];
+        let group =
+            Conversation::join_group_tx(&conn, &me, &[me, [2u8; 32], [3u8; 32]]).expect("found");
+
+        assert!(
+            require_not_stranding_the_group_tx(&conn, &group, &me).is_err(),
+            "while we are in it, walking out on two other people is refused"
+        );
+
+        Conversation::deactivate_member_tx(&conn, &group, &me).expect("leave");
+        require_not_stranding_the_group_tx(&conn, &group, &me)
+            .expect("out of the group, the group is no longer ours to strand");
+    }
 }

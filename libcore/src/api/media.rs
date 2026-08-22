@@ -138,12 +138,20 @@ pub fn get_media(conversation_id: Vec<u8>) -> Result<Vec<MediaRecord>, CoreError
     Ok(rows.into_iter().map(|(did, r)| {
         let fid = r.file_id.as_deref().and_then(|f| <&[u8; 32]>::try_from(f).ok());
         let (transfer_state, transfer_have, transfer_total, local_path) = match fid.and_then(store::partial_get) {
-            Some(p) => (
-                p.state,
-                p.have,
-                p.total.div_ceil(p.chunk_size.max(1) as u64) as u32,
-                (p.state == store::DONE).then(|| p.path.clone()),
-            ),
+            Some(p) => {
+                // A DONE row can outlive its bytes (see [`store::Partial::is_complete`]).
+                // Surfaced as PENDING it gets the download affordance back and the
+                // tap re-pulls; DONE with no path is a check-mark that opens nothing.
+                let complete = p.is_complete();
+                let state =
+                    if p.state == store::DONE && !complete { store::PENDING } else { p.state };
+                (
+                    state,
+                    p.have,
+                    p.total.div_ceil(p.chunk_size.max(1) as u64) as u32,
+                    complete.then(|| p.path.clone()),
+                )
+            },
             // No receiver partial: this may be our OWN sent attachment, whose
             // file lives in `retention` under the same file_id. Surface it as a
             // complete local file so the sender can open what they sent.

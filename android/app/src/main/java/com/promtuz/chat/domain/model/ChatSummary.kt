@@ -36,8 +36,6 @@ data class ChatSummary(
     val amMember: Boolean = true,
     /** Leaving is offered — a group we are in and haven't stranded. */
     val canLeave: Boolean = false,
-    /** Deleting is offered. */
-    val canDelete: Boolean = true,
     /**
      * We founded this group and others are still in it, so neither leaving nor
      * deleting is allowed — the group would be left with nobody to manage it.

@@ -94,9 +94,6 @@ pub struct ConversationRecord {
     /// Leaving is offered. False for a direct chat, which has no membership,
     /// and for a group we already left — and see [`Self::owner_is_stuck`].
     pub can_leave: bool,
-    /// Deleting is offered. See [`Self::owner_is_stuck`] for the one case a
-    /// group refuses it.
-    pub can_delete: bool,
     /// We founded this group and other people are still in it, so both leaving
     /// and deleting are refused: the group would be left with nobody able to
     /// manage it. Lifted by removing everyone first — or, later, by handing
@@ -425,7 +422,6 @@ fn conversation_record(c: crate::db::messages::ConversationRow) -> ConversationR
         has_group:      c.mls_group_id.is_some(),
         am_member,
         can_leave:      is_group && am_member && !owner_is_stuck,
-        can_delete:     !owner_is_stuck,
         owner_is_stuck,
         display_name:   display_name(&c, &others),
         pinned:         c.pinned,
@@ -460,48 +456,38 @@ fn display_name(c: &crate::db::messages::ConversationRow, others: &[[u8; 32]]) -
     }
 }
 
-/// Drop a conversation and its history from this device.
+/// Drop a conversation, its history and its keys from this device.
 ///
-/// Local only, and deliberately not a membership change: nobody else is told,
-/// and a group you are still in comes back the moment someone posts in it —
-/// the MLS group lives in openmls storage, which this doesn't touch, so the
-/// next message re-opens the chat from the group's own roster and name. That
-/// is also why leaving is a separate action: this one does not take you out.
+/// Local and silent, but not harmless: the group's MLS state goes with the
+/// row, so nothing posted in that group can ever reach this device again and
+/// the chat does not come back. Nobody else is told and no membership changes
+/// — everyone left in it keeps encrypting to a member who will never read
+/// another word. Leaving is the separate, polite act that tells them.
 ///
-/// Once you are no longer a member, nothing can arrive, so the MLS state is
-/// dropped along with it rather than lingering forever.
+/// A direct chat differs only in that the contact outlives it: the pair
+/// re-establishes and a fresh chat opens on their next message.
 ///
 /// Refused for a group you founded while others are still in it — see
-/// [`crate::groups::require_not_stranding_the_group`].
+/// [`crate::groups::require_not_stranding_the_group`] — unless `force`.
+///
+/// `force` is for the founder of a group too broken to manage or to leave:
+/// wrecked MLS state fails every removal and every leave, and the guard then
+/// only seals them in. Nothing here can tell that group from a healthy one, so
+/// `force` is taken on the caller's word — spend it on a working group and
+/// everyone left behind holds one nobody can add to, remove from or rename.
 #[uniffi::export]
-pub fn delete_conversation(conversation_id: Vec<u8>) -> Result<(), CoreError> {
+pub fn delete_conversation(conversation_id: Vec<u8>, force: bool) -> Result<(), CoreError> {
     let conv = to_conv16(&conversation_id)?;
     let Some(row) = Conversation::get(&conv) else { return Ok(()) };
     let me = crate::data::identity::Identity::get().map(|i| i.ipk());
 
-    if let Some(me) = me {
+    if let Some(me) = me
+        && !force
+    {
         crate::groups::require_not_stranding_the_group(&conv, &me)?;
     }
-    let still_a_member = me.is_some_and(|k| {
-        Conversation::members(&conv).iter().any(|m| m.active && m.member_ipk == k)
-    });
-
-    if !still_a_member {
-        if let Some(gid) = Conversation::group_of(&conv) {
-            let provider = crate::mls::PromtuzMlsProvider::shared();
-            match crate::mls::MlsGroupHandle::load(&provider, &gid) {
-                Ok(Some(mut g)) =>
-                    if let Err(e) = g.delete(&provider) {
-                        log::warn!("DELETE: dropping MLS state failed: {e}");
-                    },
-                Ok(None) => {},
-                Err(e) => log::warn!("DELETE: loading MLS state failed: {e}"),
-            }
-            let buffer = crate::mls::EpochCatchupBuffer::new(crate::db::mls::stash_db_handle());
-            if let Err(e) = buffer.purge_group(&gid) {
-                log::warn!("DELETE: epoch buffer purge failed: {e}");
-            }
-        }
+    if let Some(gid) = Conversation::group_of(&conv) {
+        purge_mls_group(&gid);
     }
     Conversation::delete(&conv)?;
     log::info!(
@@ -510,6 +496,50 @@ pub fn delete_conversation(conversation_id: Vec<u8>) -> Result<(), CoreError> {
         if row.kind == crate::data::conversation::KIND_GROUP { "group" } else { "direct" }
     );
     Ok(())
+}
+
+/// Drop every trace of an MLS group from this device: openmls's own state, the
+/// storage rows it leaves behind (including the size sidecar), and anything
+/// buffered for a future epoch.
+///
+/// Best-effort throughout. Each half is logged and stepped over rather than
+/// returned, because a caller holding a group it can't open has nothing better
+/// to do than keep clearing the rest.
+///
+/// The two tables key the same group on different encodings and each is right
+/// for itself: `forget_group` matches `mls_storage` on the CBOR `GroupId`
+/// openmls hands the provider, while `purge_group` matches `mls_epoch_ahead`
+/// on the raw 32 bytes promtuz stores there. Making one look like the other
+/// makes it match nothing.
+fn purge_mls_group(gid: &[u8; 32]) {
+    let provider = crate::mls::PromtuzMlsProvider::shared();
+    match crate::mls::MlsGroupHandle::load(&provider, gid) {
+        Ok(Some(mut g)) =>
+            if let Err(e) = g.delete(&provider) {
+                log::warn!("MLS: dropping group state failed: {e}");
+            },
+        // No loadable group, which is the ordinary case for state so damaged
+        // it can't be opened. `forget_group` below is what clears that.
+        Ok(None) => {},
+        Err(e) => log::warn!("MLS: loading group state failed: {e}"),
+    }
+    if let Err(e) = provider.storage().forget_group(gid) {
+        log::warn!("MLS: clearing group storage rows failed: {e}");
+    }
+    let buffer = crate::mls::EpochCatchupBuffer::new(crate::db::mls::stash_db_handle());
+    if let Err(e) = buffer.purge_group(gid) {
+        log::warn!("MLS: epoch buffer purge failed: {e}");
+    }
+}
+
+/// Empty a chat of its messages, keeping the chat itself.
+///
+/// Local only, like [`delete_conversation`], and always allowed: throwing away
+/// our own copy of the history strands nobody and changes no membership, so a
+/// group we founded can be cleared while everyone is still in it.
+#[uniffi::export]
+pub fn clear_conversation_history(conversation_id: Vec<u8>) -> Result<(), CoreError> {
+    Ok(Conversation::clear_history(&to_conv16(&conversation_id)?)?)
 }
 
 /// Pin a conversation to the top of the home list, or unpin it.
@@ -668,20 +698,12 @@ pub fn forget_contact(ipk: Vec<u8>) -> Result<(), CoreError> {
     let ipk = to_ipk32(&ipk)?;
     let Some(contact) = Contact::get(&ipk) else { return Ok(()) };
 
+    // Read off the contact row before anything below drops it, and cleared to
+    // the same depth as a conversation delete — a re-scan of this peer's QR is
+    // only a first-time add if nothing of the old group is left to charge
+    // against the per-group budget.
     if let Some(gid) = contact.inner.mls_group_id {
-        let provider = crate::mls::PromtuzMlsProvider::shared();
-        match crate::mls::MlsGroupHandle::load(&provider, &gid) {
-            Ok(Some(mut g)) =>
-                if let Err(e) = g.delete(&provider) {
-                    log::error!("FORGET: mls group delete failed: {e}");
-                },
-            Ok(None) => {},
-            Err(e) => log::error!("FORGET: mls group load failed: {e}"),
-        }
-        let buffer = crate::mls::EpochCatchupBuffer::new(crate::db::mls::stash_db_handle());
-        if let Err(e) = buffer.purge_group(&gid) {
-            log::error!("FORGET: epoch buffer purge failed: {e}");
-        }
+        purge_mls_group(&gid);
     }
 
     if let Ok(conv) = Conversation::for_peer(&ipk) {

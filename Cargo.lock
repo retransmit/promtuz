@@ -851,6 +851,7 @@ version = "0.1.0"
 dependencies = [
  "android_logger",
  "anyhow",
+ "base64",
  "bip39",
  "blake3",
  "chacha20poly1305",
