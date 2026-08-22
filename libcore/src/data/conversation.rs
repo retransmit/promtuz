@@ -40,6 +40,8 @@ fn mint_conversation_id() -> [u8; 16] {
     Ulid::new().to_bytes()
 }
 
+const MAX_TITLE: usize = 64;
+
 pub struct Conversation;
 
 impl Conversation {
@@ -335,7 +337,10 @@ impl Conversation {
         .unwrap_or(false)
     }
 
+    /// Capped like a peer's name: the title arrives from the wire, and a
+    /// megabyte of it would be stored and drawn as-is.
     pub fn set_title(id: &[u8; 16], title: &str) -> Result<()> {
+        let title: String = title.trim().chars().take(MAX_TITLE).collect();
         let conn = MESSAGES_DB.lock();
         conn.execute("UPDATE conversations SET title = ?1 WHERE id = ?2", (title, id.as_slice()))?;
         Ok(())

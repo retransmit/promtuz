@@ -309,7 +309,7 @@ pub async fn edit(conversation: [u8; 16], target: [u8; 16], content: String) -> 
 /// wire — then ships the same body to the peer. `own=true` throughout: we only
 /// revise our own sent messages (outgoing=1).
 pub async fn revise(conversation: [u8; 16], target: [u8; 16], body: Body) -> Result<()> {
-    if let Some((row, content)) = apply_revise_body(&conversation, &target, body.clone(), true)? {
+    if let Some((row, content)) = apply_revise_body(&conversation, &target, body.clone(), true, None)? {
         MessageEv::Edited { id: row.id, conversation, content }.emit();
     }
     send_control(conversation, AppPayload::Revise { target, body }).await
@@ -1354,7 +1354,7 @@ fn split_body(body: Body) -> Option<(String, Option<crate::data::media::MediaRow
 /// path — a peer may only revise messages IT sent us. `None` when the target is
 /// unknown, tombstoned, or authored by the other party.
 pub(crate) fn apply_revise_body(
-    conversation: &[u8; 16], target: &[u8; 16], body: Body, own: bool,
+    conversation: &[u8; 16], target: &[u8; 16], body: Body, own: bool, author: Option<&[u8; 32]>,
 ) -> Result<Option<(crate::db::messages::MessageRow, String)>> {
     let current = BodyKind::stored(crate::data::media::get(conversation, target)?.map(|m| m.kind));
     let incoming = BodyKind::of(&body);
@@ -1362,7 +1362,7 @@ pub(crate) fn apply_revise_body(
         bail!("revision {current:?} -> {incoming:?} is not permitted");
     }
     let Some((content, media)) = split_body(body) else { bail!("sticker revision unsupported") };
-    Ok(crate::data::media::apply_revise(conversation, target, &content, media.as_ref(), own)?
+    Ok(crate::data::media::apply_revise(conversation, target, &content, media.as_ref(), own, author)?
         .map(|row| (row, content)))
 }
 
@@ -2326,6 +2326,18 @@ pub fn process_application_inbound_for<C: DhtClient>(
                     crate::mls::MAX_GROUP_MEMBERS
                 ));
             }
+            if let Err(why) = commit_is_permitted(&group, &staged, author) {
+                // Refused on every honest device alike, so the group's epoch
+                // stays where it was for everyone but the committer, whose
+                // later messages are then ahead of an epoch nobody reached.
+                // Acked as stale: redelivery would only be refused again.
+                warn!(
+                    "GROUP: refusing commit from {} in {}: {why}",
+                    hex::encode(&author[..4]),
+                    hex::encode(&env.group_id.0[..4])
+                );
+                return Ok(InboundDecoded::ApplicationStale);
+            }
             group
                 .merge_staged_commit(ctx.provider, *staged)
                 .map_err(|e| anyhow!("merge_staged_commit: {e}"))?;
@@ -2351,12 +2363,63 @@ pub fn process_application_inbound_for<C: DhtClient>(
             );
             Ok(InboundDecoded::ApplicationBuffered)
         },
-        ProcessedMessageContent::ProposalMessage(_)
-        | ProcessedMessageContent::ExternalJoinProposalMessage(_) => {
-            // Proposals are handled by the next commit; no application
-            // message to surface.
+        ProcessedMessageContent::ProposalMessage(p) => {
+            // A member proposing their own removal is leaving. Kept so the
+            // next commit anyone makes carries it and the leaf goes with it;
+            // dropped, the leaver would haunt the tree, and re-surface as a
+            // member every time the roster is re-read after a commit. Nothing
+            // else a member proposes is kept — a proposal to remove someone
+            // else would ride the founder's next commit under the founder's
+            // name.
+            use openmls::prelude::Proposal;
+            use openmls::prelude::Sender;
+            let leaving = matches!(
+                (p.sender(), p.proposal()),
+                (Sender::Member(i), Proposal::Remove(r)) if *i == r.removed()
+            );
+            if leaving && let Err(e) = group.store_pending_proposal(ctx.provider, *p) {
+                warn!("GROUP: could not keep a leave proposal: {e}");
+            }
             Ok(InboundDecoded::ApplicationBuffered)
         },
+        ProcessedMessageContent::ExternalJoinProposalMessage(_) => {
+            Ok(InboundDecoded::ApplicationBuffered)
+        },
+    }
+}
+
+/// The membership rule, applied on receipt. MLS lets any member commit any
+/// proposal; the founder-only policy the send path enforces in
+/// [`crate::groups`] is only as good as the client that sends, so every
+/// receiver re-checks it here: only the founder may add, or remove anyone
+/// who did not propose their own removal; a self-proposed removal — a leave
+/// — may be committed by anyone; and nothing else may touch the group, in
+/// particular its context extensions, which is where the founder is named.
+/// A pair group has no founder and its roster never changes.
+pub(crate) fn commit_is_permitted(
+    group: &MlsGroupHandle, staged: &openmls::prelude::StagedCommit, author: [u8; 32],
+) -> std::result::Result<(), &'static str> {
+    use openmls::prelude::Proposal;
+    use openmls::prelude::Sender;
+    let mut needs_founder = false;
+    for p in staged.queued_proposals() {
+        match p.proposal() {
+            Proposal::Add(_) => needs_founder = true,
+            Proposal::Remove(r) => {
+                let leaving = matches!(p.sender(), Sender::Member(i) if *i == r.removed());
+                needs_founder |= !leaving;
+            },
+            Proposal::Update(_) => {},
+            _ => return Err("commit carries a proposal kind no member may make"),
+        }
+    }
+    if !needs_founder {
+        return Ok(());
+    }
+    match group.group_meta() {
+        Some(meta) if meta.founder == author => Ok(()),
+        Some(_) => Err("only the founder may change the membership"),
+        None => Err("a pair group's membership never changes"),
     }
 }
 

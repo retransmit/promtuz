@@ -321,6 +321,27 @@ impl MlsGroupHandle {
             .map_err(MlsGroupError::from_openmls)
     }
 
+    /// Keep a member's proposal until a commit picks it up — a leave, in
+    /// practice, which the leaver proposes and someone else carries.
+    pub fn store_pending_proposal(
+        &mut self, provider: &PromtuzMlsProvider, proposal: QueuedProposal,
+    ) -> Result<()> {
+        self.inner
+            .store_pending_proposal(provider.storage(), proposal)
+            .map_err(|e| MlsGroupError::Internal(format!("store proposal: {e:?}")))
+    }
+
+    /// Commit whatever proposals are pending. Returns the commit.
+    pub fn commit_to_pending_proposals<S: Signer>(
+        &mut self, provider: &PromtuzMlsProvider, signer: &S,
+    ) -> Result<MlsMessageOut> {
+        let (commit, _welcome, _group_info) = self
+            .inner
+            .commit_to_pending_proposals(provider, signer)
+            .map_err(MlsGroupError::from_openmls)?;
+        Ok(commit)
+    }
+
     /// Merge a *pending commit* (one we built via
     /// [`Self::add_members`] / [`Self::remove_members`] /
     /// [`Self::self_update`]) into our local state. Advances the
@@ -502,7 +523,9 @@ mod tests {
             .leaf_node_capabilities(Capabilities::new(
                 None,
                 Some(&[PROMTUZ_CIPHERSUITE]),
-                None,
+                // What the real stash declares, so a leaf can join a group
+                // that names its founder in the context.
+                Some(&[GROUP_META_EXTENSION]),
                 None,
                 None,
             ))
@@ -677,6 +700,73 @@ mod tests {
         let proto = in_msg.try_into_protocol_message().expect("proto");
         let result = bob_group.process_incoming(&provider_b, proto);
         assert!(result.is_err(), "removed Bob can't decrypt new-epoch");
+    }
+
+    /// Three members, one founder. A commit that evicts someone is the
+    /// founder's alone to make; a removal the leaver proposed themselves is a
+    /// leave, which anyone may commit.
+    #[test]
+    fn receivers_refuse_membership_commits_from_anyone_but_the_founder() {
+        use crate::messaging::commit_is_permitted;
+
+        let (pa, pb, pc) = (build_provider(), build_provider(), build_provider());
+        let alice = Party::new(&pa, 1);
+        let bob = Party::new(&pb, 2);
+        let carol = Party::new(&pc, 3);
+        let meta = GroupMeta { title: "room".into(), founder: alice.ipk };
+        let mut ga = MlsGroupHandle::create(
+            &pa, &alice.sig_kp, &alice.ipk, alice.sig_kp.public(), &[0xAB; 32], Some(&meta),
+        )
+        .expect("create");
+        let (_c, welcome) = ga
+            .add_members(&pa, &alice.sig_kp, &[make_kp(&pb, &bob), make_kp(&pc, &carol)])
+            .expect("add");
+        ga.merge_pending_commit(&pa).expect("merge");
+        let join = |provider: &PromtuzMlsProvider| {
+            let w = extract_welcome_via_tls(welcome.clone());
+            let staged =
+                StagedWelcome::new_from_welcome(provider, &MlsGroupJoinConfig::default(), w, None)
+                    .expect("staged");
+            MlsGroupHandle::wrap(staged.into_group(provider).expect("into"))
+        };
+        let mut gb = join(&pb);
+        let mut gc = join(&pc);
+        let inbound = |g: &mut MlsGroupHandle, provider: &PromtuzMlsProvider, msg: &MlsMessageOut| {
+            let in_msg = mls_message_from_bytes(&mls_message_to_bytes(msg).unwrap()).unwrap();
+            g.process_incoming(provider, in_msg.try_into_protocol_message().unwrap())
+                .expect("process")
+                .content
+        };
+        let commit_of = |c: ProcessedMessageContent| match c {
+            ProcessedMessageContent::StagedCommitMessage(s) => *s,
+            other => panic!("expected a commit, got {other:?}"),
+        };
+        let proposal_of = |c: ProcessedMessageContent| match c {
+            ProcessedMessageContent::ProposalMessage(p) => *p,
+            other => panic!("expected a proposal, got {other:?}"),
+        };
+
+        // Bob evicts Carol: Alice refuses.
+        let carol_idx = gb.member_index_by_ipk(&carol.ipk).expect("carol");
+        let evict = gb.remove_members(&pb, &bob.sig_kp, &[carol_idx]).expect("commit");
+        let s = commit_of(inbound(&mut ga, &pa, &evict));
+        assert!(commit_is_permitted(&ga, &s, bob.ipk).is_err(), "bob may not evict carol");
+        // Bob's own state moved on without anyone; rebuild him as if he had
+        // never tried, by rejoining from a fresh add.
+        drop(gb);
+
+        // Carol proposes her own removal; Bob is gone, so Alice stores it and
+        // a (non-founder) nobody can commit — so Alice commits, and the
+        // permission Bob would have checked is what is asserted here.
+        let leave = gc.leave(&pc, &carol.sig_kp).expect("leave");
+        let p = proposal_of(inbound(&mut ga, &pa, &leave));
+        ga.store_pending_proposal(&pa, p).expect("store");
+        let commit = ga.commit_to_pending_proposals(&pa, &alice.sig_kp).expect("commit");
+        let s = commit_of(inbound(&mut gc, &pc, &commit));
+        assert!(commit_is_permitted(&gc, &s, alice.ipk).is_ok(), "a leave may be carried");
+        // And the same commit judged as if a non-founder had carried it: still
+        // fine, because the one removal was the leaver's own proposal.
+        assert!(commit_is_permitted(&gc, &s, bob.ipk).is_ok(), "by anyone");
     }
 
     // -------------------------------------------------------------

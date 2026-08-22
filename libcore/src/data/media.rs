@@ -154,18 +154,20 @@ pub fn save_outgoing_with_media(
 /// replaced when the new body carries media, dropped when it doesn't, so a
 /// revision never leaves a stale picture under fresh text. Same authorship
 /// guard as [`crate::data::message::Message::apply_edit`]: `own = true` for our
-/// own revision, `false` for an inbound peer one, so neither side can revise the
-/// other's messages. `None` when the target is missing, tombstoned, or authored
-/// by the other party.
+/// own revision, `false` for an inbound peer one, plus the per-member `author`
+/// check in a group, so nobody can revise another member's messages. `None`
+/// when the target is missing, tombstoned, or authored by someone else.
 pub fn apply_revise(
     conv: &[u8; 16], dispatch_id: &[u8; 16], content: &str, media: Option<&MediaRow>, own: bool,
+    author: Option<&[u8; 32]>,
 ) -> Result<Option<crate::db::messages::MessageRow>> {
     let mut db = MESSAGES_DB.lock();
     let tx = db.transaction()?;
     let n = tx.execute(
         "UPDATE messages SET content = ?1, edited = 1 \
-         WHERE conversation_id = ?2 AND dispatch_id = ?3 AND outgoing = ?4 AND deleted = 0",
-        rusqlite::params![content, conv.as_slice(), dispatch_id.as_slice(), own],
+         WHERE conversation_id = ?2 AND dispatch_id = ?3 AND outgoing = ?4 AND deleted = 0 \
+           AND (?5 IS NULL OR sender_ipk = ?5)",
+        rusqlite::params![content, conv.as_slice(), dispatch_id.as_slice(), own, author.map(|a| a.as_slice())],
     )?;
     if n == 0 {
         return Ok(None);

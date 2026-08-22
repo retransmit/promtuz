@@ -955,7 +955,7 @@ async fn process_deliver(
                     // own=false: a peer may only revise messages IT sent us. The
                     // matrix check lives in apply_revise_body — a refused swap
                     // errors rather than half-applying.
-                    match crate::messaging::apply_revise_body(&conv, &target, body, false) {
+                    match crate::messaging::apply_revise_body(&conv, &target, body, false, Some(&author)) {
                         Ok(Some((row, content))) => {
                             info!("MESSAGE: revise from {}", hex::encode(&msg.from[..4]));
                             MessageEv::Edited { id: row.id, conversation: conv, content }.emit();
@@ -1016,6 +1016,24 @@ async fn process_deliver(
                         SystemEvent::Removed { who } => (SYSTEM_REMOVED, hex::encode(who.0)),
                         SystemEvent::Titled { title } => (SYSTEM_TITLED, title.clone()),
                     };
+                    // Narration may only come from whoever could have done the
+                    // deed: the admin for an add or a removal, the leaver for a
+                    // leave. The roster itself moves only on a merged Commit,
+                    // so a forged line could not remove anyone — but it would
+                    // still read as if it had.
+                    let allowed = match &event {
+                        SystemEvent::Added { .. } | SystemEvent::Removed { .. } =>
+                            Conversation::is_admin(&conv, &author),
+                        SystemEvent::Left { who } => who.0 == author,
+                        SystemEvent::Titled { .. } => true,
+                    };
+                    if !allowed {
+                        warn!(
+                            "GROUP: ignored a membership line from {} who could not have done it",
+                            hex::encode(&author[..4])
+                        );
+                        return Ok(());
+                    }
                     // A rename has no Commit behind it, so the event itself is
                     // the change. Membership events only narrate — the Commit
                     // is what actually moved the roster, and syncing from the

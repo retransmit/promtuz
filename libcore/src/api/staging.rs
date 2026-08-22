@@ -118,7 +118,7 @@ pub fn revise_with_staged(
     // the buffer next, and an attachment the buffer lets go of is unlinked
     // unless a message already names it.
     if let Some((row, content)) =
-        crate::messaging::apply_revise_body(&to, &target, body.clone(), true)?
+        crate::messaging::apply_revise_body(&to, &target, body.clone(), true, None)?
     {
         use crate::events::Emittable;
         crate::events::messaging::MessageEv::Edited { id: row.id, conversation: to, content }.emit();
