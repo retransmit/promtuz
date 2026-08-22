@@ -75,6 +75,10 @@ use std::time::UNIX_EPOCH;
 
 use common::proto::mls_wire::KEYPACKAGE_LIFETIME_MS;
 use common::proto::mls_wire::KP_SCHEDULED_ROTATION_MS;
+
+/// 2026-08-23T00:00Z: when KeyPackages started binding their leaf to the
+/// IPK. A stash with anything older rotates at once.
+const BOUND_CREDENTIALS_SINCE_MS: u64 = 1_787_443_200_000;
 use common::proto::mls_wire::KP_STASH_LOW_WATER;
 use common::proto::mls_wire::KP_STASH_TARGET;
 use common::proto::mls_wire::KeyPackageRecord;
@@ -84,7 +88,6 @@ use common::proto::pack::Packer;
 use common::proto::pack::Unpacker;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
-use openmls::prelude::BasicCredential;
 use openmls::prelude::Capabilities;
 use openmls::prelude::CredentialWithKey;
 use openmls::prelude::KeyPackage;
@@ -207,11 +210,12 @@ impl KeyPackageStash {
     /// Produce a single fresh KeyPackage and persist it.
     ///
     /// Steps:
-    /// 1. Build a `BasicCredential` carrying the IPK bytes.
-    /// 2. Generate a fresh `SignatureKeyPair` (the leaf signing key —
+    /// 1. Generate a fresh `SignatureKeyPair` (the leaf signing key —
     ///    distinct from IPK, see `signer.rs` doc-comment). Persist it
     ///    via `SignatureKeyPair::store(provider.storage())` so openmls
     ///    can find it on Welcome receipt.
+    /// 2. Build the credential binding that key to the IPK
+    ///    ([`super::credential::bound_credential`]).
     /// 3. Build the openmls `KeyPackage` with our pinned cipher suite,
     ///    a 30-day lifetime, and a `Capabilities` advertising only
     ///    suite `0x0003`. The build call writes the
@@ -235,10 +239,7 @@ impl KeyPackageStash {
         let now = now_ms();
         let ipk: [u8; 32] = ipk_signer.verifying_key().to_bytes();
 
-        // 1. Credential.
-        let credential = BasicCredential::new(ipk.to_vec());
-
-        // 2. Leaf signing keypair. We use the basic-credential crate's
+        // 1. Leaf signing keypair. We use the basic-credential crate's
         // `SignatureKeyPair::new(SignatureScheme::ED25519)` so openmls's
         // `Signer::store` slot is wired up — that's how openmls retrieves
         // the secret half on Welcome receipt.
@@ -248,6 +249,8 @@ impl KeyPackageStash {
             .store(provider.storage())
             .map_err(KeyPackageStashError::Storage)?;
 
+        // 2. Credential: the IPK, and its signature over the leaf key it chose.
+        let credential = super::credential::bound_credential(ipk_signer, leaf_kp.public());
         let cwk = CredentialWithKey {
             credential: credential.into(),
             signature_key: leaf_kp.public().into(),
@@ -495,7 +498,10 @@ impl KeyPackageStash {
         match oldest_gen {
             Some(g) if g >= 0 => {
                 let age_ms = now_ms.saturating_sub(g as u64);
+                // Anything minted before the credential binding existed
+                // carries a bare IPK, which no group chat will seat.
                 age_ms >= KP_SCHEDULED_ROTATION_MS
+                    || (now_ms >= BOUND_CREDENTIALS_SINCE_MS && (g as u64) < BOUND_CREDENTIALS_SINCE_MS)
             }
             _ => false,
         }

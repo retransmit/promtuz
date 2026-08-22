@@ -21,6 +21,7 @@
 //! - `libcore/src/api/messaging.rs`: wires MLS into the messaging
 //!   path.
 
+pub mod credential;
 pub mod epoch_catchup;
 pub mod group;
 pub mod keypackage;

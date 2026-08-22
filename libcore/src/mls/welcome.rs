@@ -265,13 +265,16 @@ pub fn process_welcome(
     let mut saw_recipient = false;
     let mut saw_sender = false;
     for m in handle.members() {
-        let id = m.credential.serialized_content();
-        if id == recipient_ipk.as_slice() {
-            saw_recipient = true;
-        }
-        if id == sender_ipk.as_slice() {
-            saw_sender = true;
-        }
+        // Every leaf must be somebody. In a group chat that means bound to
+        // an identity by its own signature — a founder who planted a leaf
+        // claiming someone else is caught here, before the group is joined.
+        let Some(id) = handle.member_ipk(&m) else {
+            return Err(MlsGroupError::Internal(
+                "Welcome seats a leaf bound to no identity".into(),
+            ));
+        };
+        saw_recipient |= id == recipient_ipk;
+        saw_sender |= id == sender_ipk;
     }
     if !saw_recipient {
         return Err(MlsGroupError::Internal(
@@ -304,7 +307,6 @@ mod tests {
     use crate::mls::provider::PromtuzMlsProvider;
     use crate::mls::types::MlsGroupError;
     use ed25519_dalek::SigningKey;
-    use openmls::prelude::BasicCredential;
     use openmls::prelude::Capabilities;
     use openmls::prelude::CredentialWithKey;
     use openmls::prelude::KeyPackage;
@@ -339,15 +341,19 @@ mod tests {
             sig_kp.store(provider.storage()).expect("store sig kp");
             Self { ipk_sk, ipk, sig_kp }
         }
+
+        /// The leaf key under a credential its identity signed for.
+        fn cwk(&self) -> CredentialWithKey {
+            CredentialWithKey {
+                credential:    crate::mls::credential::bound_credential(&self.ipk_sk, self.sig_kp.public()).into(),
+                signature_key: self.sig_kp.public().into(),
+            }
+        }
     }
 
     /// Build a fresh KP for `party` and persist its bundle locally.
     fn make_kp(provider: &PromtuzMlsProvider, party: &Party) -> KeyPackage {
-        let credential = BasicCredential::new(party.ipk.to_vec());
-        let cwk = CredentialWithKey {
-            credential: credential.into(),
-            signature_key: party.sig_kp.public().into(),
-        };
+        let cwk = party.cwk();
         let bundle = KeyPackage::builder()
             .leaf_node_capabilities(Capabilities::new(
                 None,
@@ -374,12 +380,7 @@ mod tests {
         provider_a: &PromtuzMlsProvider, alice: &Party, provider_b: &PromtuzMlsProvider,
         bob: &Party, gid: [u8; 32], meta: Option<&crate::mls::GroupMeta>,
     ) -> (WelcomeEnvelopeP, MlsGroupHandle) {
-        let mut alice_group = MlsGroupHandle::create(
-            provider_a,
-            &alice.sig_kp,
-            &alice.ipk,
-            alice.sig_kp.public(),
-            &gid,
+        let mut alice_group = MlsGroupHandle::create(provider_a, &alice.sig_kp, alice.cwk(), &gid,
             meta,
         )
         .expect("create");
@@ -434,6 +435,55 @@ mod tests {
         assert_eq!(bob_group.group_meta(), Some(meta.clone()), "the joiner reads the founder's meta");
         assert_eq!(alice_group.group_meta(), Some(meta), "and so does the founder");
         assert_eq!(bob_group.member_count(), 2, "a group of two — the case a roster count gets wrong");
+    }
+
+    /// A founder who seats a leaf that merely *says* it is Carol — made with
+    /// keys Carol never signed for — is seating nobody, and the joiner must
+    /// refuse the whole Welcome rather than read that leaf as Carol.
+    #[test]
+    fn a_group_welcome_seating_a_leaf_that_claims_someone_else_is_refused() {
+        let provider_a = build_provider();
+        let provider_b = build_provider();
+        let provider_m = build_provider();
+        let mallory = Party::new(&provider_a, 1);
+        let bob = Party::new(&provider_b, 2);
+        // A leaf key Mallory holds, under a bare credential naming Carol.
+        let fake_carol = Party::new(&provider_m, 3);
+        let carol_ipk = fake_carol.ipk;
+        let cwk = CredentialWithKey {
+            credential:    openmls::prelude::BasicCredential::new(carol_ipk.to_vec()).into(),
+            signature_key: fake_carol.sig_kp.public().into(),
+        };
+        let forged_kp = KeyPackage::builder()
+            .leaf_node_capabilities(Capabilities::new(
+                None,
+                Some(&[PROMTUZ_CIPHERSUITE]),
+                Some(&[crate::mls::GROUP_META_EXTENSION]),
+                None,
+                None,
+            ))
+            .build(PROMTUZ_CIPHERSUITE, &provider_m, &fake_carol.sig_kp, cwk)
+            .expect("build kp")
+            .key_package()
+            .clone();
+
+        let meta = crate::mls::GroupMeta { title: "trap".into(), founder: mallory.ipk };
+        let gid = [9u8; 32];
+        let mut group =
+            MlsGroupHandle::create(&provider_a, &mallory.sig_kp, mallory.cwk(), &gid, Some(&meta))
+                .expect("create");
+        let bob_kp = make_kp(&provider_b, &bob);
+        use openmls_traits::OpenMlsProvider;
+        let kp_ref: [u8; 32] = bob_kp.hash_ref(provider_b.crypto()).unwrap().as_slice().try_into().unwrap();
+        let (_c, welcome) = group
+            .add_members(&provider_a, &mallory.sig_kp, &[bob_kp, forged_kp])
+            .expect("add");
+        group.merge_pending_commit(&provider_a).expect("merge");
+        let env = make_welcome_envelope(welcome, gid, mallory.ipk, bob.ipk, kp_ref, &mallory.ipk_sk)
+            .expect("envelope");
+
+        let err = process_welcome(&provider_b, &env).expect_err("bob refuses");
+        assert!(err.to_string().contains("bound to no identity"), "{err}");
     }
 
     /// The absence of meta is what marks a pair, so a pairing Welcome must

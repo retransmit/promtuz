@@ -95,7 +95,6 @@ use log::error;
 use log::info;
 use log::warn;
 use once_cell::sync::Lazy;
-use openmls::prelude::BasicCredential;
 use openmls::prelude::CredentialWithKey;
 use openmls::prelude::KeyPackage;
 use openmls::prelude::ProcessedMessageContent;
@@ -212,17 +211,18 @@ fn decode_keypackage_bytes(kp_bytes: &[u8]) -> Result<KeyPackage, MlsGroupError>
 
 /// Build a credential-with-key bundle for the founder's leaf, using a
 /// **fresh** Ed25519 leaf signing key (distinct from the IPK so a leaf
-/// compromise can't recover IPK_priv).
+/// compromise can't recover IPK_priv), bound to the identity by the IPK's
+/// signature over it.
 ///
 /// Returns `(SignatureKeyPair, CredentialWithKey)`. The caller persists
 /// the signing keypair in openmls's storage via `.store(provider.storage())`
 /// before invoking `MlsGroup::new_with_group_id`.
 pub(crate) fn build_self_credential(
-    own_ipk: &[u8; 32],
+    ipk_signer: &SigningKey,
 ) -> Result<(openmls_basic_credential::SignatureKeyPair, CredentialWithKey), MlsGroupError> {
-    let credential = BasicCredential::new(own_ipk.to_vec());
     let leaf_kp = openmls_basic_credential::SignatureKeyPair::new(SignatureScheme::ED25519)
         .map_err(|e| MlsGroupError::Internal(format!("leaf signature key: {e:?}")))?;
+    let credential = crate::mls::credential::bound_credential(ipk_signer, leaf_kp.public());
     let cwk = CredentialWithKey {
         credential:    credential.into(),
         signature_key: leaf_kp.public().into(),
@@ -893,7 +893,7 @@ pub async fn lazy_create_group<C: DhtClient>(
 /// validated it already, but a malicious replica could forward a
 /// stale-but-tampered record.
 pub(crate) async fn fetch_verified_keypackage<C: DhtClient>(
-    ctx: &MlsContext<'_, C>, who: &[u8; 32],
+    ctx: &MlsContext<'_, C>, who: &[u8; 32], strict: bool,
 ) -> Result<(KeyPackage, [u8; 32])> {
     // Keep the concrete `DhtClientError` downcastable through the anyhow chain
     // (do NOT stringify): `send_payload` inspects it to detect a `NoStash`
@@ -925,6 +925,13 @@ pub(crate) async fn fetch_verified_keypackage<C: DhtClient>(
     }
     let kp = decode_keypackage_bytes(&fetched.record.kp_bytes.0)
         .map_err(|e| anyhow!("decode KP: {e}"))?;
+    // The leaf inside must be bound to the same identity the record is
+    // signed by — a legacy leaf will do for a pair, which the owner_sig
+    // above already ties to `who`, but not for a group chat, where every
+    // other member reads the roster off the leaves alone.
+    if crate::mls::credential::leaf_node_ipk(kp.leaf_node(), strict) != Some(*who) {
+        bail!("fetched KP's leaf is not bound to the member requested");
+    }
     let kp_ref: [u8; 32] = {
         let r = kp.hash_ref(ctx.provider.crypto()).map_err(|e| anyhow!("kp hash_ref: {e:?}"))?;
         let mut out = [0u8; 32];
@@ -940,66 +947,23 @@ pub async fn lazy_create_group_paired<C: DhtClient>(
     ctx: &MlsContext<'_, C>, our_ipk: &[u8; 32], ipk_signer: &SigningKey, to: &[u8; 32],
     pairing: Option<PairingP>,
 ) -> Result<MlsGroupHandle> {
-    // 1. Fetch peer's KP.
-    // Keep the concrete `DhtClientError` downcastable through the anyhow
-    // chain (do NOT stringify): `attempt_send` inspects it to detect a
-    // `NoStash` KP-miss and defer the send instead of hard-failing.
-    let fetched = ctx
-        .dht
-        .fetch_keypackage_for(to)
-        .await
-        .map_err(|e| anyhow::Error::new(e).context("fetch_keypackage_for"))?;
-
-    // Verify the per-record `owner_sig` re-validates under the peer's
-    // IPK (defence-in-depth — the home should have already done this,
-    // but a malicious replica might forward stale-but-tampered records).
-    {
-        use common::proto::mls_wire::MLS_WIRE_VERSION;
-        use common::proto::mls_wire::kp_record_signing_input;
-        let vk = VerifyingKey::from_bytes(&fetched.record.ipk.0)
-            .map_err(|e| anyhow!("recipient ipk is not valid Ed25519: {e}"))?;
-        if &fetched.record.ipk.0 != to {
-            bail!("fetched KP's owner ipk does not match `to`");
-        }
-        let sig = Signature::from_bytes(&fetched.record.owner_sig.0);
-        // The transcript folds `BLAKE3(kp_bytes)` so the full record
-        // (incl. body) is bound by `owner_sig`.
-        let msg = kp_record_signing_input(
-            MLS_WIRE_VERSION,
-            &fetched.record.ipk.0,
-            &fetched.record.kp_ref.0,
-            &fetched.record.kp_bytes.0,
-            fetched.record.expires_at_ms,
-        );
-        // `verify_strict` rejects non-canonical sigs and small-order R
-        // values; mirrors the relay-side discipline.
-        vk.verify_strict(&msg, &sig).map_err(|e| anyhow!("owner_sig invalid: {e}"))?;
-    }
-
-    let kp = decode_keypackage_bytes(&fetched.record.kp_bytes.0)
-        .map_err(|e| anyhow!("decode KP: {e}"))?;
-    let kp_ref_used: [u8; 32] = {
-        let r = kp.hash_ref(ctx.provider.crypto()).map_err(|e| anyhow!("kp hash_ref: {e:?}"))?;
-        let mut out = [0u8; 32];
-        let s = r.as_slice();
-        let copy = s.len().min(32);
-        out[..copy].copy_from_slice(&s[..copy]);
-        out
-    };
+    // 1. Fetch peer's KP. A legacy leaf will do here: a pair has nobody in
+    // it to impersonate, and the record's owner_sig already ties it to `to`.
+    let (kp, kp_ref_used) = fetch_verified_keypackage(ctx, to, false).await?;
 
     // 2. Mint group id.
     let group_id = mint_group_id(our_ipk);
 
     // 3. Build credential + leaf signer.
-    let (leaf_kp, _cwk_unused) =
-        build_self_credential(our_ipk).map_err(|e| anyhow!("build credential: {e}"))?;
+    let (leaf_kp, cwk) =
+        build_self_credential(ipk_signer).map_err(|e| anyhow!("build credential: {e}"))?;
     leaf_kp.store(ctx.provider.storage()).map_err(|e| anyhow!("store leaf kp: {e:?}"))?;
 
     // 4. Create group with us as founder.
     let mut group =
         // No meta: a pairing group is a 1:1, and that absence is exactly how
         // the far side knows not to open a group chat for it.
-        MlsGroupHandle::create(ctx.provider, &leaf_kp, our_ipk, leaf_kp.public(), &group_id, None)
+        MlsGroupHandle::create(ctx.provider, &leaf_kp, cwk, &group_id, None)
             .map_err(|e| anyhow!("create group: {e}"))?;
 
     // 5. Add the recipient via their KP.
@@ -2024,10 +1988,7 @@ pub(crate) fn home_for_group(group: &MlsGroupHandle, from: &[u8; 32]) -> Result<
         let _ = Contact::set_mls_group_id(from, &gid);
         return Ok(id);
     };
-    let roster: Vec<[u8; 32]> = group
-        .members()
-        .filter_map(|m| m.credential.serialized_content().try_into().ok())
-        .collect();
+    let roster = group.roster();
     // The founder from the context, not `from`: on a group re-opened by an
     // arriving message, `from` is whoever spoke first, not who runs the group.
     let id = Conversation::join_group(&meta.founder, &roster)?;
@@ -2175,10 +2136,9 @@ fn process_application_inbound<C: DhtClient>(
 /// the push before relying on ordering.
 fn persist_drained(
     drained: Vec<crate::mls::epoch_catchup::ProcessedApplicationMessage>, conversation: [u8; 16],
-    fallback_sender: [u8; 32],
 ) {
     for m in drained {
-        let sender_ipk = m.sender.unwrap_or(fallback_sender);
+        let sender_ipk = m.sender;
         let Ok(did): Result<[u8; 16], _> = m.dispatch_id.as_slice().try_into() else { continue };
         let ts = crate::quic::server::accepted_at_secs(m.accepted_at_ms);
         // Post carries the quote target alongside the body; pre-v12 payloads
@@ -2305,7 +2265,7 @@ pub fn process_application_inbound_for<C: DhtClient>(
     // The MLS leaf credential is the authority on who wrote this; the outer
     // envelope sender only proves who put it on the wire. They coincide in a
     // 1:1 chat and routinely diverge in a group.
-    let author = processed.sender.unwrap_or(sender_ipk);
+    let author = processed.sender;
     match processed.content {
         ProcessedMessageContent::ApplicationMessage(app) => {
             let plaintext = app.into_bytes();
@@ -2314,7 +2274,6 @@ pub fn process_application_inbound_for<C: DhtClient>(
             persist_drained(
                 ctx.buffer.drain_when_ready(&mut group, ctx.provider).unwrap_or_default(),
                 Conversation::for_group(&env.group_id.0).unwrap_or_default(),
-                author,
             );
             Ok(InboundDecoded::Application { plaintext, group_id: env.group_id.0, author })
         },
@@ -2346,11 +2305,7 @@ pub fn process_application_inbound_for<C: DhtClient>(
             // that accompanies it. A member removed here keeps their row,
             // marked inactive, so their old messages still resolve to a name.
             if let Some(conversation) = Conversation::for_group(&env.group_id.0) {
-                let roster: Vec<[u8; 32]> = group
-                    .members()
-                    .filter_map(|m| m.credential.serialized_content().try_into().ok())
-                    .collect();
-                if let Err(e) = Conversation::sync_roster(&conversation, &roster) {
+                if let Err(e) = Conversation::sync_roster(&conversation, &group.roster()) {
                     warn!("GROUP: could not sync the roster after a commit: {e}");
                 }
             }
@@ -2359,7 +2314,6 @@ pub fn process_application_inbound_for<C: DhtClient>(
             persist_drained(
                 ctx.buffer.drain_when_ready(&mut group, ctx.provider).unwrap_or_default(),
                 Conversation::for_group(&env.group_id.0).unwrap_or_default(),
-                author,
             );
             Ok(InboundDecoded::ApplicationBuffered)
         },
@@ -2399,17 +2353,34 @@ pub fn process_application_inbound_for<C: DhtClient>(
 pub(crate) fn commit_is_permitted(
     group: &MlsGroupHandle, staged: &openmls::prelude::StagedCommit, author: [u8; 32],
 ) -> std::result::Result<(), &'static str> {
+    use crate::mls::credential::leaf_node_ipk;
     use openmls::prelude::Proposal;
     use openmls::prelude::Sender;
+    let strict = group.is_group_chat();
+    // A committer's fresh leaf must still be theirs: the update path is
+    // where a member could swap in a credential claiming someone else.
+    if let Some(leaf) = staged.update_path_leaf_node()
+        && leaf_node_ipk(leaf, strict) != Some(author)
+    {
+        return Err("the committer's new leaf is not bound to them");
+    }
     let mut needs_founder = false;
     for p in staged.queued_proposals() {
         match p.proposal() {
-            Proposal::Add(_) => needs_founder = true,
+            Proposal::Add(a) => {
+                // Whoever is added must arrive as somebody, or the roster
+                // holds a leaf every device reads as a different person.
+                if leaf_node_ipk(a.key_package().leaf_node(), strict).is_none() {
+                    return Err("commit adds a leaf bound to no identity");
+                }
+                needs_founder = true;
+            },
             Proposal::Remove(r) => {
                 let leaving = matches!(p.sender(), Sender::Member(i) if *i == r.removed());
                 needs_founder |= !leaving;
             },
-            Proposal::Update(_) => {},
+            // Nothing in promtuz proposes an update — a member refreshes
+            // their own leaf by committing — so one is someone else's client.
             _ => return Err("commit carries a proposal kind no member may make"),
         }
     }
@@ -2920,7 +2891,7 @@ mod tests {
         let processed = bob_group.process_incoming(&bob.provider, proto).unwrap();
         assert_eq!(
             processed.sender,
-            Some(alice.ipk),
+            alice.ipk,
             "the leaf credential names the author, not the envelope carrier"
         );
         match processed.content {

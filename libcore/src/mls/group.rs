@@ -117,37 +117,30 @@ pub struct GroupMeta {
 
 /// A decrypted inbound message together with the member who wrote it.
 ///
-/// `sender` is the IPK carried in the authenticated MLS leaf credential — the
-/// only authority on authorship inside a group. `None` only if a credential
-/// somehow isn't 32 bytes, which a well-formed member cannot produce.
+/// `sender` is the identity bound to the authenticated MLS leaf that produced
+/// this — the only authority on authorship inside a group. See
+/// [`super::credential`] for what "bound" means and why a bare claim is not.
 pub struct ProcessedInbound {
-    pub sender:  Option<[u8; 32]>,
+    pub sender:  [u8; 32],
     pub content: ProcessedMessageContent,
 }
 
 impl MlsGroupHandle {
     /// Construct a fresh group with the caller as the founding member.
     ///
-    /// `own_ipk` is the caller's long-term Ed25519 IPK; it becomes the
-    /// `BasicCredential::identity`. `signer` is the **leaf** signing key
-    /// (distinct from IPK, see `signer.rs`); `leaf_signing_public` is its
-    /// 32-byte verifying half (the `Signer` trait can't expose this
-    /// directly — see module docs).
+    /// `signer` is the **leaf** signing key (distinct from IPK, see
+    /// `signer.rs`); `credential_with_key` is that key's public half under the
+    /// credential that binds it to the caller's identity — see
+    /// [`super::credential::bound_credential`].
     ///
     /// `group_id` is the 32-byte promtuz group identifier. `meta` marks this a
     /// group chat rather than a 1:1 — see [`GroupMeta`]; `None` builds a pair.
     ///
     /// **Cipher suite is pinned** to [`PROMTUZ_CIPHERSUITE`].
     pub fn create<S: Signer>(
-        provider: &PromtuzMlsProvider, signer: &S, own_ipk: &[u8; 32],
-        leaf_signing_public: &[u8], group_id: &[u8; 32], meta: Option<&GroupMeta>,
+        provider: &PromtuzMlsProvider, signer: &S, credential_with_key: CredentialWithKey,
+        group_id: &[u8; 32], meta: Option<&GroupMeta>,
     ) -> Result<Self> {
-        let credential = BasicCredential::new(own_ipk.to_vec());
-        let credential_with_key = CredentialWithKey {
-            credential: credential.into(),
-            signature_key: leaf_signing_public.to_vec().into(),
-        };
-
         let mut create_config = MlsGroupCreateConfig::builder()
             .ciphersuite(PROMTUZ_CIPHERSUITE)
             // Handshake framing stays opaque to the relay. Pinned rather than
@@ -303,11 +296,20 @@ impl MlsGroupHandle {
             .inner
             .process_message(provider, message)
             .map_err(MlsGroupError::from_openmls)?;
-        // Read the author off the authenticated leaf credential before the
-        // content consumes it. MLS proves which member produced this message;
-        // the outer envelope only proves who handed it to the relay, and in a
-        // group those are routinely different people.
-        let sender: Option<[u8; 32]> = processed.credential().serialized_content().try_into().ok();
+        // Read the author off the authenticated leaf before the content
+        // consumes it. MLS proves which leaf produced this message, and the
+        // leaf's credential proves whose it is; the outer envelope only
+        // proves who handed it to the relay, and in a group those are
+        // routinely different people. A leaf that proves nothing is nobody,
+        // and nobody's messages are refused rather than attributed.
+        let sender = match processed.sender() {
+            Sender::Member(index) => self
+                .inner
+                .member_at(*index)
+                .and_then(|m| super::credential::member_ipk(&m, self.is_group_chat())),
+            _ => None,
+        }
+        .ok_or_else(|| MlsGroupError::Internal("message from a leaf bound to no identity".into()))?;
         Ok(ProcessedInbound { sender, content: processed.into_content() })
     }
 
@@ -394,19 +396,38 @@ impl MlsGroupHandle {
         })
     }
 
-    /// Iterate members. Returned items expose `index: LeafNodeIndex`
-    /// and `credential: Credential`; the
-    /// `BasicCredential::identity` carries each member's IPK bytes.
+    /// Iterate members. Returned items expose `index: LeafNodeIndex`,
+    /// `credential` and `signature_key`; [`Self::member_ipk`] is how a member
+    /// becomes a person.
     pub fn members(&self) -> impl Iterator<Item = Member> + '_ {
         self.inner.members()
     }
 
-    /// Find a member by their IPK. Returns the leaf index, or `None`
-    /// if no member's `BasicCredential::identity` matches.
+    /// Whether this is a group chat (founded with a [`GroupMeta`]) rather
+    /// than a pair — the line along which the credential rule tightens.
+    pub fn is_group_chat(&self) -> bool {
+        self.group_meta().is_some()
+    }
+
+    /// The identity a member's leaf is bound to, under this group's rule;
+    /// `None` for a leaf that proves nothing.
+    pub fn member_ipk(&self, m: &Member) -> Option<[u8; 32]> {
+        super::credential::member_ipk(m, self.is_group_chat())
+    }
+
+    /// Everyone whose leaf is bound to an identity, in leaf order.
+    pub fn roster(&self) -> Vec<[u8; 32]> {
+        let strict = self.is_group_chat();
+        self.inner.members().filter_map(|m| super::credential::member_ipk(&m, strict)).collect()
+    }
+
+    /// Find a member by their IPK. Returns the leaf index, or `None` if no
+    /// member's leaf is bound to it.
     pub fn member_index_by_ipk(&self, ipk: &[u8; 32]) -> Option<LeafNodeIndex> {
+        let strict = self.is_group_chat();
         self.inner
             .members()
-            .find(|m| m.credential.serialized_content() == ipk.as_slice())
+            .find(|m| super::credential::member_ipk(m, strict) == Some(*ipk))
             .map(|m| m.index)
     }
 
@@ -493,6 +514,7 @@ mod tests {
     /// the same signer is reused for create + add operations.
     struct Party {
         ipk: [u8; 32],
+        ipk_signer: ed25519_dalek::SigningKey,
         sig_kp: openmls_basic_credential::SignatureKeyPair,
     }
 
@@ -500,13 +522,20 @@ mod tests {
         fn new(provider: &PromtuzMlsProvider, ipk_seed: u8) -> Self {
             // IPK is deterministic; leaf signing key is random — the
             // separation mirrors the leaf-key-distinct-from-IPK design.
-            let ipk = ed25519_dalek::SigningKey::from_bytes(&[ipk_seed; 32])
-                .verifying_key()
-                .to_bytes();
+            let ipk_signer = ed25519_dalek::SigningKey::from_bytes(&[ipk_seed; 32]);
+            let ipk = ipk_signer.verifying_key().to_bytes();
             let sig_kp = openmls_basic_credential::SignatureKeyPair::new(SignatureScheme::ED25519)
                 .expect("sig kp");
             sig_kp.store(provider.storage()).expect("store sig kp");
-            Self { ipk, sig_kp }
+            Self { ipk, ipk_signer, sig_kp }
+        }
+
+        /// The leaf key under a credential its identity signed for.
+        fn cwk(&self) -> CredentialWithKey {
+            CredentialWithKey {
+                credential:    crate::mls::credential::bound_credential(&self.ipk_signer, self.sig_kp.public()).into(),
+                signature_key: self.sig_kp.public().into(),
+            }
         }
     }
 
@@ -514,11 +543,7 @@ mod tests {
     /// `provider`'s storage. The KeyPackage itself ships across to a
     /// counterparty's group; the bundle (init+enc keys) stays local.
     fn make_kp(provider: &PromtuzMlsProvider, party: &Party) -> KeyPackage {
-        let credential = BasicCredential::new(party.ipk.to_vec());
-        let cwk = CredentialWithKey {
-            credential: credential.into(),
-            signature_key: party.sig_kp.public().into(),
-        };
+        let cwk = party.cwk();
         let bundle = KeyPackage::builder()
             .leaf_node_capabilities(Capabilities::new(
                 None,
@@ -536,12 +561,7 @@ mod tests {
 
     /// Helper: Alice creates a 1-member group.
     fn create_group(provider: &PromtuzMlsProvider, party: &Party, gid: &[u8; 32]) -> MlsGroupHandle {
-        MlsGroupHandle::create(
-            provider,
-            &party.sig_kp,
-            &party.ipk,
-            party.sig_kp.public(),
-            gid,
+        MlsGroupHandle::create(provider, &party.sig_kp, party.cwk(), gid,
             None,
         )
         .expect("create group")
@@ -714,8 +734,7 @@ mod tests {
         let bob = Party::new(&pb, 2);
         let carol = Party::new(&pc, 3);
         let meta = GroupMeta { title: "room".into(), founder: alice.ipk };
-        let mut ga = MlsGroupHandle::create(
-            &pa, &alice.sig_kp, &alice.ipk, alice.sig_kp.public(), &[0xAB; 32], Some(&meta),
+        let mut ga = MlsGroupHandle::create(&pa, &alice.sig_kp, alice.cwk(), &[0xAB; 32], Some(&meta),
         )
         .expect("create");
         let (_c, welcome) = ga
@@ -746,27 +765,26 @@ mod tests {
             other => panic!("expected a proposal, got {other:?}"),
         };
 
-        // Bob evicts Carol: Alice refuses.
-        let carol_idx = gb.member_index_by_ipk(&carol.ipk).expect("carol");
-        let evict = gb.remove_members(&pb, &bob.sig_kp, &[carol_idx]).expect("commit");
-        let s = commit_of(inbound(&mut ga, &pa, &evict));
-        assert!(commit_is_permitted(&ga, &s, bob.ipk).is_err(), "bob may not evict carol");
-        // Bob's own state moved on without anyone; rebuild him as if he had
-        // never tried, by rejoining from a fresh add.
-        drop(gb);
-
-        // Carol proposes her own removal; Bob is gone, so Alice stores it and
-        // a (non-founder) nobody can commit — so Alice commits, and the
-        // permission Bob would have checked is what is asserted here.
-        let leave = gc.leave(&pc, &carol.sig_kp).expect("leave");
+        // Bob proposes his own removal; Carol, no founder, commits it; Alice
+        // judges Carol's commit: a leave may be carried by anyone.
+        let leave = gb.leave(&pb, &bob.sig_kp).expect("leave");
         let p = proposal_of(inbound(&mut ga, &pa, &leave));
         ga.store_pending_proposal(&pa, p).expect("store");
-        let commit = ga.commit_to_pending_proposals(&pa, &alice.sig_kp).expect("commit");
-        let s = commit_of(inbound(&mut gc, &pc, &commit));
-        assert!(commit_is_permitted(&gc, &s, alice.ipk).is_ok(), "a leave may be carried");
-        // And the same commit judged as if a non-founder had carried it: still
-        // fine, because the one removal was the leaver's own proposal.
-        assert!(commit_is_permitted(&gc, &s, bob.ipk).is_ok(), "by anyone");
+        let p = proposal_of(inbound(&mut gc, &pc, &leave));
+        gc.store_pending_proposal(&pc, p).expect("store");
+        let carried = gc.commit_to_pending_proposals(&pc, &carol.sig_kp).expect("commit");
+        let s = commit_of(inbound(&mut ga, &pa, &carried));
+        assert!(commit_is_permitted(&ga, &s, carol.ipk).is_ok(), "a leave may be carried by anyone");
+        ga.merge_staged_commit(&pa, s).expect("merge");
+        gc.merge_pending_commit(&pc).expect("merge");
+        assert_eq!(ga.member_count(), 2);
+
+        // Carol evicts Alice: refused — only the founder removes anyone
+        // who did not ask to go.
+        let alice_idx = gc.member_index_by_ipk(&alice.ipk).expect("alice");
+        let evict = gc.remove_members(&pc, &carol.sig_kp, &[alice_idx]).expect("commit");
+        let s = commit_of(inbound(&mut ga, &pa, &evict));
+        assert!(commit_is_permitted(&ga, &s, carol.ipk).is_err(), "carol may not evict the founder");
     }
 
     // -------------------------------------------------------------

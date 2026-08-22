@@ -147,11 +147,11 @@ pub struct ProcessedApplicationMessage {
     /// so a buffered message is dated when it was sent. Falls back to the
     /// buffer's own receive time for rows written before it was recorded.
     pub accepted_at_ms: u64,
-    /// The member who wrote it, off the authenticated MLS leaf credential.
-    /// Recovered at drain time rather than at buffer time, so a message that
-    /// waited out several epochs still attributes to its real author instead
-    /// of to whoever's envelope happened to unblock the queue.
-    pub sender: Option<[u8; 32]>,
+    /// The member who wrote it, off the authenticated MLS leaf. Recovered at
+    /// drain time rather than at buffer time, so a message that waited out
+    /// several epochs still attributes to its real author instead of to
+    /// whoever's envelope happened to unblock the queue.
+    pub sender: [u8; 32],
 }
 
 #[allow(dead_code)] // messaging.rs caller.
@@ -469,7 +469,7 @@ impl EpochCatchupBuffer {
 /// struct.
 fn application_to_processed(
     app: ApplicationMessage, dispatch_id: Vec<u8>, epoch: u64, accepted_at_ms: u64,
-    sender: Option<[u8; 32]>,
+    sender: [u8; 32],
 ) -> ProcessedApplicationMessage {
     ProcessedApplicationMessage {
         dispatch_id,
@@ -515,27 +515,31 @@ mod tests {
 
     /// Test fixture identical to the one in `group::tests`.
     struct Party {
+        ipk_signer: ed25519_dalek::SigningKey,
         ipk: [u8; 32],
         sig_kp: openmls_basic_credential::SignatureKeyPair,
     }
     impl Party {
         fn new(provider: &PromtuzMlsProvider, seed: u8) -> Self {
-            let ipk = ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
-                .verifying_key()
-                .to_bytes();
+            let ipk_signer = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+            let ipk = ipk_signer.verifying_key().to_bytes();
             let sig_kp = openmls_basic_credential::SignatureKeyPair::new(SignatureScheme::ED25519)
                 .expect("sig kp");
             sig_kp.store(provider.storage()).expect("store sig kp");
-            Self { ipk, sig_kp }
+            Self { ipk_signer, ipk, sig_kp }
+        }
+
+        /// The leaf key under a credential its identity signed for.
+        fn cwk(&self) -> CredentialWithKey {
+            CredentialWithKey {
+                credential:    crate::mls::credential::bound_credential(&self.ipk_signer, self.sig_kp.public()).into(),
+                signature_key: self.sig_kp.public().into(),
+            }
         }
     }
 
     fn make_kp(provider: &PromtuzMlsProvider, party: &Party) -> KeyPackage {
-        let credential = BasicCredential::new(party.ipk.to_vec());
-        let cwk = CredentialWithKey {
-            credential: credential.into(),
-            signature_key: party.sig_kp.public().into(),
-        };
+        let cwk = party.cwk();
         let bundle = KeyPackage::builder()
             .leaf_node_capabilities(Capabilities::new(
                 None,
@@ -565,12 +569,7 @@ mod tests {
         let alice = Party::new(&provider_a, 1);
         let bob = Party::new(&provider_b, 2);
 
-        let mut alice_group = MlsGroupHandle::create(
-            &provider_a,
-            &alice.sig_kp,
-            &alice.ipk,
-            alice.sig_kp.public(),
-            &[0xAA; 32],
+        let mut alice_group = MlsGroupHandle::create(&provider_a, &alice.sig_kp, alice.cwk(), &[0xAA; 32],
             None,
         )
         .expect("create alice group");

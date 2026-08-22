@@ -88,14 +88,14 @@ pub async fn create_group(title: String, members: Vec<[u8; 32]>) -> Result<[u8; 
         // leave a half-built group behind.
         let mut kps = Vec::with_capacity(members.len());
         for m in &members {
-            let (kp, kp_ref) = crate::messaging::fetch_verified_keypackage(&ctx, m)
+            let (kp, kp_ref) = crate::messaging::fetch_verified_keypackage(&ctx, m, true)
                 .await
                 .map_err(|e| no_keys_error(m, e))?;
             kps.push((*m, kp, kp_ref));
         }
 
         let group_id = crate::messaging::mint_group_id(&our_ipk);
-        let (leaf_kp, _cwk) = crate::messaging::build_self_credential(&our_ipk)
+        let (leaf_kp, cwk) = crate::messaging::build_self_credential(&ipk_signer)
             .map_err(|e| anyhow!("build credential: {e}"))?;
         leaf_kp.store(ctx.provider.storage()).map_err(|e| anyhow!("store leaf kp: {e:?}"))?;
 
@@ -103,15 +103,8 @@ pub async fn create_group(title: String, members: Vec<[u8; 32]>) -> Result<[u8; 
         // It rides in the MLS group context, so it arrives inside the Welcome
         // and no relay can strip it.
         let meta = crate::mls::GroupMeta { title: title.clone(), founder: our_ipk };
-        let mut group = MlsGroupHandle::create(
-            ctx.provider,
-            &leaf_kp,
-            &our_ipk,
-            leaf_kp.public(),
-            &group_id,
-            Some(&meta),
-        )
-        .map_err(|e| anyhow!("create group: {e}"))?;
+        let mut group = MlsGroupHandle::create(ctx.provider, &leaf_kp, cwk, &group_id, Some(&meta))
+            .map_err(|e| anyhow!("create group: {e}"))?;
 
         // One Commit adds everyone, and one Welcome covers them all — each
         // joiner finds their own secret inside it.
@@ -166,7 +159,7 @@ pub async fn add_member(conversation: [u8; 16], who: [u8; 32]) -> Result<()> {
     }
 
     with_mls!(ctx, {
-        let (kp, kp_ref) = crate::messaging::fetch_verified_keypackage(&ctx, &who)
+        let (kp, kp_ref) = crate::messaging::fetch_verified_keypackage(&ctx, &who, true)
             .await
             .map_err(|e| no_keys_error(&who, e))?;
         let mut group = load_group(ctx.provider, &group_id)?;
