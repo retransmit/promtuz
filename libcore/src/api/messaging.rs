@@ -346,6 +346,26 @@ pub fn delete_message(
     Ok(())
 }
 
+/// One message search hit.
+#[derive(uniffi::Record)]
+pub struct SearchHit {
+    pub dispatch_id: Vec<u8>,
+    /// Messages in the chat newer than this one.
+    pub newer: u32,
+}
+
+/// Messages in a conversation containing `query`, newest first.
+#[uniffi::export]
+pub fn search_messages(
+    conversation_id: Vec<u8>, query: String, limit: u32,
+) -> Result<Vec<SearchHit>, CoreError> {
+    let conv = to_conv16(&conversation_id)?;
+    Ok(Message::search(&conv, &query, limit)
+        .into_iter()
+        .map(|(did, newer)| SearchHit { dispatch_id: did.to_vec(), newer })
+        .collect())
+}
+
 /// Paginated history for a conversation, oldest-first. `before_id` (a ULID)
 /// pages backwards; pass an empty string for the latest page.
 #[uniffi::export]

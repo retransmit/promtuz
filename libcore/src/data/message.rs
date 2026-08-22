@@ -555,6 +555,48 @@ impl Message {
         }
     }
 
+    /// Messages in `conversation` whose text contains `query`, newest first,
+    /// each with how many messages in the chat are newer than it — what a
+    /// screen holding the newest N needs to know to widen its window to the
+    /// hit. Plain substring match; case-insensitive for ASCII, which is what
+    /// SQLite's LIKE gives without ICU.
+    ///
+    /// ponytail: LIKE over `content` — an FTS table if a chat ever holds
+    /// enough to make this noticeable.
+    pub fn search(conversation_id: &[u8; 16], query: &str, limit: u32) -> Vec<([u8; 16], u32)> {
+        let needle = query.trim();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let pattern = format!(
+            "%{}%",
+            needle.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+        );
+        let conn = MESSAGES_DB.lock();
+        let mut stmt = match conn.prepare(
+            "SELECT m.dispatch_id, \
+                    (SELECT COUNT(*) FROM messages n \
+                      WHERE n.conversation_id = m.conversation_id AND n.id > m.id) \
+             FROM messages m \
+             WHERE m.conversation_id = ?1 AND m.deleted = 0 AND m.system = 0 \
+               AND m.dispatch_id IS NOT NULL AND m.content LIKE ?2 ESCAPE '\\' \
+             ORDER BY m.id DESC LIMIT ?3",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map((conversation_id.as_slice(), pattern, limit), |r| {
+            let did: Vec<u8> = r.get(0)?;
+            Ok((did, r.get::<_, u32>(1)?))
+        })
+        .map(|rows| {
+            rows.filter_map(|r| r.ok())
+                .filter_map(|(did, newer)| Some((did.try_into().ok()?, newer)))
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
     /// Outgoing rows still pending (status = 0) — the durable-first-send
     /// retry set. Oldest-first by ULID so a reconnect re-sends in send order.
     pub fn pending_outgoing() -> Vec<MessageRow> {
@@ -693,6 +735,34 @@ mod tests {
     /// never downgrade (a later Delivered can't undo a Read). Mirrors
     /// `mark_receipt_upto`'s SQL against an in-memory DB (the method uses the
     /// process-global connection).
+    /// Newest first, each hit knowing how far down the chat it sits, and the
+    /// LIKE wildcards a user might type treated as text.
+    #[test]
+    fn search_finds_text_newest_first_with_its_depth() {
+        let dir = std::env::temp_dir().join("promtuz-search-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
+
+        let conv = [0x71u8; 16];
+        // Rows are ordered by ULID, which only orders across milliseconds.
+        let tick = || std::thread::sleep(std::time::Duration::from_millis(2));
+        let first = Message::save_outgoing(conv, "hello world", None).unwrap();
+        tick();
+        Message::save_outgoing(conv, "HELLO again", None).unwrap();
+        tick();
+        Message::save_outgoing(conv, "bye", None).unwrap();
+
+        let hits = Message::search(&conv, "hello", 10);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].1, 1, "the newer hit has one message after it");
+        assert_eq!(hits[1].1, 2, "the older has two");
+        let first_did: [u8; 16] = first.inner.dispatch_id.unwrap().try_into().unwrap();
+        assert_eq!(hits[1].0, first_did);
+
+        assert!(Message::search(&conv, "%", 10).is_empty(), "a wildcard is just a character");
+        assert!(Message::search(&conv, "  ", 10).is_empty(), "blank finds nothing");
+    }
+
     #[test]
     fn receipt_watermark_covers_backlog_without_downgrade() {
         let conn = crate::db::messages::open_in_memory();

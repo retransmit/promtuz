@@ -33,9 +33,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import uniffi.core.MediaRecord
@@ -126,6 +131,46 @@ class ChatVM(private val application: Application) : ViewModel() {
     /** Decoded tile per staged id — the client-side preview the core doesn't return. */
     private val previews = mutableMapOf<ULong, ImageBitmap>()
 
+    /**
+     * In-chat search. [searchQuery] is null while the bar is closed; hits are
+     * newest first, and [hitIndex] walks them. A hit below the loaded window
+     * widens the window first, then [jump] names the message for the screen
+     * to glide to once its row exists.
+     */
+    val searchQuery = MutableStateFlow<String?>(null)
+    private val _hits = MutableStateFlow<List<String>>(emptyList())
+    val hits: StateFlow<List<String>> = _hits.asStateFlow()
+    private var hitDepth: List<Int> = emptyList()
+    private val _hitIndex = MutableStateFlow(0)
+    val hitIndex: StateFlow<Int> = _hitIndex.asStateFlow()
+    private val _jump = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    val jump: SharedFlow<String> = _jump.asSharedFlow()
+
+    fun openSearch() { searchQuery.value = "" }
+    fun closeSearch() { searchQuery.value = null; _hits.value = emptyList(); hitDepth = emptyList() }
+    fun nextHit() = stepHit(1)
+    fun prevHit() = stepHit(-1)
+
+    private fun stepHit(by: Int) {
+        val n = _hits.value.size
+        if (n == 0) return
+        val i = ((_hitIndex.value + by) % n + n) % n
+        _hitIndex.value = i
+        goToHit(i)
+    }
+
+    private fun goToHit(i: Int) {
+        val did = _hits.value.getOrNull(i) ?: return
+        val depth = hitDepth.getOrNull(i) ?: 0
+        viewModelScope.launch {
+            if (depth >= limit) {
+                limit = depth + PAGE
+                _messages.value = load()
+            }
+            _jump.tryEmit(did)
+        }
+    }
+
     /** A voice note being recorded: how long so far and how loud right now. */
     data class Recording(val elapsedMs: Long, val level: Float)
 
@@ -191,6 +236,20 @@ class ChatVM(private val application: Application) : ViewModel() {
         // whatever the last one left. Clear it rather than surface someone
         // else's pick as this conversation's draft.
         fire { CoreBridge.clearStaged() }
+        @OptIn(FlowPreview::class)
+        viewModelScope.launch {
+            searchQuery.debounce(250).collect { q ->
+                if (q.isNullOrBlank()) {
+                    _hits.value = emptyList(); hitDepth = emptyList(); _hitIndex.value = 0
+                    return@collect
+                }
+                val found = runCatching { CoreBridge.searchMessages(conversation, q) }.getOrDefault(emptyList())
+                _hits.value = found.map { it.dispatchId.toHex() }
+                hitDepth = found.map { it.newer.toInt() }
+                _hitIndex.value = 0
+                if (found.isNotEmpty()) goToHit(0)
+            }
+        }
         viewModelScope.launch {
             observeQuery(setOf("staging")) { CoreBridge.stagedItems() }.collect { records ->
                 _staged.value = records.map { r ->

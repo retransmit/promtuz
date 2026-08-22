@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -32,6 +33,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.input.ImeAction
 import com.promtuz.chat.R
 import com.promtuz.chat.data.ChatPrefs
 import com.promtuz.chat.domain.model.Presence
@@ -74,6 +87,14 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
     }
     var confirmClear by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
+
+    val searchQuery by chatVM.searchQuery.collectAsState()
+    val searching = searchQuery != null
+    BackHandler(searching) { chatVM.closeSearch() }
+    if (searching) {
+        SearchBar(chatVM, searchQuery.orEmpty(), haze)
+        return
+    }
 
     // The summaries come back empty on a transient FFI failure, which hides the
     // delete dialog without answering it; a flag left standing would raise it
@@ -171,7 +192,7 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
                     }
                     add(
                         listOf(
-                            MenuAction("Search", R.drawable.oi_search) {},
+                            MenuAction("Search", R.drawable.oi_search) { chatVM.openSearch() },
                             MenuAction(if (muted) "Unmute" else "Mute", if (muted) R.drawable.oi_bell_on else R.drawable.oi_bell_slash) {
                                 chatVM.toggleMute()
                             })
@@ -233,3 +254,90 @@ fun ChatTopBar(name: String, chatVM: ChatVM, haze: HazeState) {
 
 /** "1 member" / "4 members" — a group of one is a real state after a removal. */
 fun memberTally(n: Int): String = if (n == 1) "1 member" else "$n members"
+
+/**
+ * The top bar while searching: the field where the name was, and the walk
+ * through the hits where the menu was. Hits are counted newest first, so
+ * "up" goes further back — the direction the thumb expects in a chat that
+ * grows downward.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SearchBar(chatVM: ChatVM, query: String, haze: HazeState) {
+    val colors = MaterialTheme.colorScheme
+    val chatTheme = LocalChatColors.current
+    val hits by chatVM.hits.collectAsState()
+    val index by chatVM.hitIndex.collectAsState()
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    val count = when {
+        query.isBlank() -> ""
+        hits.isEmpty() -> "0"
+        else -> "${index + 1}/${hits.size}"
+    }
+    TopAppBar(
+        title = {
+            BasicTextField(
+                value = query,
+                onValueChange = { chatVM.searchQuery.value = it },
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
+                cursorBrush = SolidColor(chatTheme.accent),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { chatVM.nextHit() }),
+                modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                decorationBox = { inner ->
+                    Box {
+                        if (query.isEmpty()) Text(
+                            "Search",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = colors.onSurfaceVariant,
+                        )
+                        inner()
+                    }
+                },
+            )
+        },
+        navigationIcon = {
+            Box(
+                Modifier.padding(start = 6.dp).size(40.dp).clip(CircleShape)
+                    .clickable { chatVM.closeSearch() },
+                contentAlignment = Alignment.Center,
+            ) {
+                DrawableIcon(R.drawable.i_close, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+            }
+        },
+        actions = {
+            Text(
+                count,
+                style = MaterialTheme.typography.labelMedium,
+                color = colors.onSurfaceVariant,
+                modifier = Modifier.padding(end = 4.dp),
+            )
+            val enabled = hits.size > 1
+            Box(
+                Modifier.size(40.dp).clip(CircleShape).clickable(enabled = enabled) { chatVM.nextHit() },
+                contentAlignment = Alignment.Center,
+            ) {
+                DrawableIcon(
+                    R.drawable.i_back_chevron, Modifier.size(18.dp).rotate(90f),
+                    tint = if (enabled) colors.onSurface else colors.onSurfaceVariant.copy(alpha = 0.4f),
+                )
+            }
+            Box(
+                Modifier.padding(end = 6.dp).size(40.dp).clip(CircleShape)
+                    .clickable(enabled = enabled) { chatVM.prevHit() },
+                contentAlignment = Alignment.Center,
+            ) {
+                DrawableIcon(
+                    R.drawable.i_back_chevron, Modifier.size(18.dp).rotate(-90f),
+                    tint = if (enabled) colors.onSurface else colors.onSurfaceVariant.copy(alpha = 0.4f),
+                )
+            }
+        },
+        modifier = Modifier
+            .freezeOnExit()
+            .hazeEffect(haze, chatBarHaze()),
+        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+    )
+}

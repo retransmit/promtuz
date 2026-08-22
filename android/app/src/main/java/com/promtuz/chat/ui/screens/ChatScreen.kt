@@ -166,6 +166,17 @@ fun ChatScreen(routeName: String, viewModel: ChatVM) {
             if (highlightKey == target.msg.key) highlightKey = null
         }
     }
+    // A search hit names a message that may still be loading in: hold the
+    // id until its row is on the stage, then make the same glide a quote does.
+    var pendingJump by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) { viewModel.jump.collect { pendingJump = it } }
+    LaunchedEffect(pendingJump, rows) {
+        val did = pendingJump ?: return@LaunchedEffect
+        if (rows.any { it is ChatRow.Msg && it.msg.dispatchIdHex == did }) {
+            pendingJump = null
+            jumpToQuoted(did)
+        }
+    }
 
     Box {
         Scaffold(

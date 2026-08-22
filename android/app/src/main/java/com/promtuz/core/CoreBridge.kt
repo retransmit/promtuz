@@ -65,6 +65,8 @@ import uniffi.core.reviseWithStaged as ffiReviseWithStaged
 import uniffi.core.downloadAttachment as ffiDownloadAttachment
 import uniffi.core.getMedia as ffiGetMedia
 import uniffi.core.sendVoice as ffiSendVoice
+import uniffi.core.searchMessages as ffiSearchMessages
+import uniffi.core.SearchHit
 import uniffi.core.ConversationRecord
 import uniffi.core.MemberRecord
 import uniffi.core.listConversations as ffiListConversations
@@ -327,6 +329,10 @@ object CoreBridge {
     /** Start (or resume) the device-to-device pull of an attachment's bytes. */
     suspend fun downloadAttachment(fileId: ByteArray) =
         withContext(Dispatchers.IO) { ffiDownloadAttachment(fileId) }
+
+    /** Messages in a chat containing [query], newest first. */
+    suspend fun searchMessages(conversationId: ByteArray, query: String, limit: Int = 200): List<SearchHit> =
+        withContext(Dispatchers.IO) { ffiSearchMessages(conversationId, query, limit.toUInt()) }
 
     /** Send a recorded voice note inline. Fire-and-forget like the other sends. */
     suspend fun sendVoice(
