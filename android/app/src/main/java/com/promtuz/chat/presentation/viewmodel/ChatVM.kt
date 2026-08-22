@@ -161,10 +161,13 @@ class ChatVM(private val application: Application) : ViewModel() {
 
     private fun goToHit(i: Int) {
         val did = _hits.value.getOrNull(i) ?: return
+        // The depth was measured when the search ran; every message since
+        // has pushed the hit one row deeper, so it is a floor, not the truth.
+        // What decides is whether the row is actually loaded.
         val depth = hitDepth.getOrNull(i) ?: 0
         viewModelScope.launch {
-            if (depth >= limit) {
-                limit = depth + PAGE
+            if (_messages.value.none { it.dispatchIdHex == did }) {
+                limit = maxOf(limit, depth) + PAGE
                 _messages.value = load()
             }
             _jump.tryEmit(did)

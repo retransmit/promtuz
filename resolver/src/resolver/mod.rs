@@ -179,8 +179,10 @@ impl Resolver {
         };
         let (relay_id, timestamp) = (*relay_id, *timestamp);
 
-        // 1-3. shared id-binding + signature + freshness check.
-        let msg = relay_hello_signing_input(&relay_id, &pubkey.0, timestamp);
+        // 1-3. shared id-binding + signature + freshness check, over this
+        // session: the hello was made for this connection and no other.
+        let binding = session_binding_or_reject(&conn)?;
+        let msg = relay_hello_signing_input(&relay_id, &pubkey.0, timestamp, &binding);
         verify_signed_packet(
             conn.remote_address(),
             "hello",
@@ -336,7 +338,8 @@ impl Resolver {
         };
         let (gateway_id, timestamp) = (*gateway_id, *timestamp);
 
-        let msg = gateway_hello_signing_input(&gateway_id, &pubkey.0, timestamp);
+        let binding = session_binding_or_reject(&conn)?;
+        let msg = gateway_hello_signing_input(&gateway_id, &pubkey.0, timestamp, &binding);
         verify_signed_packet(
             conn.remote_address(),
             "gateway-hello",
@@ -429,6 +432,14 @@ impl Resolver {
 /// `relay_*_signing_input` helper; passing it in (instead of reconstructing
 /// inside) keeps domain separation a caller-side concern and avoids this
 /// helper having to know about every packet kind.
+fn session_binding_or_reject(conn: &Connection) -> Result<[u8; 32], CloseReason> {
+    common::quic::session_binding(conn, common::proto::relay_res::NODE_HELLO_EXPORTER_LABEL)
+        .map_err(|e| {
+            warn!("relay({}) rejected: no session binding: {e}", conn.remote_address());
+            CloseReason::BadSignature
+        })
+}
+
 fn verify_signed_packet(
     addr: std::net::SocketAddr, kind: &str, relay_id: &RelayId, pubkey: &[u8; 32],
     sig: &[u8; 64], signing_input: &[u8], timestamp: u128,
@@ -476,17 +487,19 @@ mod tests {
         sig:       [u8; 64],
     }
 
+    const BINDING: [u8; 32] = [0x5Bu8; 32];
+
     fn signed_hello(timestamp: u128) -> Hello {
         let sk = SigningKey::from_bytes(&[3u8; 32]);
         let pubkey = sk.verifying_key().to_bytes();
         let relay_id = NodeId::new(pubkey);
-        let msg = relay_hello_signing_input(&relay_id, &pubkey, timestamp);
+        let msg = relay_hello_signing_input(&relay_id, &pubkey, timestamp, &BINDING);
         Hello { relay_id, pubkey, timestamp, sig: sk.sign(&msg).to_bytes() }
     }
 
     fn verify(h: &Hello) -> Result<(), CloseReason> {
         let addr = std::net::SocketAddr::from(([203, 0, 113, 1], 4433));
-        let msg = relay_hello_signing_input(&h.relay_id, &h.pubkey, h.timestamp);
+        let msg = relay_hello_signing_input(&h.relay_id, &h.pubkey, h.timestamp, &BINDING);
         verify_signed_packet(addr, "hello", &h.relay_id, &h.pubkey, &h.sig, &msg, h.timestamp)
     }
 

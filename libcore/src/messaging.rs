@@ -2270,6 +2270,13 @@ pub fn process_application_inbound_for<C: DhtClient>(
     let processed = match group.process_incoming(ctx.provider, proto) {
         Ok(processed) => processed,
         Err(err) if err.is_spent_secret() => return Ok(InboundDecoded::ApplicationUndecryptable),
+        Err(MlsGroupError::UnboundSender) => {
+            warn!(
+                "GROUP: dropped a message from an unbound leaf in {}",
+                hex::encode(&env.group_id.0[..4])
+            );
+            return Ok(InboundDecoded::ApplicationStale);
+        },
         Err(err) => return Err(anyhow!("process_incoming: {err}")),
     };
 
@@ -2286,64 +2293,55 @@ pub fn process_application_inbound_for<C: DhtClient>(
                 ctx.buffer.drain_when_ready(&mut group, ctx.provider).unwrap_or_default(),
                 Conversation::for_group(&env.group_id.0).unwrap_or_default(),
             );
+            sync_roster_from(&group, &env.group_id.0);
             Ok(InboundDecoded::Application { plaintext, group_id: env.group_id.0, author })
         },
         ProcessedMessageContent::StagedCommitMessage(staged) => {
-            let roster = group.member_count() + staged.add_proposals().count();
-            if roster > crate::mls::MAX_GROUP_MEMBERS {
-                return Err(anyhow!(
-                    "commit would take the group to {roster} members, limit is {}",
-                    crate::mls::MAX_GROUP_MEMBERS
-                ));
-            }
-            if let Err(why) = commit_is_permitted(&group, &staged, author) {
-                // Refused on every honest device alike, so the group's epoch
-                // stays where it was for everyone but the committer, whose
-                // later messages are then ahead of an epoch nobody reached.
-                // Acked as stale: redelivery would only be refused again.
-                warn!(
-                    "GROUP: refusing commit from {} in {}: {why}",
-                    hex::encode(&author[..4]),
-                    hex::encode(&env.group_id.0[..4])
-                );
+            // Refused on every honest device alike, so the group's epoch
+            // stays where it was for everyone but the committer, whose later
+            // messages are then ahead of an epoch nobody reached. Acked as
+            // stale: redelivery would only be refused again.
+            if !group
+                .merge_staged_commit_if_permitted(ctx.provider, *staged, author)
+                .map_err(|e| anyhow!("merge_staged_commit: {e}"))?
+            {
                 return Ok(InboundDecoded::ApplicationStale);
             }
-            group
-                .merge_staged_commit(ctx.provider, *staged)
-                .map_err(|e| anyhow!("merge_staged_commit: {e}"))?;
-            // The merged commit is the authority on who is in the group now,
-            // so re-read the roster from it rather than trusting the narration
-            // that accompanies it. A member removed here keeps their row,
-            // marked inactive, so their old messages still resolve to a name.
-            if let Some(conversation) = Conversation::for_group(&env.group_id.0) {
-                if let Err(e) = Conversation::sync_roster(&conversation, &group.roster()) {
-                    warn!("GROUP: could not sync the roster after a commit: {e}");
-                }
-            }
             // After commit-merge, drain any newly-processable buffered
-            // messages and persist them (not discard).
+            // messages and persist them (not discard). The roster is read off
+            // the tree after that, since a drained commit may have moved it.
             persist_drained(
                 ctx.buffer.drain_when_ready(&mut group, ctx.provider).unwrap_or_default(),
                 Conversation::for_group(&env.group_id.0).unwrap_or_default(),
             );
+            sync_roster_from(&group, &env.group_id.0);
             Ok(InboundDecoded::ApplicationBuffered)
         },
         ProcessedMessageContent::ProposalMessage(p) => {
-            // A member proposing their own removal is leaving. Kept so the
-            // next commit anyone makes carries it and the leaf goes with it;
-            // dropped, the leaver would haunt the tree, and re-surface as a
-            // member every time the roster is re-read after a commit. Nothing
-            // else a member proposes is kept — a proposal to remove someone
-            // else would ride the founder's next commit under the founder's
-            // name.
+            // A member proposing their own removal is leaving. Only the
+            // founder's commit takes their leaf out, so if that is us, make
+            // one — inline, so nobody needs to have seen the proposal to
+            // apply it. Nothing is stored: a commit built by reference to a
+            // proposal forks off every member who missed the proposal, and
+            // dropped, the leaver would haunt the tree and re-surface as a
+            // member every time the roster is re-read after a commit.
             use openmls::prelude::Proposal;
             use openmls::prelude::Sender;
-            let leaving = matches!(
-                (p.sender(), p.proposal()),
-                (Sender::Member(i), Proposal::Remove(r)) if *i == r.removed()
-            );
-            if leaving && let Err(e) = group.store_pending_proposal(ctx.provider, *p) {
-                warn!("GROUP: could not keep a leave proposal: {e}");
+            let leaver = match (p.sender(), p.proposal()) {
+                (Sender::Member(i), Proposal::Remove(r)) if *i == r.removed() => {
+                    group.member_ipk_at(*i)
+                },
+                _ => None,
+            };
+            if let Some(who) = leaver
+                && group.group_meta().is_some_and(|m| m.founder == *our_ipk)
+                && let Some(conversation) = Conversation::for_group(&env.group_id.0)
+            {
+                crate::RUNTIME.spawn(async move {
+                    if let Err(e) = crate::groups::carry_leave(conversation, who).await {
+                        warn!("GROUP: could not carry a leave: {e}");
+                    }
+                });
             }
             Ok(InboundDecoded::ApplicationBuffered)
         },
@@ -2353,55 +2351,15 @@ pub fn process_application_inbound_for<C: DhtClient>(
     }
 }
 
-/// The membership rule, applied on receipt. MLS lets any member commit any
-/// proposal; the founder-only policy the send path enforces in
-/// [`crate::groups`] is only as good as the client that sends, so every
-/// receiver re-checks it here: only the founder may add, or remove anyone
-/// who did not propose their own removal; a self-proposed removal — a leave
-/// — may be committed by anyone; and nothing else may touch the group, in
-/// particular its context extensions, which is where the founder is named.
-/// A pair group has no founder and its roster never changes.
-pub(crate) fn commit_is_permitted(
-    group: &MlsGroupHandle, staged: &openmls::prelude::StagedCommit, author: [u8; 32],
-) -> std::result::Result<(), &'static str> {
-    use crate::mls::credential::leaf_node_ipk;
-    use openmls::prelude::Proposal;
-    use openmls::prelude::Sender;
-    let strict = group.is_group_chat();
-    // A committer's fresh leaf must still be theirs: the update path is
-    // where a member could swap in a credential claiming someone else.
-    if let Some(leaf) = staged.update_path_leaf_node()
-        && leaf_node_ipk(leaf, strict) != Some(author)
+/// The merged tree is the authority on who is in the group now, so the
+/// roster is re-read from it rather than from the narration that accompanies
+/// a commit. A member removed keeps their row, marked inactive, so their old
+/// messages still resolve to a name.
+fn sync_roster_from(group: &MlsGroupHandle, group_id: &[u8; 32]) {
+    if let Some(conversation) = Conversation::for_group(group_id)
+        && let Err(e) = Conversation::sync_roster(&conversation, &group.roster())
     {
-        return Err("the committer's new leaf is not bound to them");
-    }
-    let mut needs_founder = false;
-    for p in staged.queued_proposals() {
-        match p.proposal() {
-            Proposal::Add(a) => {
-                // Whoever is added must arrive as somebody, or the roster
-                // holds a leaf every device reads as a different person.
-                if leaf_node_ipk(a.key_package().leaf_node(), strict).is_none() {
-                    return Err("commit adds a leaf bound to no identity");
-                }
-                needs_founder = true;
-            },
-            Proposal::Remove(r) => {
-                let leaving = matches!(p.sender(), Sender::Member(i) if *i == r.removed());
-                needs_founder |= !leaving;
-            },
-            // Nothing in promtuz proposes an update — a member refreshes
-            // their own leaf by committing — so one is someone else's client.
-            _ => return Err("commit carries a proposal kind no member may make"),
-        }
-    }
-    if !needs_founder {
-        return Ok(());
-    }
-    match group.group_meta() {
-        Some(meta) if meta.founder == author => Ok(()),
-        Some(_) => Err("only the founder may change the membership"),
-        None => Err("a pair group's membership never changes"),
+        warn!("GROUP: could not sync the roster after a commit: {e}");
     }
 }
 

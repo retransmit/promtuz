@@ -309,8 +309,83 @@ impl MlsGroupHandle {
                 .and_then(|m| super::credential::member_ipk(&m, self.is_group_chat())),
             _ => None,
         }
-        .ok_or_else(|| MlsGroupError::Internal("message from a leaf bound to no identity".into()))?;
+        .ok_or(MlsGroupError::UnboundSender)?;
         Ok(ProcessedInbound { sender, content: processed.into_content() })
+    }
+
+    /// The membership rule, applied on receipt. MLS lets any member commit any
+    /// proposal; the founder-only policy the send path enforces in
+    /// [`crate::groups`] is only as good as the client that sends, so every
+    /// receiver re-checks it here: only the founder may add, or remove anyone
+    /// who did not propose their own removal; a self-proposed removal — a leave
+    /// — may be committed by anyone; and nothing else may touch the group, in
+    /// particular its context extensions, which is where the founder is named.
+    /// A pair group has no founder and its roster never changes.
+    pub fn commit_is_permitted(
+        &self, staged: &StagedCommit, author: [u8; 32],
+    ) -> std::result::Result<(), &'static str> {
+        use super::credential::leaf_node_ipk;
+        let strict = self.is_group_chat();
+        // A committer's fresh leaf must still be theirs: the update path is
+        // where a member could swap in a credential claiming someone else.
+        if let Some(leaf) = staged.update_path_leaf_node()
+            && leaf_node_ipk(leaf, strict) != Some(author)
+        {
+            return Err("the committer's new leaf is not bound to them");
+        }
+        let mut needs_founder = false;
+        for p in staged.queued_proposals() {
+            match p.proposal() {
+                Proposal::Add(a) => {
+                    // Whoever is added must arrive as somebody, or the roster
+                    // holds a leaf every device reads as a different person.
+                    if leaf_node_ipk(a.key_package().leaf_node(), strict).is_none() {
+                        return Err("commit adds a leaf bound to no identity");
+                    }
+                    needs_founder = true;
+                },
+                Proposal::Remove(r) => {
+                    let leaving = matches!(p.sender(), Sender::Member(i) if *i == r.removed());
+                    needs_founder |= !leaving;
+                },
+                // Nothing in promtuz proposes an update — a member refreshes
+                // their own leaf by committing — so one is someone else's client.
+                _ => return Err("commit carries a proposal kind no member may make"),
+            }
+        }
+        if !needs_founder {
+            return Ok(());
+        }
+        match self.group_meta() {
+            Some(meta) if meta.founder == author => Ok(()),
+            Some(_) => Err("only the founder may change the membership"),
+            None => Err("a pair group's membership never changes"),
+        }
+    }
+
+    /// Merge a peer's commit if the group's rules allow it: the roster stays
+    /// within [`super::MAX_GROUP_MEMBERS`] and [`Self::commit_is_permitted`]
+    /// holds for `author`. `Ok(false)` is a refusal — nothing merged, the
+    /// epoch unmoved — and is the same answer on every honest device.
+    pub fn merge_staged_commit_if_permitted(
+        &mut self, provider: &PromtuzMlsProvider, staged: StagedCommit, author: [u8; 32],
+    ) -> Result<bool> {
+        let roster = self.member_count() + staged.add_proposals().count();
+        let why = if roster > super::MAX_GROUP_MEMBERS {
+            Some("commit would take the group past its member limit")
+        } else {
+            self.commit_is_permitted(&staged, author).err()
+        };
+        if let Some(why) = why {
+            log::warn!(
+                "GROUP: refusing commit from {} in {}: {why}",
+                hex::encode(&author[..4]),
+                hex::encode(&self.group_id()[..4])
+            );
+            return Ok(false);
+        }
+        self.merge_staged_commit(provider, staged)?;
+        Ok(true)
     }
 
     /// Merge a *staged commit* (the result of processing a peer's
@@ -413,6 +488,11 @@ impl MlsGroupHandle {
     /// `None` for a leaf that proves nothing.
     pub fn member_ipk(&self, m: &Member) -> Option<[u8; 32]> {
         super::credential::member_ipk(m, self.is_group_chat())
+    }
+
+    /// The identity at a leaf, under this group's rule.
+    pub fn member_ipk_at(&self, index: LeafNodeIndex) -> Option<[u8; 32]> {
+        self.inner.member_at(index).and_then(|m| self.member_ipk(&m))
     }
 
     /// Everyone whose leaf is bound to an identity, in leaf order.
@@ -727,8 +807,6 @@ mod tests {
     /// leave, which anyone may commit.
     #[test]
     fn receivers_refuse_membership_commits_from_anyone_but_the_founder() {
-        use crate::messaging::commit_is_permitted;
-
         let (pa, pb, pc) = (build_provider(), build_provider(), build_provider());
         let alice = Party::new(&pa, 1);
         let bob = Party::new(&pb, 2);
@@ -774,7 +852,7 @@ mod tests {
         gc.store_pending_proposal(&pc, p).expect("store");
         let carried = gc.commit_to_pending_proposals(&pc, &carol.sig_kp).expect("commit");
         let s = commit_of(inbound(&mut ga, &pa, &carried));
-        assert!(commit_is_permitted(&ga, &s, carol.ipk).is_ok(), "a leave may be carried by anyone");
+        assert!(ga.commit_is_permitted(&s, carol.ipk).is_ok(), "a leave may be carried by anyone");
         ga.merge_staged_commit(&pa, s).expect("merge");
         gc.merge_pending_commit(&pc).expect("merge");
         assert_eq!(ga.member_count(), 2);
@@ -784,7 +862,7 @@ mod tests {
         let alice_idx = gc.member_index_by_ipk(&alice.ipk).expect("alice");
         let evict = gc.remove_members(&pc, &carol.sig_kp, &[alice_idx]).expect("commit");
         let s = commit_of(inbound(&mut ga, &pa, &evict));
-        assert!(commit_is_permitted(&ga, &s, carol.ipk).is_err(), "carol may not evict the founder");
+        assert!(ga.commit_is_permitted(&s, carol.ipk).is_err(), "carol may not evict the founder");
     }
 
     // -------------------------------------------------------------

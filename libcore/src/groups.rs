@@ -186,7 +186,7 @@ pub async fn add_member(conversation: [u8; 16], who: [u8; 32]) -> Result<()> {
             .merge_pending_commit(ctx.provider)
             .map_err(|e| anyhow!("merge_pending_commit: {e}"))?;
 
-        Conversation::add_member(&conversation, &who, crate::data::conversation::ROLE_MEMBER)?;
+        Conversation::sync_roster(&conversation, &group.roster())?;
         crate::messaging::announce(
             conversation,
             SystemEvent::Added { who: who.into() },
@@ -216,6 +216,18 @@ pub async fn add_member(conversation: [u8; 16], who: [u8; 32]) -> Result<()> {
 /// Remove `who`, then rotate our own leaf key so the removed device cannot
 /// read anything sent afterwards even if it kept the old epoch's secrets.
 pub async fn remove_member(conversation: [u8; 16], who: [u8; 32]) -> Result<()> {
+    evict(conversation, who, true).await
+}
+
+/// Carry a member's leave: they proposed their own removal and announced it,
+/// and only the founder's commit takes a leaf out of the tree. Committed
+/// inline rather than by reference to their proposal, so a member who never
+/// saw the proposal can still apply the commit.
+pub async fn carry_leave(conversation: [u8; 16], who: [u8; 32]) -> Result<()> {
+    evict(conversation, who, false).await
+}
+
+async fn evict(conversation: [u8; 16], who: [u8; 32], announce: bool) -> Result<()> {
     let (our_ipk, ipk_signer) = local_signer()?;
     require_admin(&conversation, &our_ipk)?;
     let group_id = require_group(&conversation)?;
@@ -243,7 +255,9 @@ pub async fn remove_member(conversation: [u8; 16], who: [u8; 32]) -> Result<()> 
             .merge_pending_commit(ctx.provider)
             .map_err(|e| anyhow!("merge_pending_commit: {e}"))?;
 
-        Conversation::deactivate_member(&conversation, &who)?;
+        // The tree, not our intent, is the roster: the commit may have
+        // carried more than this one removal.
+        Conversation::sync_roster(&conversation, &group.roster())?;
 
         // Post-compromise security: a removal is exactly the moment to assume
         // the departing device's key material is untrusted, so rotate ours.
@@ -258,11 +272,13 @@ pub async fn remove_member(conversation: [u8; 16], who: [u8; 32]) -> Result<()> 
             .merge_pending_commit(ctx.provider)
             .map_err(|e| anyhow!("merge_pending_commit after self_update: {e}"))?;
 
-        crate::messaging::announce(
-            conversation,
-            SystemEvent::Removed { who: who.into() },
-        )
-        .await;
+        if announce {
+            crate::messaging::announce(
+                conversation,
+                SystemEvent::Removed { who: who.into() },
+            )
+            .await;
+        }
         Ok(())
     })
 }

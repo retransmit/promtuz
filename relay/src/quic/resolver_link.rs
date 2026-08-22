@@ -308,7 +308,8 @@ impl ResolverLink {
 
         // Sign the canonical transcript so the resolver can authenticate this
         // relay before admitting it to the registry.
-        let msg = relay_hello_signing_input(&relay_id, &pubkey, timestamp);
+        let binding = common::quic::session_binding(conn, common::proto::relay_res::NODE_HELLO_EXPORTER_LABEL)?;
+        let msg = relay_hello_signing_input(&relay_id, &pubkey, timestamp, &binding);
         let sig = self.relay.keys.signing.sign(&msg).to_bytes();
 
         debug!("sending to resolver({})", conn.remote_address());

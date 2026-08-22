@@ -117,9 +117,11 @@ pub enum LifetimeP {
 /// this to derive the exact byte string fed to Ed25519 — using a single
 /// helper keeps the two sides byte-for-byte identical.
 pub fn relay_hello_signing_input(
-    relay_id: &RelayId, pubkey: &[u8; 32], timestamp: u128,
+    relay_id: &RelayId, pubkey: &[u8; 32], timestamp: u128, binding: &[u8; 32],
 ) -> Vec<u8> {
-    signing_input(RELAY_HELLO_SIG_DOMAIN, relay_id, pubkey, timestamp)
+    let mut buf = signing_input(RELAY_HELLO_SIG_DOMAIN, relay_id, pubkey, timestamp);
+    buf.extend_from_slice(binding);
+    buf
 }
 
 /// Builds the canonical signing transcript for [`LifetimeP::RelayHeartbeat`].
@@ -136,9 +138,11 @@ pub fn relay_heartbeat_signing_input(
 /// Builds the canonical signing transcript for [`LifetimeP::GatewayHello`].
 /// Same field layout as the relay helpers, distinct domain tag.
 pub fn gateway_hello_signing_input(
-    gateway_id: &RelayId, pubkey: &[u8; 32], timestamp: u128,
+    gateway_id: &RelayId, pubkey: &[u8; 32], timestamp: u128, binding: &[u8; 32],
 ) -> Vec<u8> {
-    signing_input(GATEWAY_HELLO_SIG_DOMAIN, gateway_id, pubkey, timestamp)
+    let mut buf = signing_input(GATEWAY_HELLO_SIG_DOMAIN, gateway_id, pubkey, timestamp);
+    buf.extend_from_slice(binding);
+    buf
 }
 
 /// Shared low-level transcript builder. Kept private so callers go through
@@ -155,6 +159,13 @@ fn signing_input(
     buf.extend_from_slice(&timestamp.to_be_bytes());
     buf
 }
+
+/// The label a node's hello to the resolver exports its session binding
+/// under. The hello transcripts above gain the binding as a suffix, so a
+/// hello is good on the connection it was sent over and nowhere else — a
+/// resolver that received one cannot forward it to another within the
+/// freshness window and re-home the node there.
+pub const NODE_HELLO_EXPORTER_LABEL: &[u8] = b"promtuz node hello v1";
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum ResolverPacket {

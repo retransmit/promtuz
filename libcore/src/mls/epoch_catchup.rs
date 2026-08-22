@@ -396,9 +396,11 @@ impl EpochCatchupBuffer {
                     ));
                     delete_row(&dispatch_id)?;
                 }
-                Ok((_, ProcessedMessageContent::StagedCommitMessage(staged))) => {
-                    match group.merge_staged_commit(provider, *staged) {
-                        Ok(()) => {
+                Ok((sender, ProcessedMessageContent::StagedCommitMessage(staged))) => {
+                    // The same gate as the live path: a commit that arrived
+                    // early is no more trusted for having waited.
+                    match group.merge_staged_commit_if_permitted(provider, *staged, sender) {
+                        Ok(_) => {
                             delete_row(&dispatch_id)?;
                         }
                         Err(e) => {

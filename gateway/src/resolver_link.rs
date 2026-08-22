@@ -54,7 +54,8 @@ async fn register(
 
     let pubkey = signing.verifying_key().to_bytes();
     let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-    let sig = signing.sign(&gateway_hello_signing_input(&node_id, &pubkey, ts)).to_bytes();
+    let binding = common::quic::session_binding(&conn, common::proto::relay_res::NODE_HELLO_EXPORTER_LABEL)?;
+    let sig = signing.sign(&gateway_hello_signing_input(&node_id, &pubkey, ts, &binding)).to_bytes();
     let hello = ResolverPacket::Lifetime(LifetimeP::GatewayHello {
         gateway_id: node_id,
         pubkey:     Bytes(pubkey),

@@ -743,7 +743,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
 
-        let conv = [0x71u8; 16];
+        // The data dir outlives the run; a fresh chat each time keeps the
+        // counts honest.
+        let conv: [u8; 16] = Ulid::new().to_bytes();
         // Rows are ordered by ULID, which only orders across milliseconds.
         let tick = || std::thread::sleep(std::time::Duration::from_millis(2));
         let first = Message::save_outgoing(conv, "hello world", None).unwrap();

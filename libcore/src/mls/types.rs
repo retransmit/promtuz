@@ -82,6 +82,12 @@ pub enum MlsGroupError {
     #[error("envelope signature failed verification")]
     BadSignature,
 
+    /// The sending leaf proves no identity (see `mls::credential`). The
+    /// message is refused; a receiver acks and drops rather than retries,
+    /// since the leaf will not become someone by waiting.
+    #[error("message from a leaf bound to no identity")]
+    UnboundSender,
+
     /// Cipher suite mismatch between the wire and our pinned suite
     /// (`MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`,
     /// `0x0003`).
