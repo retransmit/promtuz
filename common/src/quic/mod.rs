@@ -14,6 +14,16 @@ pub use xor::xor32;
 /// Heartbeat interval in seconds
 pub static RESOLVER_RELAY_HEARTBEAT_INTERVAL: u64 = 20;
 
+/// Keying material unique to this TLS session, as both ends of `conn` compute
+/// it — what a client's auth proof is bound to (see
+/// [`crate::proto::client_rel::client_auth_message`]).
+pub fn client_auth_binding(conn: &Connection) -> Result<[u8; 32]> {
+    let mut out = [0u8; 32];
+    conn.export_keying_material(&mut out, crate::proto::client_rel::CLIENT_AUTH_EXPORTER_LABEL, &[])
+        .map_err(|e| anyhow::anyhow!("tls exporter: {e:?}"))?;
+    Ok(out)
+}
+
 pub async fn send_uni(conn: &Connection, data: &[u8]) -> Result<()> {
     let mut send = conn.open_uni().await?;
     send.write_all(data).await?;

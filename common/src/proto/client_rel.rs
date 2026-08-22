@@ -16,6 +16,20 @@ pub const DISPATCH_SIG_DOMAIN: &[u8] = b"promtuz-dispatch-v1";
 
 /// Build the canonical bytes signed/verified for a `DispatchP`.
 ///
+/// The label both ends export TLS keying material under to tie a client's
+/// auth proof to the connection it was made on.
+pub const CLIENT_AUTH_EXPORTER_LABEL: &[u8] = b"promtuz client auth v1";
+
+/// Canonical bytes a client signs to prove possession of its identity key.
+///
+/// `binding` is 32 bytes of TLS keying material exported by both ends under
+/// [`CLIENT_AUTH_EXPORTER_LABEL`], so the proof is good for this one TLS
+/// session: a relay that forwards another relay's challenge gets a signature
+/// that verifies nowhere but on the connection the client actually made.
+pub fn client_auth_message(nonce: &[u8; 32], binding: &[u8; 32]) -> Vec<u8> {
+    [b"relay-auth-v" as &[u8], &PROTOCOL_VERSION.to_be_bytes(), nonce, binding].concat()
+}
+
 /// Layout: `DISPATCH_SIG_DOMAIN || PROTOCOL_VERSION_BE || to || from || id || payload`
 pub fn dispatch_sig_message(
     to: &[u8; 32], from: &[u8; 32], id: &[u8; 16], payload: &[u8],

@@ -1,11 +1,12 @@
 use anyhow::Result;
 use anyhow::bail;
-use common::PROTOCOL_VERSION;
 use common::crypto::PublicKey;
 use common::crypto::get_nonce;
 use common::proto::Sender;
 use common::proto::client_rel::CHandshakePacket;
 use common::proto::client_rel::SHandshakePacket;
+use common::proto::client_rel::client_auth_message;
+use common::quic::client_auth_binding;
 use common::proto::client_rel::ServerHandshakeResultP;
 use common::proto::pack::Unpacker;
 use common::quic::CloseReason;
@@ -15,21 +16,11 @@ use quinn::Connection;
 use crate::relay::RelayRef;
 use crate::util::systime;
 
-/// Canonical bytes a client signs to prove possession of its identity key.
-/// Mirrored in libcore at `libcore/src/quic/server.rs`.
-///
-/// TODO: bind the responder identity and the TLS exporter — as written, a relay
-/// can forward another relay's challenge and replay the answer. Needs a
-/// `PROTOCOL_VERSION` bump on both sides.
-fn client_auth_message(nonce: &[u8; 32]) -> Vec<u8> {
-    [b"relay-auth-v" as &[u8], &PROTOCOL_VERSION.to_be_bytes(), nonce].concat()
-}
-
-fn verify_client_proof(ipk: &PublicKey, nonce: &[u8; 32], sig: &[u8]) -> bool {
+fn verify_client_proof(ipk: &PublicKey, nonce: &[u8; 32], binding: &[u8; 32], sig: &[u8]) -> bool {
     let Ok(sig) = Signature::from_slice(sig) else {
         return false;
     };
-    ipk.verify_strict(&client_auth_message(nonce), &sig).is_ok()
+    ipk.verify_strict(&client_auth_message(nonce, binding), &sig).is_ok()
 }
 
 /// Handles handshake linearly
@@ -73,7 +64,7 @@ pub(super) async fn handle_handshake(
 
     let ipk_bytes = ipk.to_bytes();
 
-    if !verify_client_proof(&ipk, &nonce, &*sig) {
+    if !verify_client_proof(&ipk, &nonce, &client_auth_binding(conn)?, &*sig) {
         HandshakeResult(ServerHandshakeResultP::Reject { reason: "Invalid Signature".into() })
             .send(&mut tx)
             .await
@@ -126,8 +117,10 @@ mod tests {
 
     use super::*;
 
+    const BINDING: [u8; 32] = [9u8; 32];
+
     fn sign_nonce(key: &ed25519_dalek::SigningKey, nonce: &[u8; 32]) -> [u8; 64] {
-        key.sign(&client_auth_message(nonce)).to_bytes()
+        key.sign(&client_auth_message(nonce, &BINDING)).to_bytes()
     }
 
     #[test]
@@ -135,15 +128,15 @@ mod tests {
         let key = get_signing_key();
         let nonce = [7u8; 32];
         let sig = sign_nonce(&key, &nonce);
-        assert!(verify_client_proof(&key.verifying_key(), &nonce, &sig));
+        assert!(verify_client_proof(&key.verifying_key(), &nonce, &BINDING, &sig));
     }
 
     #[test]
     fn rejects_garbage_signature() {
         let victim = get_signing_key().verifying_key();
         let nonce = [7u8; 32];
-        assert!(!verify_client_proof(&victim, &nonce, &[0u8; 64]));
-        assert!(!verify_client_proof(&victim, &nonce, &[0xffu8; 64]));
+        assert!(!verify_client_proof(&victim, &nonce, &BINDING, &[0u8; 64]));
+        assert!(!verify_client_proof(&victim, &nonce, &BINDING, &[0xffu8; 64]));
     }
 
     #[test]
@@ -152,21 +145,31 @@ mod tests {
         let victim = get_signing_key().verifying_key();
         let nonce = [7u8; 32];
         let sig = sign_nonce(&attacker, &nonce);
-        assert!(!verify_client_proof(&victim, &nonce, &sig));
+        assert!(!verify_client_proof(&victim, &nonce, &BINDING, &sig));
     }
 
     #[test]
     fn rejects_proof_for_a_different_nonce() {
         let key = get_signing_key();
         let sig = sign_nonce(&key, &[1u8; 32]);
-        assert!(!verify_client_proof(&key.verifying_key(), &[2u8; 32], &sig));
+        assert!(!verify_client_proof(&key.verifying_key(), &[2u8; 32], &BINDING, &sig));
+    }
+
+    /// The proof is for one TLS session: the same nonce signed under another
+    /// connection's keying material is a replay, and fails.
+    #[test]
+    fn rejects_proof_made_on_another_connection() {
+        let key = get_signing_key();
+        let nonce = [7u8; 32];
+        let sig = sign_nonce(&key, &nonce);
+        assert!(!verify_client_proof(&key.verifying_key(), &nonce, &[8u8; 32], &sig));
     }
 
     #[test]
     fn rejects_malformed_signature_length() {
         let key = get_signing_key();
         let nonce = [7u8; 32];
-        assert!(!verify_client_proof(&key.verifying_key(), &nonce, &[]));
-        assert!(!verify_client_proof(&key.verifying_key(), &nonce, &[0u8; 63]));
+        assert!(!verify_client_proof(&key.verifying_key(), &nonce, &BINDING, &[]));
+        assert!(!verify_client_proof(&key.verifying_key(), &nonce, &BINDING, &[0u8; 63]));
     }
 }

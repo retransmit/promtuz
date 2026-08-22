@@ -7,7 +7,7 @@
 /// change fail as an unexplained signature error.
 ///
 /// 6: `ActivityP` carries the conversation it happened in.
-pub static PROTOCOL_VERSION: u16 = 6;
+pub static PROTOCOL_VERSION: u16 = 7;
 
 #[cfg(feature = "crypto")]
 pub mod crypto;

@@ -21,6 +21,10 @@ use tokio_util::sync::CancellationToken;
 use crate::storage::MessageKey;
 
 use crate::quic::handler::Handler;
+
+/// Hello → Challenge → Proof, end to end. Generous for a phone on a bad link,
+/// tight enough that an idle connection cannot sit on a slot.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 use crate::quic::handler::client::events::drain_auth::DrainAuth;
 use crate::quic::handler::client::events::handle_packet;
 use crate::quic::handler::client::handshake::handle_handshake;
@@ -207,10 +211,18 @@ impl Handler {
 
         debug!("incoming conn from client({addr})");
 
-        let ipk = match handle_handshake(relay.clone(), &conn).await {
-            Ok(ipk) => ipk,
-            Err(err) => {
+        // Bounded: the acceptor's timeout covers only the TLS handshake, and a
+        // connection that never sends Hello would otherwise hold its slot
+        // for as long as it cares to keep the idle timer alive.
+        let ipk = match tokio::time::timeout(HANDSHAKE_TIMEOUT, handle_handshake(relay.clone(), &conn)).await {
+            Ok(Ok(ipk)) => ipk,
+            Ok(Err(err)) => {
                 warn!("client({addr}) handshake failed: {err}");
+                return;
+            },
+            Err(_) => {
+                warn!("client({addr}) handshake timed out");
+                conn.close(0u32.into(), b"handshake timeout");
                 return;
             },
         };

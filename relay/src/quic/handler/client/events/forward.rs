@@ -107,14 +107,18 @@ pub(super) async fn handle_forward(
             SRelayPacket::DispatchAck(DispatchAckP::Delivered { accepted_at_ms }).send(tx).await?;
             return Ok(());
         }
-        // The in-memory entry is dead (timed out, peer-reset, or never
-        // ack'd). Evict it BEFORE the next path so a stale entry doesn't
-        // make us pay another ack timeout against the corpse.
+        // Evict only a connection that is actually gone. A live one that
+        // did not ack — the recipient dropped the envelope, or is slow —
+        // stays on the map: evicting on a bare timeout let any stranger
+        // knock a user offline with one junk dispatch, since the entry only
+        // comes back on a fresh handshake.
         //
         // Race-guard: only evict if the entry still points at the same
         // `Connection` we just tried — a fresh re-handshake from the
         // recipient may have already replaced it.
-        remove_client_if_same(&ctx.relay, &recipient.0, &conn);
+        if conn.close_reason().is_some() {
+            remove_client_if_same(&ctx.relay, &recipient.0, &conn);
+        }
         // Fall through into the DHT/local-queue ladder.
     }
 

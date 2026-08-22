@@ -9,7 +9,6 @@ use std::time::Duration;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
-use common::PROTOCOL_VERSION;
 use common::proto::Sender;
 use common::proto::client_rel::CHandshakePacket;
 use common::proto::client_rel::CRelayPacket;
@@ -185,7 +184,8 @@ impl Relay {
             return Err(RelayConnError::Error(anyhow!("Handshake Packet Order Mismatch")));
         };
 
-        let msg = [b"relay-auth-v" as &[u8], &PROTOCOL_VERSION.to_be_bytes(), &*nonce].concat();
+        let binding = common::quic::client_auth_binding(&conn).map_err(RelayConnError::Error)?;
+        let msg = common::proto::client_rel::client_auth_message(&nonce, &binding);
 
         CHandshakePacket::Proof {
             sig: IdentitySigner::sign(&msg).map_err(RelayConnError::Error)?.to_bytes().into(),
@@ -754,9 +754,13 @@ fn verify_dispatch_sig(our_ipk: &VerifyingKey, msg: &DeliverP) -> Result<()> {
 async fn process_deliver(
     our_ipk: VerifyingKey, msg: DeliverP, dht_client: Option<Arc<RelayDhtClient>>,
 ) -> Result<()> {
+    // Dropped envelopes are acked, not failed: an `Err` here is no ack, which
+    // the relay reads as a dead connection and evicts us on — so one junk
+    // dispatch from any stranger would take us off the live map — and a
+    // queued one would be redelivered forever.
     if let Err(e) = verify_dispatch_sig(&our_ipk, &msg) {
         warn!("MESSAGE: rejected unsigned/forged dispatch from {}: {e}", hex::encode(&msg.from[..4]));
-        bail!("bad dispatch signature");
+        return Ok(());
     }
 
     // Already decrypted on an earlier connection? A different home is
@@ -785,7 +789,7 @@ async fn process_deliver(
         && !Conversation::shares_a_chat_with(&msg.from)
     {
         info!("MESSAGE: dropped envelope from unknown sender {}", hex::encode(&msg.from[..4]));
-        bail!("unknown sender");
+        return Ok(());
     }
 
     // Use the production peer/5 dialer that the connection-time wiring
