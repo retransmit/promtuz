@@ -18,6 +18,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.Person
 import androidx.core.app.RemoteInput
 import androidx.core.content.LocusIdCompat
+import com.promtuz.chat.domain.model.mediaLabel
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
@@ -242,7 +243,8 @@ object PushNotifier {
                 val who = m.senderIpk?.toHex()?.let { senderNames[it] }
                 val author = if (!isGroup || who == null) them
                              else Person.Builder().setName(who).setKey(who).build()
-                style.addMessage(m.content, m.timestamp.toLong() * 1000, author)
+                val line = m.content.ifEmpty { mediaLabel(m.mediaKind.toInt()) }
+                style.addMessage(line, m.timestamp.toLong() * 1000, author)
             }
             val replyPI = PendingIntent.getBroadcast(
                 app, notifId(convHex),

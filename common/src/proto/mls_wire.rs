@@ -236,6 +236,16 @@ pub enum Body {
         pack: [u8; 16],
         id:   u32,
     },
+    /// Inline voice note — a short recording rides in the frame like an
+    /// `Image`, offline-safe and under the same cap. `waveform` is a few dozen
+    /// 0–255 loudness samples for the bubble to draw before any decode.
+    /// Atomic like a sticker: no caption, nothing to revise into.
+    Voice {
+        mime:        String,
+        duration_ms: u32,
+        waveform:    Vec<u8>,
+        data:        Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

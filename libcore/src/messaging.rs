@@ -1190,6 +1190,7 @@ pub(crate) fn build_image_message(
         blob: None,
         thumb: None,
         file_id: None,
+        duration_ms: 0,
     })
 }
 
@@ -1212,6 +1213,7 @@ pub(crate) fn build_attachment_message(
         blob: None,
         thumb,
         file_id: None,
+        duration_ms: 0,
     })
 }
 
@@ -1290,6 +1292,7 @@ pub(crate) fn save_inbound_body(
 fn split_body(body: Body) -> Option<(String, Option<crate::data::media::MediaRow>)> {
     use crate::data::media::KIND_ATTACHMENT;
     use crate::data::media::KIND_IMAGE;
+    use crate::data::media::KIND_VOICE;
     use crate::data::media::MediaRow;
 
     Some(match body {
@@ -1307,6 +1310,7 @@ fn split_body(body: Body) -> Option<(String, Option<crate::data::media::MediaRow
                 blob: Some(data),
                 thumb: None,
                 file_id: None,
+                duration_ms: 0,
             }),
         ),
         Body::Attachment { caption, group_id, mime, name, size, thumb, file_id } => (
@@ -1322,6 +1326,23 @@ fn split_body(body: Body) -> Option<(String, Option<crate::data::media::MediaRow
                 blob: None,
                 thumb: (!thumb.is_empty()).then_some(thumb),
                 file_id: Some(file_id.to_vec()),
+                duration_ms: 0,
+            }),
+        ),
+        Body::Voice { mime, duration_ms, waveform, data } => (
+            String::new(),
+            Some(MediaRow {
+                kind: KIND_VOICE,
+                group_id: None,
+                mime,
+                name: String::new(),
+                size: data.len() as u64,
+                width: 0,
+                height: 0,
+                duration_ms,
+                blob: Some(data),
+                thumb: (!waveform.is_empty()).then_some(waveform),
+                file_id: None,
             }),
         ),
         Body::Sticker { .. } => return None,
@@ -1370,6 +1391,7 @@ pub(crate) enum BodyKind {
     Image,
     Attachment,
     Sticker,
+    Voice,
 }
 
 impl BodyKind {
@@ -1379,6 +1401,7 @@ impl BodyKind {
             Body::Image { .. } => Self::Image,
             Body::Attachment { .. } => Self::Attachment,
             Body::Sticker { .. } => Self::Sticker,
+            Body::Voice { .. } => Self::Voice,
         }
     }
 
@@ -1388,6 +1411,7 @@ impl BodyKind {
         match media_kind {
             Some(crate::data::media::KIND_IMAGE) => Self::Image,
             Some(crate::data::media::KIND_ATTACHMENT) => Self::Attachment,
+            Some(crate::data::media::KIND_VOICE) => Self::Voice,
             _ => Self::Text,
         }
     }
@@ -1397,14 +1421,16 @@ impl BodyKind {
     /// they already hold, so those interchange freely. An attachment is fetched
     /// device-to-device by `file_id` — revising into one hands the peer a
     /// transfer for a message they consider delivered, and revising out of one
-    /// orphans a transfer they may be mid-download on. Stickers are atomic (no
-    /// caption, nothing to pair with text), so they only revise to a sticker.
+    /// orphans a transfer they may be mid-download on. Stickers and voice notes
+    /// are atomic (no caption, nothing to pair with text), so each only
+    /// revises to its own kind.
     pub(crate) fn revisable_to(self, to: Self) -> bool {
         matches!(
             (self, to),
             (Self::Text | Self::Image, Self::Text | Self::Image)
                 | (Self::Attachment, Self::Attachment)
                 | (Self::Sticker, Self::Sticker)
+                | (Self::Voice, Self::Voice)
         )
     }
 }
@@ -1413,9 +1439,9 @@ impl BodyKind {
 /// (re)send. A row carrying a stored `KIND_IMAGE` media side-row resends as
 /// [`Body::Image`] (caption + AVIF blob), so a first-send deferred while the
 /// peer had no published KeyPackage doesn't silently downgrade to a
-/// bare-caption text. Everything else — including media kinds not yet re-driven
-/// here, whose bytes live off-row — falls through to [`Body::Text`]. The quote
-/// target rides the envelope, so it survives on every body kind.
+/// bare-caption text; a voice row resends as [`Body::Voice`] the same way.
+/// Everything else falls through to [`Body::Text`]. The quote target rides
+/// the envelope, so it survives on every body kind.
 pub(crate) fn rebuild_pending_payload(
     conversation: &[u8; 16], msg: &Message,
 ) -> Result<Vec<u8>> {
@@ -1440,6 +1466,12 @@ pub(crate) fn rebuild_pending_payload(
                 height:   m.height,
                 data,
             }
+        },
+        Some(m) if m.kind == crate::data::media::KIND_VOICE => Body::Voice {
+            mime:        m.mime,
+            duration_ms: m.duration_ms,
+            waveform:    m.thumb.unwrap_or_default(),
+            data:        m.blob.unwrap_or_default(),
         },
         Some(m) if m.kind == crate::data::media::KIND_ATTACHMENT => {
             // Null file_id = un-finalized placeholder (manifest still hashing).
@@ -2570,6 +2602,34 @@ mod tests {
         assert_eq!(bob_group.group_id(), g.group_id());
     }
 
+    /// A voice note survives the store and the resend whole: bytes, duration
+    /// and waveform come back off the row exactly as the wire body put them.
+    #[test]
+    fn a_voice_body_round_trips_through_its_row() {
+        let dir = std::env::temp_dir().join("promtuz-voice-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
+
+        let to = [0x61u8; 16];
+        let body = Body::Voice {
+            mime:        "audio/ogg".into(),
+            duration_ms: 4200,
+            waveform:    vec![1, 9, 200, 42],
+            data:        vec![0x4f, 0x67, 0x67, 0x53],
+        };
+        let (content, media) = split_body(body.clone()).unwrap();
+        assert!(content.is_empty(), "a voice note has no caption");
+        let media = media.unwrap();
+        assert_eq!(media.kind, crate::data::media::KIND_VOICE);
+
+        let msg = crate::data::media::save_outgoing_with_media(&to, "", None, &media).unwrap();
+        let rebuilt = AppPayload::deser(&rebuild_pending_payload(&to, &msg).unwrap()).unwrap();
+        match rebuilt {
+            AppPayload::Post { body: got, .. } => assert_eq!(got, body),
+            other => panic!("voice must rebuild as a Post carrying Voice, got {other:?}"),
+        }
+    }
+
     /// The retry-path guarantee: a pending outgoing Image, when its payload is
     /// rebuilt for resend, comes back as `AppPayload::Image` carrying the AVIF
     /// blob — NOT a bare-caption `Text`. This is the send-side content-loss the
@@ -2632,6 +2692,7 @@ mod tests {
         use BodyKind::Image;
         use BodyKind::Sticker;
         use BodyKind::Text;
+        use BodyKind::Voice;
 
         let allowed = [
             (Text, Text),
@@ -2640,10 +2701,10 @@ mod tests {
             (Image, Image),
             (Attachment, Attachment),
             (Sticker, Sticker),
+            (Voice, Voice),
         ];
-        for (from, to) in [Text, Image, Attachment, Sticker]
-            .into_iter()
-            .flat_map(|f| [Text, Image, Attachment, Sticker].into_iter().map(move |t| (f, t)))
+        let kinds = [Text, Image, Attachment, Sticker, Voice];
+        for (from, to) in kinds.into_iter().flat_map(|f| kinds.into_iter().map(move |t| (f, t)))
         {
             let want = allowed.contains(&(from, to));
             assert_eq!(
@@ -2677,6 +2738,7 @@ mod tests {
             blob: Some(vec![1, 2, 3]),
             thumb: None,
             file_id: None,
+            duration_ms: 0,
         };
         let msg =
             crate::data::media::save_outgoing_with_media(&to, "cap", Some(quoted), &media).unwrap();

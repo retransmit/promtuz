@@ -17,6 +17,7 @@ object BubbleTextLayouts {
             is MessageContent.Attachment -> c.caption
             is MessageContent.Album -> c.caption
             is MessageContent.System -> systemLine(c)
+            is MessageContent.Voice -> ""
         }
 
     /** The narration for a membership or title change, in the past tense. */

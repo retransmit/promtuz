@@ -216,6 +216,8 @@ fun MessageBubble(
                             content, textColor, appearance.type.fontScale,
                             BubbleTextLayouts.metaLabelOf(msg), peerName, outgoing, onDownload, onOpen,
                         )
+                    content is MessageContent.Voice ->
+                        VoiceBlock(content, textColor, appearance.type.fontScale, BubbleTextLayouts.metaLabelOf(msg))
                 }
 
                 if (msg.reactions.isNotEmpty()) {

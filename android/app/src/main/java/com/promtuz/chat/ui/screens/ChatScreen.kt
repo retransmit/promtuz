@@ -325,7 +325,8 @@ private fun menuActionsFor(
             }
             close()
         })
-        if (actionable && msg.outgoing) add(MenuAction("Edit", R.drawable.oi_edit) {
+        // A voice note has no text to edit and nothing to swap in for it.
+        if (actionable && msg.outgoing && msg.content !is MessageContent.Voice) add(MenuAction("Edit", R.drawable.oi_edit) {
             viewModel.beginEdit(msg); close()
         })
     }

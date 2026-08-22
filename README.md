@@ -55,6 +55,7 @@ tools/      Dev tooling: uniffi-bindgen, packaging and release scripts
 - **Direct peer links**: reflexive-address probing, UDP hole punching, and a relay-side TURN bridge, opt-in per relay, for the pairs that cannot punch, gated to paired contacts only
 - A real 1:1 chat: replies, edits, deletes (for me or for everyone), emoji reactions, delivered and read receipts, typing activity, and presence
 - Attachments: images encoded to AVIF in libcore and inlined below 256KB, larger files pulled over the direct link with a chunked manifest
+- Voice notes: Opus recorded on the device, inlined in the frame with a loudness waveform, up to two minutes
 - Offline delivery: queued at the home relay, woken through the gateway under a pseudonym, drained in the background on the device
 - Contact exchange by QR code, or by an `https://promtuz.dev/pair` invite link whose code rides the URL fragment and never reaches a server log
 - In-app updates against a manifest signed with a pinned Ed25519 key
@@ -66,7 +67,7 @@ tools/      Dev tooling: uniffi-bindgen, packaging and release scripts
 - **Group chats**: MLS is group-native and the stack carries the group state, but the client API and the UI are 1:1 only
 - **Multi-device**: one install per identity. A restore rebuilds history on a new device; two live devices don't stay in sync
 - **iOS**: libcore already emits Swift bindings, the app itself is still a scaffold
-- **Voice and video**: the call-relay capability bit is reserved, nothing is built behind it
+- **Voice and video calls**: the call-relay capability bit is reserved, nothing is built behind it
 
 The hard parts are in place and running: networking, identity, the DHT, MLS, NAT traversal, and real delivery over the public internet. What's left is mostly breadth rather than foundations.
 

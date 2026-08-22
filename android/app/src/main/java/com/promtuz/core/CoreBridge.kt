@@ -64,6 +64,7 @@ import uniffi.core.sendStaged as ffiSendStaged
 import uniffi.core.reviseWithStaged as ffiReviseWithStaged
 import uniffi.core.downloadAttachment as ffiDownloadAttachment
 import uniffi.core.getMedia as ffiGetMedia
+import uniffi.core.sendVoice as ffiSendVoice
 import uniffi.core.ConversationRecord
 import uniffi.core.MemberRecord
 import uniffi.core.listConversations as ffiListConversations
@@ -326,6 +327,14 @@ object CoreBridge {
     /** Start (or resume) the device-to-device pull of an attachment's bytes. */
     suspend fun downloadAttachment(fileId: ByteArray) =
         withContext(Dispatchers.IO) { ffiDownloadAttachment(fileId) }
+
+    /** Send a recorded voice note inline. Fire-and-forget like the other sends. */
+    suspend fun sendVoice(
+        conversationId: ByteArray, data: ByteArray, mime: String, durationMs: Int, waveform: ByteArray,
+        replyTo: ByteArray? = null,
+    ) = withContext(Dispatchers.IO) {
+        ffiSendVoice(conversationId, data, mime, durationMs.toUInt(), waveform, replyTo)
+    }
 
     /** Media rows for a conversation (inline blob/thumb + transfer progress in chunks). */
     suspend fun getMedia(conversationId: ByteArray): List<MediaRecord> =

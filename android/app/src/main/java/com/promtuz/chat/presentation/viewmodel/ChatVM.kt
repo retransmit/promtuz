@@ -18,8 +18,11 @@ import com.promtuz.chat.domain.model.ReactionGroup
 import com.promtuz.chat.domain.model.SendStatus
 import com.promtuz.chat.domain.model.StagedMedia
 import com.promtuz.chat.domain.model.UiMessage
+import com.promtuz.chat.domain.model.mediaLabel
 import com.promtuz.chat.utils.extensions.fromHex
 import com.promtuz.chat.utils.extensions.toHex
+import com.promtuz.chat.utils.media.VoicePlayer
+import com.promtuz.chat.utils.media.VoiceRecorder
 import com.promtuz.chat.utils.media.decodeAvifCached
 import com.promtuz.chat.utils.media.decodeDownscaled
 import com.promtuz.chat.utils.media.resolvePickedFile
@@ -122,6 +125,14 @@ class ChatVM(private val application: Application) : ViewModel() {
 
     /** Decoded tile per staged id — the client-side preview the core doesn't return. */
     private val previews = mutableMapOf<ULong, ImageBitmap>()
+
+    /** A voice note being recorded: how long so far and how loud right now. */
+    data class Recording(val elapsedMs: Long, val level: Float)
+
+    private val recorder = VoiceRecorder(application)
+    private val _recording = MutableStateFlow<Recording?>(null)
+    val recording: StateFlow<Recording?> = _recording.asStateFlow()
+    private var recordingTicker: Job? = null
 
     private val _typing = MutableStateFlow(false)
     val typing: StateFlow<Boolean> = _typing.asStateFlow()
@@ -456,6 +467,49 @@ class ChatVM(private val application: Application) : ViewModel() {
         CoreBridge.discardStaged(id)
     }
 
+    /**
+     * Start a voice note. The caller has the mic permission in hand; a false
+     * return is the device refusing (another app holds the mic).
+     */
+    fun startRecording(): Boolean {
+        if (recorder.isRecording) return true
+        VoicePlayer.stop()
+        if (!recorder.start(onLimit = { finishRecording() })) return false
+        _recording.value = Recording(0, 0f)
+        recordingTicker = viewModelScope.launch {
+            while (recorder.isRecording) {
+                _recording.value = Recording(recorder.elapsedMs, recorder.sample())
+                delay(100)
+            }
+        }
+        return true
+    }
+
+    fun cancelRecording() {
+        recordingTicker?.cancel()
+        recorder.cancel()
+        _recording.value = null
+    }
+
+    /**
+     * Stop and send. A recording too short to be a note is dropped, not sent.
+     * A staged reply rides along and is consumed, as it would be by [send].
+     */
+    fun finishRecording() {
+        recordingTicker?.cancel()
+        val rec = recorder.finish()
+        _recording.value = null
+        val r = rec ?: return
+        val to = conversation
+        val replyTo = (composerAction.value as? ComposerAction.Reply)?.msg?.dispatchIdHex?.fromHex()
+        composerAction.value = null
+        fire { CoreBridge.sendVoice(to, r.bytes, r.mime, r.durationMs, r.waveform, replyTo) }
+    }
+
+    override fun onCleared() {
+        cancelRecording()
+    }
+
     /** Copy a picked uri into cache and buffer it as a P2P attachment; image mimes get a preview thumb. */
     private suspend fun stagePickedFile(uri: Uri) {
         val picked = resolvePickedFile(application, uri) ?: return
@@ -536,8 +590,9 @@ fun UiMessage.editableText(): String = when (val c = content) {
     is MessageContent.Image -> c.caption
     is MessageContent.Attachment -> c.caption
     is MessageContent.Album -> c.caption
-    // Not editable — a system row narrates something that already happened.
-    is MessageContent.System -> ""
+    // Not editable — a system row narrates something that already happened,
+    // and a voice note carries no text at all.
+    is MessageContent.System, is MessageContent.Voice -> ""
 }
 
 
@@ -558,7 +613,10 @@ private fun MessageRecord.toUi(
         val quoted = byDid[rtHex]
         Quote(
             dispatchIdHex = rtHex,
-            text = quoted?.takeIf { !it.deleted }?.content,
+            // A captionless picture quotes as "Photo", not as nothing.
+            text = quoted?.takeIf { !it.deleted }?.content?.ifEmpty {
+                mediaByDid[rtHex]?.let { mediaLabel(it.kind.toInt(), it.name) }.orEmpty()
+            },
             outgoing = quoted?.outgoing ?: false,
         )
     }
@@ -605,13 +663,19 @@ private fun MessageRecord.toUi(
     )
 }
 
-/** kind: 1 = inline Image (blob), else P2P Attachment (thumb + transfer progress). */
+/** kind: 1 = inline Image (blob), 3 = inline Voice (blob), else P2P Attachment (thumb + transfer progress). */
 private fun MediaRecord.toContent(dispatchIdHex: String, caption: String): MessageContent =
     if (kind.toInt() == 1) MessageContent.Image(
         caption = caption,
         bitmap = blob?.let { decodeAvifCached(dispatchIdHex, it) },
         width = width.toInt(),
         height = height.toInt(),
+    ) else if (kind.toInt() == 3) MessageContent.Voice(
+        dispatchIdHex = dispatchIdHex,
+        mime = mime,
+        durationMs = durationMs.toInt(),
+        waveform = thumb ?: ByteArray(0),
+        bytes = blob ?: ByteArray(0),
     ) else MessageContent.Attachment(
         caption = caption,
         name = name,

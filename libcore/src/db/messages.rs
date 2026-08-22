@@ -383,6 +383,9 @@ const MIGRATION_ARRAY: &[M] = &[
              value TEXT NOT NULL \
          ) WITHOUT ROWID;",
     ),
+    // Voice notes: the one fact about a recording the bubble needs before it
+    // decodes anything. Pictures leave it 0.
+    M::up("ALTER TABLE message_media ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0;"),
 ];
 /// A migration's index in the array *is* its schema version, so the array is
 /// append-only: inserting one shifts every later version, and a device already

@@ -40,6 +40,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.promtuz.chat.domain.model.ChatSummary
+import com.promtuz.chat.domain.model.mediaLabel
 import com.promtuz.chat.R
 import com.promtuz.chat.domain.model.Presence
 import com.promtuz.chat.utils.common.parseMessageDate
@@ -226,9 +227,12 @@ private fun statusLine(chat: ChatSummary, typing: Boolean, colors: ColorScheme):
     chat.status == 0 -> "Waiting to connect…" to colors.primary.copy(0.8f)
     chat.status == 2 -> declineText(chat.rejectReason) to colors.error.copy(0.85f)
     chat.lastDeleted -> "deleted message" to colors.onSurfaceVariant.copy(0.6f)
-    chat.lastPreview.isNullOrEmpty() -> "No messages yet" to colors.onSurfaceVariant.copy(0.6f)
+    chat.lastPreview.isNullOrEmpty() && chat.lastMediaKind == 0 ->
+        "No messages yet" to colors.onSurfaceVariant.copy(0.6f)
     else -> {
-        val text = if (chat.lastOutgoing) "You: ${chat.lastPreview}" else chat.lastPreview
+        // A captionless picture or a voice note has no text of its own.
+        val preview = chat.lastPreview.orEmpty().ifEmpty { mediaLabel(chat.lastMediaKind) }
+        val text = if (chat.lastOutgoing) "You: $preview" else preview
         val col = if (chat.unreadCount > 0) colors.onSurface.copy(0.9f) else colors.onSurfaceVariant.copy(0.7f)
         text to col
     }

@@ -40,6 +40,10 @@ pub struct MessageRecord {
     pub album_items: Vec<Vec<u8>>,
     /// This row was folded into the album above it — clients skip it.
     pub in_album: bool,
+    /// The media side-row's kind (1 image, 2 attachment, 3 voice), 0 for none.
+    /// Filled where a row stands in for itself as one line — the home list and
+    /// a notification — so a captionless picture doesn't read as no message.
+    pub media_kind: u8,
 }
 
 /// One emoji reaction, projected for the client. `mine` is `reactor == self`
@@ -581,7 +585,7 @@ pub fn recent_incoming(
     conversation_id: Vec<u8>, limit: u32,
 ) -> Result<Vec<MessageRecord>, CoreError> {
     let conv = to_conv16(&conversation_id)?;
-    Ok(Message::recent_incoming(&conv, limit).into_iter().map(Into::into).collect())
+    Ok(Message::recent_incoming(&conv, limit).into_iter().map(with_media_kind).collect())
 }
 
 /// The direct conversation with `peer_ipk`, created if this is the first time
@@ -653,7 +657,17 @@ pub fn set_conversation_title(
 /// One entry per conversation (latest message per peer).
 #[uniffi::export]
 pub fn get_conversations() -> Vec<MessageRecord> {
-    Message::get_conversations().into_iter().map(Into::into).collect()
+    Message::get_conversations().into_iter().map(with_media_kind).collect()
+}
+
+fn with_media_kind(row: MessageRow) -> MessageRecord {
+    let mut rec = MessageRecord::from(row);
+    if let Some(did) = rec.dispatch_id.as_deref().and_then(|d| <[u8; 16]>::try_from(d).ok())
+        && let Ok(conv) = to_conv16(&rec.conversation_id)
+    {
+        rec.media_kind = crate::data::media::get(&conv, &did).ok().flatten().map_or(0, |m| m.kind);
+    }
+    rec
 }
 
 /// All contacts, newest first.
@@ -765,6 +779,7 @@ impl From<MessageRow> for MessageRecord {
             system: r.system,
             album_items: Vec::new(),
             in_album: false,
+            media_kind: 0,
         }
     }
 }

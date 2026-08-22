@@ -1,5 +1,6 @@
 package com.promtuz.chat.ui.components
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -31,7 +32,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import com.promtuz.chat.utils.media.VoicePlayer
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
 import androidx.compose.ui.text.buildAnnotatedString
@@ -185,6 +192,79 @@ fun AttachmentBlock(
             TransferAffordance(att, textColor, outgoing, onDownload, onOpen)
         }
         Caption(att.caption, textColor, fontScale, metaLabel, inset = false)
+    }
+}
+
+/**
+ * A voice note: play/pause, the sender's waveform with the played part lit,
+ * and the clock — remaining while it plays, total otherwise. The meta corner
+ * is reserved the way an attachment's is, under the card.
+ */
+@Composable
+fun VoiceBlock(voice: MessageContent.Voice, textColor: Color, fontScale: Float, metaLabel: String) {
+    val context = LocalContext.current
+    val playback by VoicePlayer.state.collectAsState()
+    val mine = playback?.takeIf { it.dispatchIdHex == voice.dispatchIdHex }
+    val playing = mine?.playing == true
+    val position = mine?.positionMs ?: 0
+    val fraction = if (voice.durationMs > 0) (position.toFloat() / voice.durationMs).coerceIn(0f, 1f) else 0f
+    val shown = if (mine != null) (voice.durationMs - position).coerceAtLeast(0) else voice.durationMs
+    val secs = (shown + 500) / 1000
+    Column {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(textColor.copy(alpha = 0.06f))
+                .padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(
+                Modifier
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(textColor.copy(alpha = 0.10f))
+                    .clickable { VoicePlayer.toggle(context, voice.dispatchIdHex, voice.bytes, voice.mime) },
+                Alignment.Center,
+            ) {
+                DrawableIcon(
+                    if (playing) R.drawable.i_pause else R.drawable.i_play,
+                    Modifier.size(18.dp),
+                    tint = textColor,
+                )
+            }
+            Waveform(voice.waveform, fraction, textColor, Modifier.weight(1f).height(28.dp))
+            Text(
+                "%d:%02d".format(Locale.US, secs / 60, secs % 60),
+                style = MaterialTheme.typography.labelMedium,
+                color = textColor.copy(alpha = 0.8f),
+            )
+        }
+        Caption("", textColor, fontScale, metaLabel, inset = false)
+    }
+}
+
+/** Bars from 0–255 loudness samples; a missing waveform draws as a flat line. */
+@Composable
+private fun Waveform(samples: ByteArray, lit: Float, color: Color, modifier: Modifier) {
+    Canvas(modifier) {
+        val n = if (samples.isEmpty()) 32 else samples.size
+        val step = size.width / n
+        val stroke = (step * 0.55f).coerceIn(2f, 6f)
+        for (i in 0 until n) {
+            val v = if (samples.isEmpty()) 0.15f else (samples[i].toInt() and 0xff) / 255f
+            val h = (size.height * (0.15f + 0.85f * v)).coerceAtLeast(stroke)
+            val x = step * i + step / 2
+            val played = (i + 0.5f) / n <= lit
+            drawLine(
+                color = color.copy(alpha = if (played) 0.95f else 0.35f),
+                start = Offset(x, (size.height - h) / 2),
+                end = Offset(x, (size.height + h) / 2),
+                strokeWidth = stroke,
+                cap = StrokeCap.Round,
+            )
+        }
     }
 }
 

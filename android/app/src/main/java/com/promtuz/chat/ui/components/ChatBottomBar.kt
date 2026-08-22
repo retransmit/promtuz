@@ -58,6 +58,13 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import android.Manifest
+import android.content.pm.PackageManager
+import android.widget.Toast
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import com.promtuz.chat.ui.stage.ChatMotion
 import kotlin.math.roundToInt
 import com.promtuz.chat.R
@@ -115,6 +122,30 @@ fun ChatBottomBar(
     // Back closes the panel before the nav stack.
     BackHandler(attachOpen) { closingToKeyboard = false; attachOpen = false }
 
+    // Voice notes. The mic is asked for on the first tap rather than up front:
+    // a chat that never records never sees the prompt.
+    val context = LocalContext.current
+    val recording by viewModel.recording.collectAsState()
+    val beginRecording = {
+        if (!viewModel.startRecording()) {
+            Toast.makeText(context, "Microphone is busy", Toast.LENGTH_SHORT).show()
+        }
+    }
+    val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) beginRecording()
+        else Toast.makeText(context, "Voice messages need the microphone", Toast.LENGTH_SHORT).show()
+    }
+    val onMic = {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        ) beginRecording() else micPermission.launch(Manifest.permission.RECORD_AUDIO)
+    }
+    BackHandler(recording != null) { viewModel.cancelRecording() }
+    // Leaving the screen ends the note rather than letting it run on: the
+    // platform mutes a backgrounded mic, so what would be recorded is silence,
+    // and the cap would then send that silence with nobody having tapped send.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { viewModel.cancelRecording() }
+
     // No .imePadding()/.navigationBarsPadding(): AttachPanel owns the bottom region
     // and reserves the keyboard/nav space itself (see its region formula).
     // The pill's own chrome, which the input row's measured height knows nothing about.
@@ -168,22 +199,35 @@ fun ChatBottomBar(
                 Reveal(metrics.stripProgress, { metrics.stripH = it }) {
                     StagedStrip(lastStaged, viewModel::unstage)
                 }
-                ComposerRow(
-                    viewModel, input, action,
-                    attachOpen = attachOpen,
-                    onToggleAttach = {
-                        if (attachOpen) {
-                            closingToKeyboard = false // paperclip close → no keyboard, slide down
-                            attachOpen = false
-                        } else {
-                            attachOpen = true // AttachPanel hides the keyboard once it's present (order matters)
-                        }
-                    },
-                    onFieldFocused = {
-                        if (attachOpen) { closingToKeyboard = true; attachOpen = false } // keyboard taking over
-                    },
+                // The recorder takes the input row's place, not a row of its own:
+                // the pill keeps one height and the stage under it never moves.
+                AnimatedContent(
+                    targetState = recording != null,
+                    transitionSpec = { fadeIn(ChatMotion.spec()).togetherWith(fadeOut(ChatMotion.spec())) },
                     modifier = Modifier.onSizeChanged { metrics.composerPx = it.height + chromePx },
-                )
+                    label = "composerOrRecorder",
+                ) { isRecording ->
+                    if (isRecording) RecordingRow(
+                        viewModel,
+                        onCancel = viewModel::cancelRecording,
+                        onSend = viewModel::finishRecording,
+                    ) else ComposerRow(
+                        viewModel, input, action,
+                        attachOpen = attachOpen,
+                        onToggleAttach = {
+                            if (attachOpen) {
+                                closingToKeyboard = false // paperclip close → no keyboard, slide down
+                                attachOpen = false
+                            } else {
+                                attachOpen = true // AttachPanel hides the keyboard once it's present (order matters)
+                            }
+                        },
+                        onFieldFocused = {
+                            if (attachOpen) { closingToKeyboard = true; attachOpen = false } // keyboard taking over
+                        },
+                        onMic = onMic,
+                    )
+                }
             }
         }
         // Editing narrows what may be picked to what the target's body can legally
@@ -294,6 +338,7 @@ private fun ComposerActionBlock(
             content.caption.ifEmpty { content.name.ifEmpty { "File" } }
         content is MessageContent.Album ->
             content.caption.ifEmpty { "${content.items.size} photos" }
+        content is MessageContent.Voice -> "Voice message"
         content is MessageContent.Text -> content.text
         else -> ""
     }
@@ -317,7 +362,7 @@ private fun ComposerActionBlock(
                 // A file with no preview still needs a mark, or the tile reads as a
                 // failed image rather than a document.
                 else DrawableIcon(
-                    R.drawable.oi_paperclip,
+                    if (content is MessageContent.Voice) R.drawable.i_mic else R.drawable.oi_paperclip,
                     Modifier.size(16.dp),
                     tint = colors.onSurfaceVariant,
                 )
@@ -377,6 +422,7 @@ private fun ComposerRow(
     attachOpen: Boolean,
     onToggleAttach: () -> Unit,
     onFieldFocused: () -> Unit,
+    onMic: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -472,22 +518,30 @@ private fun ComposerRow(
         }
 
         // The trailing slot is ALWAYS occupied at a fixed size so the pill's
-        // height never jumps: mic by default (voice notes soon), send when
-        // there's a draft, crossfading in place. Solid accent, no haze — a
-        // blurred layer under the circle rendered as a square.
+        // height never jumps: mic by default, send when there's a draft,
+        // crossfading in place. Solid accent, no haze — a blurred layer under
+        // the circle rendered as a square. Held while media is still encoding:
+        // the tap then does nothing rather than start a recording under a draft.
         Box(
             Modifier
                 .padding(start = SlotGap)
                 .size(38.dp)
                 .clip(CircleShape)
                 .background(if (hasDraft) chat.accent else Color.Transparent)
-                .clickable(enabled = hasDraft) { viewModel.send() },
+                // An edit has a body to replace and a voice note is not one,
+                // so the mic sits out while one is staged; a reply rides along.
+                .clickable(enabled = hasDraft || (!hasContent && action !is ComposerAction.Edit)) {
+                    if (hasDraft) viewModel.send() else onMic()
+                },
             contentAlignment = Alignment.Center,
         ) {
+            // Anything drafted shows send, even while it's still encoding and
+            // the tap is held: a mic there would promise a recording the slot
+            // can't start.
             AnimatedContent(
                 targetState = when {
-                    action is ComposerAction.Edit && hasDraft -> R.drawable.i_edit_check
-                    hasDraft -> R.drawable.i_send
+                    action is ComposerAction.Edit && hasContent -> R.drawable.i_edit_check
+                    hasContent -> R.drawable.i_send
                     else -> R.drawable.i_mic
                 },
                 transitionSpec = {
@@ -502,6 +556,65 @@ private fun ComposerRow(
                     tint = if (hasDraft) colors.onPrimary else colors.onSurfaceVariant,
                 )
             }
+        }
+    }
+}
+
+/**
+ * The input row while a voice note records: a level-driven red dot, the
+ * elapsed time, cancel, and the same accent send circle the draft uses. Tap
+ * to start and tap to send rather than hold — one gesture fewer to get wrong,
+ * and the note survives a glance away from the screen.
+ */
+@Composable
+private fun RecordingRow(viewModel: ChatVM, onCancel: () -> Unit, onSend: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val chat = LocalChatColors.current
+    val recording by viewModel.recording.collectAsState()
+    val level by animateFloatAsState(recording?.level ?: 0f, tween(100), label = "micLevel")
+    val elapsed = (recording?.elapsedMs ?: 0L) / 1000
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 38.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(38.dp), contentAlignment = Alignment.Center) {
+            Box(
+                Modifier
+                    .size((10 + 14 * level).dp)
+                    .clip(CircleShape)
+                    .background(colors.error.copy(alpha = 0.25f + 0.75f * (1f - level))),
+            )
+        }
+        Text(
+            "%d:%02d".format(elapsed / 60, elapsed % 60),
+            style = MaterialTheme.typography.bodyLarge,
+            color = colors.onSurface,
+            modifier = Modifier.padding(start = 4.dp),
+        )
+        Text(
+            "Recording…",
+            style = MaterialTheme.typography.bodyMedium,
+            color = colors.onSurfaceVariant,
+            modifier = Modifier.padding(start = 12.dp).weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Box(
+            Modifier.size(38.dp).clip(CircleShape).clickable(onClick = onCancel),
+            contentAlignment = Alignment.Center,
+        ) {
+            DrawableIcon(R.drawable.i_close, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+        }
+        Box(
+            Modifier
+                .padding(start = SlotGap)
+                .size(38.dp)
+                .clip(CircleShape)
+                .background(chat.accent)
+                .clickable(onClick = onSend),
+            contentAlignment = Alignment.Center,
+        ) {
+            DrawableIcon(R.drawable.i_send, Modifier.size(18.dp), tint = colors.onPrimary)
         }
     }
 }

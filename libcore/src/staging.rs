@@ -78,6 +78,7 @@ impl Staged {
             blob:     self.blob.clone(),
             thumb:    self.thumb.clone(),
             file_id:  self.file_id.map(|f| f.to_vec()),
+            duration_ms: 0,
         })
     }
 }

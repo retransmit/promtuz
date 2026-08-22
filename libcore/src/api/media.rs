@@ -15,7 +15,10 @@ pub struct MediaRecord {
     pub size: u64,
     pub width: u32,
     pub height: u32,
+    /// Voice only.
+    pub duration_ms: u32,
     pub blob: Option<Vec<u8>>,
+    /// Blurred preview for an attachment; the loudness waveform for a voice note.
     pub thumb: Option<Vec<u8>>,
     pub file_id: Option<Vec<u8>>,
     pub transfer_state: u8,
@@ -116,6 +119,49 @@ pub fn send_attachment(
     Ok(())
 }
 
+/// Send a recorded voice note inline: the encoded audio rides the frame like
+/// an image, so it is capped the same way — a recorder that honours the cap
+/// never trips it. Fire-and-forget like [`send_image`]; the row is on the
+/// screen before this returns.
+#[uniffi::export]
+pub fn send_voice(
+    conversation_id: Vec<u8>, data: Vec<u8>, mime: String, duration_ms: u32, waveform: Vec<u8>,
+    reply_to: Option<Vec<u8>>,
+) -> Result<(), CoreError> {
+    let to = to_conv16(&conversation_id)?;
+    let reply_to = reply_to.as_deref().map(to_did16).transpose()?;
+    if data.is_empty() || data.len() > VOICE_MAX_BYTES {
+        return Err(anyhow::anyhow!("voice note must be 1..={VOICE_MAX_BYTES} bytes").into());
+    }
+    let row = crate::data::media::MediaRow {
+        kind: crate::data::media::KIND_VOICE,
+        group_id: None,
+        mime,
+        name: String::new(),
+        size: data.len() as u64,
+        width: 0,
+        height: 0,
+        duration_ms,
+        blob: Some(data),
+        thumb: (!waveform.is_empty()).then_some(waveform),
+        file_id: None,
+    };
+    let msg = crate::data::media::save_outgoing_with_media(&to, "", reply_to, &row)?;
+    crate::RUNTIME.spawn(async move {
+        let sent = async {
+            let payload = crate::messaging::rebuild_pending_payload(&to, &msg)?;
+            crate::messaging::send_prepared(to, &msg, payload).await
+        };
+        if let Err(e) = sent.await {
+            log::warn!("MEDIA: send_voice deferred to retry: {e}");
+        }
+    });
+    Ok(())
+}
+
+/// Same ceiling as an inline image: the frame is what holds it.
+pub const VOICE_MAX_BYTES: usize = 256 * 1024;
+
 /// Pull a received attachment's bytes by `file_id`. Fire-and-forget: dials the
 /// sender (or reverse-wakes them if offline) and drives the resumable transfer;
 /// progress and completion surface through `get_media`'s transfer_state.
@@ -176,6 +222,7 @@ pub fn get_media(conversation_id: Vec<u8>) -> Result<Vec<MediaRecord>, CoreError
             size: r.size,
             width: r.width,
             height: r.height,
+            duration_ms: r.duration_ms,
             blob: r.blob,
             thumb: r.thumb,
             file_id: r.file_id,

@@ -50,4 +50,6 @@ fun MessageContent.acceptsStaged(kind: Int): Boolean = when (this) {
     is MessageContent.Album -> false
     // Nobody authored a system row, so there is nothing to revise.
     is MessageContent.System -> false
+    // Atomic: no caption, nothing to swap in for it.
+    is MessageContent.Voice -> false
 }

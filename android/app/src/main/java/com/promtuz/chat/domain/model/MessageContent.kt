@@ -55,6 +55,33 @@ sealed interface MessageContent {
         val transferTotal: Int,
         val localPath: String?,
     ) : MessageContent
+
+    /**
+     * Inline voice note. [waveform] is the sender's loudness samples (0–255),
+     * enough to draw the bubble before anything decodes; [bytes] is the encoded
+     * audio, handed to the player on the first tap.
+     */
+    data class Voice(
+        val dispatchIdHex: String,
+        val mime: String,
+        val durationMs: Int,
+        val waveform: ByteArray,
+        val bytes: ByteArray,
+    ) : MessageContent {
+        // Identity equality: the arrays are immutable and keyed by dispatch id,
+        // and a byte-wise compare of every recording on every recomposition is
+        // the wrong trade.
+        override fun equals(other: Any?) = other is Voice && other.dispatchIdHex == dispatchIdHex
+        override fun hashCode() = dispatchIdHex.hashCode()
+    }
+}
+
+/** One line standing in for a media message wherever its body can't be shown. */
+fun mediaLabel(kind: Int, name: String = ""): String = when (kind) {
+    1 -> "Photo"
+    2 -> name.ifEmpty { "File" }
+    3 -> "Voice message"
+    else -> ""
 }
 
 /** What a [MessageContent.System] row is narrating. */
