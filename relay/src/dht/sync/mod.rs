@@ -109,6 +109,7 @@ pub(crate) async fn run_scheduler(dht: Arc<Dht>, cancel: CancellationToken) {
                 return;
             }
             _ = bootstrap_tick.tick() => {
+                dht.rate_limiters.sweep();
                 // Bootstrap-retry: when the routing table is sparse,
                 // re-ask the resolver. The handle is `Option`-wrapped
                 // on `Dht` so unit-test fixtures (no resolver link)

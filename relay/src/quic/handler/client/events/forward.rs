@@ -49,6 +49,13 @@ pub(super) async fn handle_forward(
         SRelayPacket::DispatchAck(DispatchAckP::InvalidSig).send(tx).await?;
         return Ok(());
     }
+    // Over budget: refused before the signature is even checked, with the
+    // same answer a full queue gives — the client backs off and retries from
+    // its outbox, which is exactly right for both.
+    if ctx.limits.dispatch.check().is_err() {
+        SRelayPacket::DispatchAck(DispatchAckP::QueueFull).send(tx).await?;
+        return Ok(());
+    }
 
     // 2. Verify signature: sender must prove authorship under the canonical
     //    domain-separated, version-tagged, id-bound construction.
@@ -163,6 +170,9 @@ pub(super) async fn handle_forward(
 /// session and the signal must carry a fresh, valid signature; a K-way fan-out
 /// is far too expensive to spend on bytes we have not authenticated.
 pub(super) async fn handle_activity(eph: ActivityP, ctx: ClientCtxHandle) -> Result<()> {
+    if ctx.limits.dispatch.check().is_err() {
+        return Ok(());
+    }
     if eph.from.as_slice() != ctx.ipk.as_bytes().as_slice() {
         return Ok(());
     }

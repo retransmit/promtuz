@@ -51,6 +51,13 @@ const REGISTER_PUSH_PER_MIN: u32 = 4;
 /// Well below the home's `MAX_KP_FETCH_PER_HOUR`, which is keyed on the relay
 /// and would otherwise be spent by whichever co-tenant asks first.
 const FETCH_KEYPACKAGE_PER_TARGET_PER_HOUR: u32 = 10;
+/// Dispatches and activity pings per connection. Each one costs a signature
+/// check and a DHT fan-out that the home relays rate-limit *per relay*, so
+/// one spraying client could get this relay's DHT connections closed as a
+/// flooder. A person types a few a second at most; the burst covers a
+/// reconnect flushing a backlog.
+const DISPATCH_PER_MIN: u32 = 240;
+const DISPATCH_BURST: u32 = 60;
 
 type DirectLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 type TargetLimiter = RateLimiter<[u8; 32], DefaultKeyedStateStore<[u8; 32]>, DefaultClock>;
@@ -62,11 +69,16 @@ pub(crate) struct ClientLimits {
     pub set_presence:       DirectLimiter,
     pub register_push:      DirectLimiter,
     pub fetch_keypackage:   TargetLimiter,
+    pub dispatch:           DirectLimiter,
 }
 
 impl ClientLimits {
     fn new() -> Self {
         Self {
+            dispatch: RateLimiter::direct(
+                Quota::per_minute(NonZeroU32::new(DISPATCH_PER_MIN).unwrap())
+                    .allow_burst(NonZeroU32::new(DISPATCH_BURST).unwrap()),
+            ),
             subscribe_presence: RateLimiter::direct(per_minute(SUBSCRIBE_PRESENCE_PER_MIN)),
             set_presence:       RateLimiter::direct(per_minute(SET_PRESENCE_PER_MIN)),
             register_push:      RateLimiter::direct(per_minute(REGISTER_PUSH_PER_MIN)),

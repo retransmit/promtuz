@@ -159,6 +159,16 @@ impl RpcClass {
 }
 
 impl PerPeerLimiters {
+    /// Forget peers whose buckets have refilled. The keyed stores hold a row
+    /// per NodeId ever seen, and a NodeId is free to mint, so without this
+    /// a stream of throwaway ids is a slow memory leak.
+    pub(crate) fn sweep(&self) {
+        for l in [&self.cheap, &self.expensive, &self.bulk] {
+            l.retain_recent();
+            l.shrink_to_fit();
+        }
+    }
+
     /// Draw one token from both the aggregate budget and the
     /// `peer`-keyed limiter for this RPC class. Returns `Err(())` if
     /// either is exhausted.
