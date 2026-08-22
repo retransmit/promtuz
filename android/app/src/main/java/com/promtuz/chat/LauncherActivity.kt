@@ -61,9 +61,15 @@ class LauncherActivity : ComponentActivity() {
         if (CoreBridge.shouldLaunchApp()) viewModel.showInvite(invite) else viewModel.pendingInvite = invite
     }
 
-    /** A message-notification tap carries the chat's peer + name; open that thread once we're set up. */
+    /**
+     * A message-notification tap carries the chat's id + name; open that thread
+     * once we're set up. The activity is exported (it has to be — launcher and
+     * app links), so any app can send these extras: the id is held to the
+     * shape a real one has before it reaches a route that parses it.
+     */
     private fun consumeChatOpen(intent: Intent) {
-        val convHex = intent.getStringExtra(PushNotifier.EXTRA_CONVERSATION) ?: return
+        val convHex = intent.getStringExtra(PushNotifier.EXTRA_CONVERSATION)
+            ?.takeIf { it.matches(Regex("[0-9a-f]{32}")) } ?: return
         val name = intent.getStringExtra(PushNotifier.EXTRA_CONV_NAME).orEmpty()
         intent.removeExtra(PushNotifier.EXTRA_CONVERSATION) // one-shot; survive recreation
         intent.removeExtra(PushNotifier.EXTRA_CONV_NAME)
