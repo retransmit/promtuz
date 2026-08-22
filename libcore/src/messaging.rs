@@ -1724,9 +1724,20 @@ pub async fn retry_pending_sends<C: DhtClient>(ctx: &MlsContext<'_, C>) {
 pub fn leaf_signer_for_group(
     provider: &PromtuzMlsProvider, group: &MlsGroupHandle, our_ipk: &[u8; 32],
 ) -> Result<openmls_basic_credential::SignatureKeyPair> {
-    let leaf_idx = group
-        .member_index_by_ipk(our_ipk)
-        .ok_or_else(|| anyhow!("our IPK is not a member of group"))?;
+    let leaf_idx = group.member_index_by_ipk(our_ipk).ok_or_else(|| {
+        // Our leaf is there but unbound: a group chat founded before leaves
+        // carried their identity's signature. Every other member refuses an
+        // unbound leaf now, so nothing we send would land; say so rather than
+        // "not a member".
+        let legacy = group.members().any(|m| {
+            crate::mls::credential::member_ipk(&m, false) == Some(*our_ipk)
+        });
+        if legacy {
+            anyhow!("this group predates a security upgrade and can't be used; create it again")
+        } else {
+            anyhow!("our IPK is not a member of group")
+        }
+    })?;
     // Find our own credential's signature key.
     let pub_key: Vec<u8> = group
         .members()
