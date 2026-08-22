@@ -172,20 +172,31 @@ pub struct DhtHello {
 /// Both signing (dialer) and verifying (receiver) sides call this helper,
 /// which makes it the byte-for-byte contract — there is no second
 /// implementation to keep in sync.
+///
+/// `binding` is keying material both ends export from the TLS session under
+/// [`DHT_HELLO_EXPORTER_LABEL`] (see [`crate::quic::session_binding`]), so a
+/// hello is good on the connection it was sent over and nowhere else: a
+/// relay that captured one cannot replay it within the clock window to
+/// stand in as that peer.
 pub fn dht_hello_signing_input(
-    node_id: &crate::quic::id::NodeId, pubkey: &[u8; 32], timestamp: u64,
+    node_id: &crate::quic::id::NodeId, pubkey: &[u8; 32], timestamp: u64, binding: &[u8; 32],
 ) -> Vec<u8> {
-    // domain (varies) + version (2) + node_id (32) + pubkey (32) + ts (8) = 76
-    // + domain bytes.
-    let mut buf =
-        Vec::with_capacity(DHT_HELLO_SIG_DOMAIN.len() + 2 + crate::quic::id::NodeId::LEN + 32 + 8);
+    // domain (varies) + version (2) + node_id (32) + pubkey (32) + ts (8)
+    // + binding (32).
+    let mut buf = Vec::with_capacity(
+        DHT_HELLO_SIG_DOMAIN.len() + 2 + crate::quic::id::NodeId::LEN + 32 + 8 + 32,
+    );
     buf.extend_from_slice(DHT_HELLO_SIG_DOMAIN);
     buf.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
     buf.extend_from_slice(node_id.as_bytes());
     buf.extend_from_slice(pubkey);
     buf.extend_from_slice(&timestamp.to_be_bytes());
+    buf.extend_from_slice(binding);
     buf
 }
+
+/// The label a [`DhtHello`]'s session binding is exported under.
+pub const DHT_HELLO_EXPORTER_LABEL: &[u8] = b"promtuz dht hello v1";
 
 /// Reasons a [`DhtHello`] can fail the inbound verification at
 /// `relay/src/dht/handler.rs::handle_peer_connection`.
@@ -272,7 +283,7 @@ mod verify_impl {
         /// `now_ms` is wall-clock in milliseconds since the Unix epoch,
         /// passed in explicitly so unit tests can pin a deterministic
         /// clock.
-        pub fn verify(&self, now_ms: u64) -> Result<(), DhtHelloVerifyError> {
+        pub fn verify(&self, now_ms: u64, binding: &[u8; 32]) -> Result<(), DhtHelloVerifyError> {
             // 1. id-binding to pubkey. NodeId::new = BLAKE3(pubkey) — same construction every other
             //    call site uses (cf. `verify_signed_packet` and `PresenceRecord::verify`).
             let derived_id = NodeId::new(self.pubkey.as_ref());
@@ -286,7 +297,7 @@ mod verify_impl {
 
             // 3. Signature.
             let sig = Signature::from_bytes(&self.sig.0);
-            let msg = dht_hello_signing_input(&self.node_id, &self.pubkey.0, self.timestamp);
+            let msg = dht_hello_signing_input(&self.node_id, &self.pubkey.0, self.timestamp, binding);
             vk.verify_strict(&msg, &sig).map_err(|_| DhtHelloVerifyError::BadSignature)?;
 
             // 4. Timestamp freshness (replay protection).
@@ -1308,6 +1319,9 @@ mod tests {
     use crate::proto::pack::Unpacker;
     use crate::quic::id::NodeId;
 
+    /// Stands in for the TLS session both ends of a real dial would export.
+    const BINDING: [u8; 32] = [0x5Bu8; 32];
+
     /// Mint a fresh Ed25519 keypair via OS-RNG. Mirrors the existing
     /// `crypto::get_signing_key` pattern at `common/src/crypto/mod.rs`
     /// — `rand_core::OsRng` is the rand_core-0.6 CSPRNG that
@@ -1322,7 +1336,7 @@ mod tests {
     fn build_dht_hello(key: &SigningKey, timestamp: u64) -> DhtHello {
         let pubkey: [u8; 32] = key.verifying_key().to_bytes();
         let node_id = NodeId::new(pubkey);
-        let msg = dht_hello_signing_input(&node_id, &pubkey, timestamp);
+        let msg = dht_hello_signing_input(&node_id, &pubkey, timestamp, &BINDING);
         let sig = key.sign(&msg);
         DhtHello { node_id, pubkey: pubkey.into(), timestamp, sig: sig.to_bytes().into() }
     }
@@ -1350,12 +1364,12 @@ mod tests {
         let node_id = NodeId::from_bytes(bytes);
         let timestamp: u64 = 0xDEAD_BEEF_CAFE_F00D;
 
-        let buf = dht_hello_signing_input(&node_id, &pubkey, timestamp);
+        let buf = dht_hello_signing_input(&node_id, &pubkey, timestamp, &BINDING);
 
         // Domain (20) + version (2) + node_id (32) + pubkey (32) +
         // ts (8) = 94 bytes. Anchor on the total length so a stray
         // field change is caught immediately.
-        assert_eq!(buf.len(), DHT_HELLO_SIG_DOMAIN.len() + 2 + 32 + 32 + 8);
+        assert_eq!(buf.len(), DHT_HELLO_SIG_DOMAIN.len() + 2 + 32 + 32 + 8 + 32);
 
         // Spot-check the header.
         assert!(buf.starts_with(DHT_HELLO_SIG_DOMAIN));
@@ -1375,10 +1389,10 @@ mod tests {
         let now: u64 = 1_700_000_000_000;
         let hello = build_dht_hello(&key, now);
         // ±0 skew → must accept.
-        hello.verify(now).expect("freshly-signed hello must verify");
+        hello.verify(now, &BINDING).expect("freshly-signed hello must verify");
         // Inside the skew window → must accept.
-        hello.verify(now + MAX_DHT_HELLO_SKEW_MS - 1).expect("inside skew");
-        hello.verify(now - (MAX_DHT_HELLO_SKEW_MS - 1)).expect("inside skew");
+        hello.verify(now + MAX_DHT_HELLO_SKEW_MS - 1, &BINDING).expect("inside skew");
+        hello.verify(now - (MAX_DHT_HELLO_SKEW_MS - 1), &BINDING).expect("inside skew");
     }
 
     #[test]
@@ -1394,7 +1408,7 @@ mod tests {
         // the original (a-derived) pubkey + sig.
         let fake_id = NodeId::new(key_b.verifying_key().to_bytes());
         hello.node_id = fake_id;
-        match hello.verify(now) {
+        match hello.verify(now, &BINDING) {
             Err(DhtHelloVerifyError::IdMismatch) => {},
             other => panic!("expected IdMismatch, got {other:?}"),
         }
@@ -1408,14 +1422,14 @@ mod tests {
 
         // Stale: timestamp ~2 minutes in the past.
         let stale = build_dht_hello(&key, now - 120_000);
-        match stale.verify(now) {
+        match stale.verify(now, &BINDING) {
             Err(DhtHelloVerifyError::ClockSkew) => {},
             other => panic!("expected ClockSkew (stale), got {other:?}"),
         }
 
         // Future: timestamp ~2 minutes in the future.
         let future = build_dht_hello(&key, now + 120_000);
-        match future.verify(now) {
+        match future.verify(now, &BINDING) {
             Err(DhtHelloVerifyError::ClockSkew) => {},
             other => panic!("expected ClockSkew (future), got {other:?}"),
         }
@@ -1428,7 +1442,7 @@ mod tests {
         let now: u64 = 1_700_000_000_000;
         let mut hello = build_dht_hello(&key, now);
         hello.sig.0[0] ^= 0x01;
-        match hello.verify(now) {
+        match hello.verify(now, &BINDING) {
             Err(DhtHelloVerifyError::BadSignature) => {},
             other => panic!("expected BadSignature, got {other:?}"),
         }

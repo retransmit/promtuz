@@ -311,7 +311,8 @@ async fn send_dht_hello(dht: &Arc<Dht>, conn: &Connection) -> anyhow::Result<()>
     // The dialer's own pubkey: derivable from the signing key.
     let pubkey: [u8; 32] = dht.signing_key.verifying_key().to_bytes();
     let timestamp = now_ms();
-    let msg = dht_hello_signing_input(&node_id, &pubkey, timestamp);
+    let binding = common::quic::session_binding(conn, common::proto::dht_p2p::DHT_HELLO_EXPORTER_LABEL)?;
+    let msg = dht_hello_signing_input(&node_id, &pubkey, timestamp, &binding);
     let sig = dht.signing_key.sign(&msg).to_bytes();
 
     let hello = DhtHello {

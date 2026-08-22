@@ -357,9 +357,16 @@ async fn recv_and_verify_hello(dht: &Arc<Dht>, conn: &Connection) -> Result<Auth
         },
     };
 
-    // Verify (id-binding, pubkey shape, signature, timestamp window).
+    // Verify (id-binding, pubkey shape, signature over this session, timestamp window).
     let now = now_ms();
-    match verify_hello_with_close_reason(&hello, now) {
+    let Ok(binding) =
+        common::quic::session_binding(conn, common::proto::dht_p2p::DHT_HELLO_EXPORTER_LABEL)
+    else {
+        dht.metrics.inc_dht_hello_rejected();
+        CloseReason::DhtBadSignature.close(conn);
+        return Err(());
+    };
+    match verify_hello_with_close_reason(&hello, now, &binding) {
         Ok(()) => Ok(AuthenticatedPeer { node_id: hello.node_id, pubkey: hello.pubkey.0 }),
         Err(reason) => {
             dht.metrics.inc_dht_hello_rejected();
@@ -387,8 +394,10 @@ async fn recv_and_verify_hello(dht: &Arc<Dht>, conn: &Connection) -> Result<Auth
 /// | `IdMismatch` / `MalformedPubkey` | `DhtMalformedKey` |
 /// | `BadSignature` | `DhtBadSignature` |
 /// | `ClockSkew` | `DhtClockSkew` |
-fn verify_hello_with_close_reason(hello: &DhtHello, now_ms: u64) -> Result<(), CloseReason> {
-    hello.verify(now_ms).map_err(|e| match e {
+fn verify_hello_with_close_reason(
+    hello: &DhtHello, now_ms: u64, binding: &[u8; 32],
+) -> Result<(), CloseReason> {
+    hello.verify(now_ms, binding).map_err(|e| match e {
         DhtHelloVerifyError::IdMismatch | DhtHelloVerifyError::MalformedPubkey => {
             CloseReason::DhtMalformedKey
         },
@@ -731,10 +740,12 @@ mod tests {
 
     /// Build a freshly-signed `DhtHello` for `key` at `timestamp`.
     /// Mirrors the production dialer in `lookup::send_dht_hello`.
+    const BINDING: [u8; 32] = [0x5Bu8; 32];
+
     fn make_hello(key: &SigningKey, timestamp: u64) -> DhtHello {
         let pubkey: [u8; 32] = key.verifying_key().to_bytes();
         let node_id = NodeId::new(pubkey);
-        let msg = dht_hello_signing_input(&node_id, &pubkey, timestamp);
+        let msg = dht_hello_signing_input(&node_id, &pubkey, timestamp, &BINDING);
         let sig = key.sign(&msg).to_bytes();
         DhtHello { node_id, pubkey: Bytes(pubkey), timestamp, sig: Bytes(sig) }
     }
@@ -745,7 +756,7 @@ mod tests {
         let key = fresh_signing_key();
         let now: u64 = 1_700_000_000_000;
         let stale = make_hello(&key, now - 120_000); // 2 min in the past
-        match verify_hello_with_close_reason(&stale, now) {
+        match verify_hello_with_close_reason(&stale, now, &BINDING) {
             Err(CloseReason::DhtClockSkew) => {},
             other => panic!("expected DhtClockSkew, got {other:?}"),
         }
@@ -758,7 +769,7 @@ mod tests {
         let now: u64 = 1_700_000_000_000;
         let mut hello = make_hello(&key, now);
         hello.sig.0[0] ^= 0xFF;
-        match verify_hello_with_close_reason(&hello, now) {
+        match verify_hello_with_close_reason(&hello, now, &BINDING) {
             Err(CloseReason::DhtBadSignature) => {},
             other => panic!("expected DhtBadSignature, got {other:?}"),
         }
@@ -776,7 +787,7 @@ mod tests {
         // Replace node_id with a different identity's id while keeping
         // the original (a-derived) pubkey + sig.
         hello.node_id = NodeId::new(key_b.verifying_key().to_bytes());
-        match verify_hello_with_close_reason(&hello, now) {
+        match verify_hello_with_close_reason(&hello, now, &BINDING) {
             Err(CloseReason::DhtMalformedKey) => {},
             other => panic!("expected DhtMalformedKey, got {other:?}"),
         }
@@ -787,8 +798,8 @@ mod tests {
         let key = fresh_signing_key();
         let now: u64 = 1_700_000_000_000;
         let hello = make_hello(&key, now);
-        verify_hello_with_close_reason(&hello, now).expect("valid hello must pass");
-        verify_hello_with_close_reason(&hello, now + 5).expect("inside skew window must pass");
+        verify_hello_with_close_reason(&hello, now, &BINDING).expect("valid hello must pass");
+        verify_hello_with_close_reason(&hello, now + 5, &BINDING).expect("inside skew window must pass");
     }
 
     // -----------------------------------------------------------------

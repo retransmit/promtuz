@@ -15,13 +15,19 @@ pub use xor::xor32;
 pub static RESOLVER_RELAY_HEARTBEAT_INTERVAL: u64 = 20;
 
 /// Keying material unique to this TLS session, as both ends of `conn` compute
-/// it — what a client's auth proof is bound to (see
-/// [`crate::proto::client_rel::client_auth_message`]).
-pub fn client_auth_binding(conn: &Connection) -> Result<[u8; 32]> {
+/// it under `label` — what a proof of identity is bound to, so that it
+/// verifies on this connection and no other.
+pub fn session_binding(conn: &Connection, label: &[u8]) -> Result<[u8; 32]> {
     let mut out = [0u8; 32];
-    conn.export_keying_material(&mut out, crate::proto::client_rel::CLIENT_AUTH_EXPORTER_LABEL, &[])
+    conn.export_keying_material(&mut out, label, &[])
         .map_err(|e| anyhow::anyhow!("tls exporter: {e:?}"))?;
     Ok(out)
+}
+
+/// [`session_binding`] under the client-auth label — see
+/// [`crate::proto::client_rel::client_auth_message`].
+pub fn client_auth_binding(conn: &Connection) -> Result<[u8; 32]> {
+    session_binding(conn, crate::proto::client_rel::CLIENT_AUTH_EXPORTER_LABEL)
 }
 
 pub async fn send_uni(conn: &Connection, data: &[u8]) -> Result<()> {

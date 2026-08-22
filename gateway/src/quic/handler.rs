@@ -25,12 +25,13 @@ impl Handler {
         let addr = conn.remote_address();
 
         // Only devices (`client/5`, registration) and home relays (`relay/5`,
-        // wake) talk to the gateway. Anything else is closed.
-        match ProtoRole::from_conn(&conn) {
-            Some(ProtoRole::Client | ProtoRole::Relay) => {},
+        // wake) talk to the gateway. Anything else is closed, and each role
+        // gets its own verb: a device registers, a relay wakes.
+        let role = match ProtoRole::from_conn(&conn) {
+            Some(role @ (ProtoRole::Client | ProtoRole::Relay)) => role,
             Some(_) => return conn.close(0u32.into(), b"UnsupportedALPN"),
             None => return conn.close(0u32.into(), b"NoALPN"),
-        }
+        };
 
         while let Ok((_send, mut recv)) = conn.accept_bi().await {
             let gateway = gateway.clone();
@@ -45,6 +46,9 @@ impl Handler {
                         ),
                         Err(e) => warn!("gateway: rejected registration from {addr}: {e}"),
                     },
+                    Ok(PushRequest::Wake(_)) if role != ProtoRole::Relay => {
+                        warn!("gateway: wake from a non-relay {addr}; ignored");
+                    },
                     Ok(PushRequest::Wake(req)) => Self::dispatch_wake(&gateway, req).await,
                     Err(e) => warn!("gateway: request decode failed from {addr}: {e}"),
                 }
@@ -54,6 +58,17 @@ impl Handler {
 
     async fn dispatch_wake(gateway: &Gateway, req: WakeRequest) {
         let p = hex::encode(&req.pseudonym.0[..8]);
+        // A wake carries nothing: the message is waiting at the relay, and the
+        // device fetches it there. Bytes offered here would be forwarded under
+        // the gateway's FCM credentials to a phone that never asked for them.
+        if !req.payload.is_empty() {
+            warn!("gateway: wake for P={p} carried a payload; dropped");
+            return;
+        }
+        if gateway.wakes.check_key(&req.pseudonym.0).is_err() {
+            debug!("gateway: wake budget exhausted for P={p}; dropped");
+            return;
+        }
         let Some(entry) = gateway.registry.resolve(&req.pseudonym.0) else {
             warn!("gateway: wake for unknown P={p} — device never registered this pseudonym (stale/rotated P?)");
             return;

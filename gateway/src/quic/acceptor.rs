@@ -78,6 +78,8 @@ async fn maintain(gateway: Arc<Gateway>, limiter: Arc<IpRateLimiter>) {
         tick.tick().await;
         limiter.retain_recent();
         limiter.shrink_to_fit();
+        gateway.wakes.retain_recent();
+        gateway.wakes.shrink_to_fit();
         gateway.registry.sweep();
     }
 }

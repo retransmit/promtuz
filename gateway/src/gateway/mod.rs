@@ -28,7 +28,21 @@ pub struct Gateway {
     /// `None` when no service-account is configured — the gateway still serves
     /// registrations, but FCM wakes are dropped.
     pub fcm:      Option<FcmSender>,
+    /// Wakes per pseudonym. A wake is a push to a phone, and whoever holds a
+    /// P — its home relay, or anyone who learnt it — gets no more of them
+    /// than a relay would ever send.
+    pub wakes:    WakeLimiter,
 }
+
+pub type WakeLimiter = governor::RateLimiter<
+    [u8; 32],
+    governor::state::keyed::DefaultKeyedStateStore<[u8; 32]>,
+    governor::clock::DefaultClock,
+>;
+
+/// Mirrors the relay's own per-recipient wake budget.
+const MAX_WAKES_PER_P_PER_HOUR: u32 = 120;
+const MAX_WAKE_BURST: u32 = 12;
 
 impl Gateway {
     fn get_server_cfg(cfg: &AppConfig) -> Result<ServerConfig> {
@@ -90,6 +104,13 @@ impl Gateway {
             }
         });
 
-        Self { endpoint, registry: PushRegistry::default(), fcm }
+        let quota = governor::Quota::per_hour(std::num::NonZeroU32::new(MAX_WAKES_PER_P_PER_HOUR).unwrap())
+            .allow_burst(std::num::NonZeroU32::new(MAX_WAKE_BURST).unwrap());
+        Self {
+            endpoint,
+            registry: PushRegistry::default(),
+            fcm,
+            wakes: governor::RateLimiter::keyed(quota),
+        }
     }
 }
