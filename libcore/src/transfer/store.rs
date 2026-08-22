@@ -131,16 +131,16 @@ pub fn retention_get(file_id: &[u8; 32]) -> Option<Retention> {
         .expect("retention read")
 }
 
-/// Drop every entry that expired at or before `now`. The `>= 0` guard skips the
-/// u64::MAX sentinel (stored as -1 by the bitwise cast) so it never expires.
-pub fn retention_gc(now: u64) -> usize {
-    TRANSFERS_DB
-        .lock()
-        .execute(
-            "DELETE FROM retention WHERE expires_at >= 0 AND expires_at <= ?1",
-            params![now as i64],
-        )
-        .expect("retention gc")
+/// Every retained `file_id`, for the startup sweep.
+pub fn retention_file_ids() -> Vec<[u8; 32]> {
+    let conn = TRANSFERS_DB.lock();
+    let mut stmt = match conn.prepare("SELECT file_id FROM retention") {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))
+        .map(|rows| rows.filter_map(|r| r.ok()?.try_into().ok()).collect())
+        .unwrap_or_default()
 }
 
 pub fn partial_get(file_id: &[u8; 32]) -> Option<Partial> {
@@ -204,40 +204,63 @@ pub fn gc_dead_partials(older_than: u64) -> Vec<String> {
     paths
 }
 
-/// Forget a receiver transfer outright — its bytes and its row — for a
-/// `file_id` no message points at any more.
+/// Forget a file outright — every row that names it and the bytes under them —
+/// for a `file_id` no message points at any more.
 ///
-/// The state-based [`gc_dead_partials`] can't do this: the case that matters is
-/// a `DONE` partial, which it spares by design. Both halves go together because
-/// a `file_id` is a content hash: a surviving `DONE` row would answer the same
-/// content arriving in some later message with a `local_path` to a file nobody
-/// kept.
+/// Both sides of a transfer live here. A receiver's `partials` row owns the
+/// `.part` it pulled; a sender's `retention` row owns the copy the platform
+/// handed [`crate::api::media::send_attachment`], which is core's to unlink
+/// once nothing shows it. The state-based [`gc_dead_partials`] can't do this:
+/// the case that matters is a `DONE` partial, which it spares by design. Row
+/// and bytes go together because a `file_id` is a content hash: a surviving
+/// `DONE` row would answer the same content arriving in some later message
+/// with a `local_path` to a file nobody kept.
+///
+/// Deleted means gone, for the peer too: a recipient who had not pulled the
+/// file yet is answered `Gone` from here on. The alternative — bytes that
+/// outlive the message they were deleted with — is the wrong default for
+/// this app; the sender chose to delete, the peer just chose to wait.
 ///
 /// Best-effort throughout — a caller clearing a chat is not failed over a file
 /// that won't unlink, and a `.part` that was never downloaded is simply absent.
+pub fn forget_file(file_id: &[u8; 32]) {
+    forget_partial(file_id);
+    forget_retention(file_id);
+}
+
+/// The receiver half of [`forget_file`].
 pub fn forget_partial(file_id: &[u8; 32]) {
+    forget_row("partials", file_id, Some(partial_path(file_id)));
+}
+
+/// The sender half of [`forget_file`].
+pub fn forget_retention(file_id: &[u8; 32]) {
+    forget_row("retention", file_id, None);
+}
+
+fn forget_row(table: &str, file_id: &[u8; 32], fallback: Option<String>) {
     let conn = TRANSFERS_DB.lock();
     // The row's own `path` is what `get_media` hands out as `local_path`, so
     // that is the file to remove. Only "no such row" is a plain miss; a read
-    // that failed says so. Either way the canonical location is where a `.part`
-    // is written, so it stays the file to try.
-    let sql = "SELECT path FROM partials WHERE file_id = ?1";
-    let path = match conn.query_row(sql, params![file_id], |r| r.get::<_, String>(0)) {
-        Ok(p) => p,
-        Err(rusqlite::Error::QueryReturnedNoRows) => partial_path(file_id),
+    // that failed says so. Either way a `.part`'s canonical location is where
+    // one is written, so it stays the file to try.
+    let sql = format!("SELECT path FROM {table} WHERE file_id = ?1");
+    let path = match conn.query_row(&sql, params![file_id], |r| r.get::<_, String>(0)) {
+        Ok(p) => Some(p),
+        Err(rusqlite::Error::QueryReturnedNoRows) => fallback,
         Err(e) => {
-            log::warn!("transfer: partial path read failed: {e}");
-            partial_path(file_id)
+            log::warn!("transfer: {table} path read failed: {e}");
+            fallback
         },
     };
-
     // The row goes first. A DELETE that failed after the unlink would leave a
-    // `DONE` row standing over bytes that are gone; a row dropped while the
-    // `.part` survives only leaks disk, which the doc already accepts.
-    if let Err(e) = conn.execute("DELETE FROM partials WHERE file_id = ?1", params![file_id]) {
-        log::warn!("transfer: partial row for a forgotten file survives: {e}");
+    // row standing over bytes that are gone; a row dropped while the file
+    // survives only leaks disk, which the doc already accepts.
+    if let Err(e) = conn.execute(&format!("DELETE FROM {table} WHERE file_id = ?1"), params![file_id]) {
+        log::warn!("transfer: {table} row for a forgotten file survives: {e}");
     }
-    if let Err(e) = std::fs::remove_file(&path)
+    if let Some(path) = path
+        && let Err(e) = std::fs::remove_file(&path)
         && e.kind() != std::io::ErrorKind::NotFound
     {
         log::warn!("transfer: {path} left on disk: {e}");
@@ -301,22 +324,6 @@ mod tests {
     }
 
     #[test]
-    fn retention_gc_drops_expired_keeps_sentinel() {
-        let dir = std::env::temp_dir().join("promtuz-transfers-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
-
-        let never = [7u8; 32]; // u64::MAX sentinel — never garbage-collected
-        let soon = [8u8; 32]; // expires at t=10
-        retention_put(&never, "/tmp/n", 1, 1, &[], u64::MAX).unwrap();
-        retention_put(&soon, "/tmp/s", 1, 1, &[], 10).unwrap();
-
-        retention_gc(20); // now past soon's expiry
-        assert!(retention_get(&never).is_some());
-        assert!(retention_get(&soon).is_none());
-    }
-
-    #[test]
     fn gc_dead_partials_reaps_dead_but_spares_done() {
         let dir = std::env::temp_dir().join("promtuz-transfers-test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -360,16 +367,20 @@ mod tests {
 
     /// A file_id is a content hash, so a row outliving its bytes would tell a
     /// later message carrying the same content that the file is DONE and on
-    /// disk. Row and bytes leave together or not at all.
+    /// disk. Rows and bytes leave together or not at all — the sender's
+    /// retained copy included, since it is the only copy of what they sent.
     #[test]
-    fn forget_partial_takes_the_row_and_the_bytes() {
+    fn forget_file_takes_the_rows_and_the_bytes() {
         let dir = std::env::temp_dir().join("promtuz-transfers-test");
         std::fs::create_dir_all(&dir).unwrap();
         unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
 
-        let fid = [0xf1; 32];
-        let path = format!("{}/forget-f1.part", dir.display());
+        let fid = [0xf4; 32];
+        let path = format!("{}/forget-f4.part", dir.display());
         std::fs::write(&path, b"bytes").unwrap();
+        let sent = format!("{}/forget-f4.sent", dir.display());
+        std::fs::write(&sent, b"bytes").unwrap();
+        retention_put(&fid, &sent, 5, 5, &[], u64::MAX).unwrap();
         partial_put(&Partial {
             file_id: fid,
             source_ipk: [9u8; 32],
@@ -384,10 +395,12 @@ mod tests {
         })
         .unwrap();
 
-        forget_partial(&fid);
+        forget_file(&fid);
 
-        assert!(partial_get(&fid).is_none(), "the row is gone");
-        assert!(!std::path::Path::new(&path).exists(), "and so are the bytes");
+        assert!(partial_get(&fid).is_none(), "the partial row is gone");
+        assert!(!std::path::Path::new(&path).exists(), "and so are its bytes");
+        assert!(retention_get(&fid).is_none(), "the retention row is gone");
+        assert!(!std::path::Path::new(&sent).exists(), "and so is the sent copy");
     }
 
     /// Nothing re-pulls a file the row calls finished, so a `DONE` row that

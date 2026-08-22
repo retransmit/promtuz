@@ -40,34 +40,6 @@ fn mint_conversation_id() -> [u8; 16] {
     Ulid::new().to_bytes()
 }
 
-/// Have the transfer store forget attachments whose media rows are now
-/// committed away — otherwise clearing a chat to be rid of a photo keeps the
-/// photo. The store owns both the bytes and the row that finds them, so the
-/// removal happens there rather than by reaching into its storage layout.
-///
-/// Re-checked against the whole of `message_media` first: the same content can
-/// hang off a second row in another chat, and the rows are the source of truth.
-///
-/// Runs with `MESSAGES_DB` held and takes `TRANSFERS_DB` inside it. That is the
-/// only direction the two are ever held in — every `TRANSFERS_DB` scope lives
-/// in `transfer::store` and none reaches back for `MESSAGES_DB`. One that did
-/// would close the cycle and hang, as would a commit hook that called into core
-/// rather than just waking the UI.
-fn unlink_orphaned_media(conn: &Connection, file_ids: &[[u8; 32]]) {
-    for fid in file_ids {
-        let sql = "SELECT 1 FROM message_media WHERE file_id = ?1 LIMIT 1";
-        match conn.query_row(sql, [fid.as_slice()], |_| Ok(())) {
-            // Nothing names it any more. Only this answer frees the bytes.
-            Err(rusqlite::Error::QueryReturnedNoRows) =>
-                crate::transfer::store::forget_partial(fid),
-            // A row still names it — or the read that decides just failed, and
-            // a failure to consult the source of truth is not permission to
-            // delete what another chat may still be showing. Keep the file.
-            _ => {},
-        }
-    }
-}
-
 pub struct Conversation;
 
 impl Conversation {
@@ -391,7 +363,7 @@ impl Conversation {
         let tx = conn.transaction()?;
         let orphaned = Self::clear_history_tx(&tx, id)?;
         tx.commit()?;
-        unlink_orphaned_media(&conn, &orphaned);
+        crate::data::media::unlink_orphaned(&conn, &orphaned);
         Ok(())
     }
 
@@ -436,7 +408,7 @@ impl Conversation {
         tx.execute("DELETE FROM conversation_members WHERE conversation_id = ?1", [id.as_slice()])?;
         tx.execute("DELETE FROM conversations WHERE id = ?1", [id.as_slice()])?;
         tx.commit()?;
-        unlink_orphaned_media(&conn, &orphaned);
+        crate::data::media::unlink_orphaned(&conn, &orphaned);
         Ok(())
     }
 

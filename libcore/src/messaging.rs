@@ -318,7 +318,13 @@ pub async fn revise(conversation: [u8; 16], target: [u8; 16], body: Body) -> Res
 /// Delete a prior message. `for_everyone` tombstones both sides (sends a
 /// Delete); otherwise it's a local-only removal, no wire signal.
 pub async fn delete(conversation: [u8; 16], target: [u8; 16], for_everyone: bool) -> Result<()> {
-    let row = if for_everyone {
+    // A message that never reached the relay has nothing to tombstone for
+    // anyone, and a tombstone left pending would spin forever now that the
+    // resend pass skips deleted rows. It goes the local way; the Delete still
+    // ships below in case the send was racing us onto the wire.
+    let never_sent = Message::get_by_dispatch(&conversation, &target)
+        .is_some_and(|m| matches!(m.inner.status, 0 | 2));
+    let row = if for_everyone && !never_sent {
         // own=true: delete-for-everyone only tombstones our own sent messages.
         Message::apply_delete(&conversation, &target, true, None)
     } else {

@@ -114,8 +114,22 @@ pub fn revise_with_staged(
     let to = to_conv16(&conversation_id)?;
     let target = to_did16(&dispatch_id)?;
     let body = crate::staging::body_of(staged_id, caption)?;
+    // Landed before this returns, not on the spawned task: the caller clears
+    // the buffer next, and an attachment the buffer lets go of is unlinked
+    // unless a message already names it.
+    if let Some((row, content)) =
+        crate::messaging::apply_revise_body(&to, &target, body.clone(), true)?
+    {
+        use crate::events::Emittable;
+        crate::events::messaging::MessageEv::Edited { id: row.id, conversation: to, content }.emit();
+    }
     crate::RUNTIME.spawn(async move {
-        if let Err(e) = crate::messaging::revise(to, target, body).await {
+        if let Err(e) = crate::messaging::send_control(
+            to,
+            common::proto::mls_wire::AppPayload::Revise { target, body },
+        )
+        .await
+        {
             log::error!("STAGING: revise failed: {e}");
         }
     });

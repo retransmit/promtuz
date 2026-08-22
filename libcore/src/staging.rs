@@ -104,24 +104,64 @@ pub fn list() -> Vec<Staged> {
 /// through [`finish`], which no-ops on an id that's gone, so a removal mid-pass
 /// can't resurrect it.
 pub fn discard(id: u64) {
-    ITEMS.lock().remove(&id);
+    let orphans = {
+        let mut items = ITEMS.lock();
+        let gone = items.remove(&id);
+        orphans_of(&items, gone.into_iter())
+    };
     ring();
+    release(&orphans);
 }
 
 /// Empty the buffer (send committed, or the composer was cleared).
 pub fn clear() {
-    ITEMS.lock().clear();
+    let orphans = {
+        let mut items = ITEMS.lock();
+        let gone = std::mem::take(&mut *items);
+        orphans_of(&items, gone.into_values())
+    };
     ring();
+    release(&orphans);
 }
 
-/// Land a finished prepare onto its item, unless it was discarded meanwhile.
-fn finish(id: u64, f: impl FnOnce(&mut Staged)) {
-    let mut items = ITEMS.lock();
-    if let Some(s) = items.get_mut(&id) {
-        f(s);
-        drop(items);
-        ring();
+/// Whether something in the buffer still means to send this file. Consulted
+/// by the message-side unlink, since a chip can hold the same content as a
+/// message that is being deleted — the same document picked again.
+pub(crate) fn holds(file_id: &[u8; 32]) -> bool {
+    ITEMS.lock().values().any(|s| s.file_id == Some(*file_id))
+}
+
+/// The files `gone` held that no item still in the buffer holds. Retention is
+/// one row per content hash, so the same document picked twice is one file
+/// under two chips, and removing one chip must leave the other its bytes.
+fn orphans_of(items: &HashMap<u64, Staged>, gone: impl Iterator<Item = Staged>) -> Vec<[u8; 32]> {
+    gone.filter_map(|s| s.file_id)
+        .filter(|f| !items.values().any(|s| s.file_id == Some(*f)))
+        .collect()
+}
+
+/// Let go of what leaving the buffer orphans. An attachment is retained — row
+/// and the platform's private copy — from the moment it is staged, so an item
+/// dropped before it was sent would otherwise keep both forever. Decided
+/// against `message_media`: an item that just committed is named by its new
+/// row and keeps its file, one that was unstaged is not and loses it.
+///
+/// Takes `MESSAGES_DB` after the `ITEMS` lock is released — never inside it.
+fn release(fids: &[[u8; 32]]) {
+    if !fids.is_empty() {
+        crate::data::media::unlink_orphaned(&crate::db::messages::MESSAGES_DB.lock(), fids);
     }
+}
+
+/// Land a finished prepare onto its item, unless it was discarded meanwhile —
+/// `false` then, so the caller can let go of what the prepare produced.
+fn finish(id: u64, f: impl FnOnce(&mut Staged)) -> bool {
+    let mut items = ITEMS.lock();
+    let Some(s) = items.get_mut(&id) else { return false };
+    f(s);
+    drop(items);
+    ring();
+    true
 }
 
 fn insert(s: Staged) -> u64 {
@@ -199,14 +239,25 @@ pub fn stage_attachment(
     let path = source_path.clone();
     crate::RUNTIME.spawn_blocking(move || {
         match crate::transfer::prepare_send(&path, 7 * 24 * 3600) {
-            Ok((file_id, _size)) => finish(id, |s| {
-                s.file_id = Some(file_id);
-                s.state = READY;
-            }),
-            Err(e) => finish(id, |s| {
-                s.state = FAILED;
-                s.error = Some(e.to_string());
-            }),
+            Ok((file_id, _size)) => {
+                let landed = finish(id, |s| {
+                    s.file_id = Some(file_id);
+                    s.state = READY;
+                });
+                // Unstaged while the hash ran: nothing will ever send this, so
+                // the retention it just wrote is already an orphan.
+                if !landed {
+                    let ghost = Staged { file_id: Some(file_id), ..blank(KIND_ATTACHMENT) };
+                    let orphans = orphans_of(&ITEMS.lock(), std::iter::once(ghost));
+                    release(&orphans);
+                }
+            },
+            Err(e) => {
+                finish(id, |s| {
+                    s.state = FAILED;
+                    s.error = Some(e.to_string());
+                });
+            },
         }
     });
     Ok(id)
@@ -320,13 +371,38 @@ mod tests {
     use super::*;
 
     /// The registry is process-global, so a test that asserts on `list()` has to
-    /// own it for the duration.
+    /// own it for the duration. Discarding an attachment consults the messages
+    /// DB, which needs a data dir before its first touch.
     static SERIAL: Mutex<()> = Mutex::new(());
+
+    fn own_the_buffer() -> parking_lot::MutexGuard<'static, ()> {
+        let dir = std::env::temp_dir().join("promtuz-staging-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) }; // set_var is unsafe in edition 2024
+        let g = SERIAL.lock();
+        clear();
+        g
+    }
+
+    /// Retention is one row per content hash, so two chips from the same
+    /// document share a file; the first to go must leave it for the second.
+    #[test]
+    fn a_file_stays_held_while_any_chip_still_names_it() {
+        let _g = own_the_buffer();
+        let fid = [9u8; 32]; // what insert_ready stamps on an attachment
+        let a = insert_ready(KIND_ATTACHMENT);
+        let b = insert_ready(KIND_ATTACHMENT);
+        assert!(holds(&fid));
+
+        discard(a);
+        assert!(holds(&fid), "still named by the other chip");
+        discard(b);
+        assert!(!holds(&fid));
+    }
 
     #[test]
     fn items_list_in_staging_order_and_leave_on_discard() {
-        let _g = SERIAL.lock();
-        clear();
+        let _g = own_the_buffer();
 
         let a = insert_ready(KIND_IMAGE);
         let b = insert_ready(KIND_ATTACHMENT);
@@ -343,8 +419,7 @@ mod tests {
     /// otherwise a discarded photo reappears, ready, at send time.
     #[test]
     fn a_prepare_that_lands_after_a_discard_is_dropped() {
-        let _g = SERIAL.lock();
-        clear();
+        let _g = own_the_buffer();
 
         let id = insert_ready(KIND_IMAGE);
         discard(id);
@@ -354,8 +429,7 @@ mod tests {
 
     #[test]
     fn body_of_projects_each_kind_and_refuses_what_is_not_ready() {
-        let _g = SERIAL.lock();
-        clear();
+        let _g = own_the_buffer();
 
         let img = insert_ready(KIND_IMAGE);
         assert!(matches!(
@@ -379,8 +453,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn commit_refuses_an_empty_or_unready_buffer() {
-        let _g = SERIAL.lock();
-        clear();
+        let _g = own_the_buffer();
 
         let to = [0x60u8; 16];
         assert!(commit(to, vec![], String::new(), None).await.is_err(), "nothing to send");

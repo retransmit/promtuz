@@ -21,14 +21,22 @@ const DEAD_PARTIAL_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 /// reverse-wake if the held partial hasn't been poked within this window.
 const WAKE_BACKOFF_SECS: u64 = 60;
 
-/// Periodic housekeeping. Drops sender retention rows whose TTL has passed —
-/// a DB-row delete ONLY: the retained `path` is the user's own source file
-/// (the photo/document they chose to send) and is never unlinked. Then reaps
-/// abandoned receiver partials, unlinking only their junk `.part` bytes; a
-/// delivered `DONE` partial (the file the user keeps) is spared.
+/// Periodic housekeeping: reap abandoned receiver partials, unlinking only
+/// their junk `.part` bytes; a delivered `DONE` partial (the file the user
+/// keeps) is spared. Sender retention is not aged here — its row is also what
+/// lets the sender open their own attachment, so it lives as long as the
+/// message does and expiry only closes *serving* (see [`serve`]).
 pub fn gc(now: u64) {
-    let _ = store::retention_gc(now);
     let _ = store::gc_dead_partials(now.saturating_sub(DEAD_PARTIAL_TTL_SECS));
+}
+
+/// Once at startup: drop retention nothing names. The live paths release a
+/// file the moment its last holder goes, but a composer chip is held in
+/// memory, so one that was readied and then died with the process left its
+/// row and its copy behind with nobody to let go of them.
+pub fn sweep_orphaned_retention() {
+    let fids = store::retention_file_ids();
+    crate::data::media::unlink_orphaned(&crate::db::messages::MESSAGES_DB.lock(), &fids);
 }
 
 /// Whether to pull an offered attachment without a user tap: only from a paired
@@ -108,8 +116,9 @@ async fn serve_streams(link: crate::p2p::PeerLink, local: wire::Auth) {
             Ok(p) => p,
             Err(_) => continue,
         };
-        let retained =
-            store::retention_get(&pull.file_id).filter(|_| offered_to(&pull.file_id, &link.ipk));
+        let now = crate::utils::systime().as_secs();
+        let retained = store::retention_get(&pull.file_id)
+            .filter(|r| r.expires_at > now && offered_to(&pull.file_id, &link.ipk));
         match retained {
             None => {
                 let _ = wire::write_frame(&mut s, &wire::ServeResp::Gone).await;
@@ -180,7 +189,7 @@ pub async fn download(file_id: [u8; 32]) -> anyhow::Result<()> {
     // dead end on every reconnect, since nothing downstream ever marks it
     // FAILED for the gc to reap.
     let Some((peer, offered_size)) = crate::data::media::attachment_offer(&file_id)? else {
-        store::forget_partial(&file_id);
+        store::forget_file(&file_id);
         anyhow::bail!("no media row for that file_id");
     };
     let link = match crate::p2p::link(peer).await {
@@ -584,6 +593,9 @@ mod download_resume {
         std::fs::write(&src, &bytes).unwrap();
         let (file_id, _) = prepare_send(src.to_str().unwrap(), 3600).unwrap();
         offer_to(id_b.ipk, file_id);
+        // The data dir outlives the run, and a DONE row left by the last one
+        // would make this "fresh" pull skip every chunk.
+        store::forget_partial(&file_id);
 
         // Fresh pull: every chunk lands, verifies, and the partial promotes.
         pull(&link_b, file_id, 300 * 1024, &id_b).await.unwrap();
@@ -602,6 +614,7 @@ mod download_resume {
         std::fs::write(&src2, &bytes2).unwrap();
         let (file_id2, _) = prepare_send(src2.to_str().unwrap(), 3600).unwrap();
         offer_to(id_b.ipk, file_id2);
+        store::forget_partial(&file_id2);
         let path2 = store::partial_path(&file_id2);
         std::fs::write(&path2, vec![0x99u8; wire::CHUNK_SIZE]).unwrap();
         store::partial_put(&store::Partial {

@@ -235,16 +235,18 @@ impl Message {
         .ok()
     }
 
-    /// Tombstone a message (delete-for-everyone): clear its text, flag deleted.
-    /// Same authorship guard as [`Self::apply_edit`] — `own = true` for our own
-    /// delete, `false` for an inbound peer delete, plus the per-member `author`
-    /// check in a group — so nobody can tombstone another member's messages.
-    /// Returns the updated row.
+    /// Tombstone a message (delete-for-everyone): clear its text, flag deleted,
+    /// and drop its media with it — a picture that stayed in the row would
+    /// make "deleted" a caption-only courtesy. Same authorship guard as
+    /// [`Self::apply_edit`] — `own = true` for our own delete, `false` for an
+    /// inbound peer delete, plus the per-member `author` check in a group — so
+    /// nobody can tombstone another member's messages. Returns the updated row.
     pub fn apply_delete(
         conversation_id: &[u8; 16], dispatch_id: &[u8], own: bool, author: Option<&[u8; 32]>,
     ) -> Option<MessageRow> {
-        let conn = MESSAGES_DB.lock();
-        let n = conn
+        let mut conn = MESSAGES_DB.lock();
+        let tx = conn.transaction().ok()?;
+        let n = tx
             .execute(
                 "UPDATE messages SET content = '', deleted = 1, edited = 0 \
                  WHERE conversation_id = ?1 AND dispatch_id = ?2 AND outgoing = ?3 \
@@ -255,6 +257,9 @@ impl Message {
         if n == 0 {
             return None;
         }
+        let orphan = crate::data::media::drop_row_tx(&tx, conversation_id, dispatch_id).ok()?;
+        tx.commit().ok()?;
+        crate::data::media::unlink_orphaned(&conn, orphan.as_slice());
         conn.query_row(
             "SELECT * FROM messages WHERE conversation_id = ?1 AND dispatch_id = ?2",
             (conversation_id.as_slice(), dispatch_id),
@@ -263,22 +268,27 @@ impl Message {
         .ok()
     }
 
-    /// Hard-delete a single message locally (delete-for-me; no wire signal).
-    /// Returns the row it removed (for the UI event), or `None` if absent.
+    /// Hard-delete a single message locally (delete-for-me; no wire signal),
+    /// media and all. Returns the row it removed (for the UI event), or `None`
+    /// if absent.
     pub fn hard_delete(conversation_id: &[u8; 16], dispatch_id: &[u8]) -> Option<MessageRow> {
-        let conn = MESSAGES_DB.lock();
-        let row = conn
+        let mut conn = MESSAGES_DB.lock();
+        let tx = conn.transaction().ok()?;
+        let row = tx
             .query_row(
                 "SELECT * FROM messages WHERE conversation_id = ?1 AND dispatch_id = ?2",
                 (conversation_id.as_slice(), dispatch_id),
                 MessageRow::from_row,
             )
             .ok()?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM messages WHERE conversation_id = ?1 AND dispatch_id = ?2",
             (conversation_id.as_slice(), dispatch_id),
         )
         .ok()?;
+        let orphan = crate::data::media::drop_row_tx(&tx, conversation_id, dispatch_id).ok()?;
+        tx.commit().ok()?;
+        crate::data::media::unlink_orphaned(&conn, orphan.as_slice());
         Some(row)
     }
 
@@ -550,7 +560,10 @@ impl Message {
     pub fn pending_outgoing() -> Vec<MessageRow> {
         let conn = MESSAGES_DB.lock();
         let mut stmt = conn
-            .prepare("SELECT * FROM messages WHERE outgoing = 1 AND status = 0 ORDER BY id ASC")
+            .prepare(
+                "SELECT * FROM messages WHERE outgoing = 1 AND status = 0 AND deleted = 0 \
+                 ORDER BY id ASC",
+            )
             .expect("failed to prepare");
         stmt.query_map([], MessageRow::from_row)
             .expect("failed to query")

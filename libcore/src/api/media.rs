@@ -69,6 +69,10 @@ pub fn send_image(
 /// rows, and send the `Attachment` control (the bytes are pulled device-to-device
 /// by `file_id`). Fire-and-forget like [`send_image`] — the `Result` reports only
 /// synchronous input errors; the send outcome arrives via `on_message`.
+///
+/// `source_path` becomes core's: it is what the sender opens as their own copy
+/// of the attachment, and it is unlinked once no message shows it. Hand over a
+/// private copy, never the user's original.
 #[uniffi::export]
 pub fn send_attachment(
     conversation_id: Vec<u8>, source_path: String, name: String, mime: String,

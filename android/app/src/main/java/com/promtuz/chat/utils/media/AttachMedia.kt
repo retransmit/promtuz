@@ -61,8 +61,8 @@ suspend fun resolvePickedFile(context: Context, uri: Uri): PickedFile? =
         } ?: "file"
         val dir = File(context.cacheDir, "attachments").apply { mkdirs() }
         // Prefix keeps the on-disk path unique so a same-named later pick can't clobber a file
-        // still being streamed by an in-flight P2P transfer. ponytail: cache isn't pruned — add
-        // a cleanup pass if it grows unbounded.
+        // still being streamed by an in-flight P2P transfer. The copy is core's from here: it
+        // unlinks it once no message (or staged item) names it.
         val file = File(dir, "${System.nanoTime()}_$name")
         cr.openInputStream(uri)?.use { input -> file.outputStream().use { input.copyTo(it) } }
             ?: return@withContext null

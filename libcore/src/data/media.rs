@@ -22,6 +22,61 @@ pub struct MediaRow {
     pub file_id: Option<Vec<u8>>,
 }
 
+/// Have the transfer store forget attachments whose media rows are now
+/// committed away — otherwise deleting a chat to be rid of a photo keeps the
+/// photo. The store owns both the bytes and the rows that find them, so the
+/// removal happens there rather than by reaching into its storage layout.
+///
+/// Re-checked against the whole of `message_media` first: the same content can
+/// hang off a second row in another chat, and the rows are the source of truth.
+/// The composer buffer counts as a holder too — a chip readied from the same
+/// document as the message being deleted is about to need the file.
+///
+/// Runs with `MESSAGES_DB` held and takes `TRANSFERS_DB` (and, briefly, the
+/// staging buffer's lock) inside it. That is the only direction any of them
+/// are ever held in — every `TRANSFERS_DB` scope lives in `transfer::store`,
+/// staging releases its lock before it reaches for this one, and none reaches
+/// back for `MESSAGES_DB`. One that did would close the cycle and hang, as
+/// would a commit hook that called into core rather than just waking the UI.
+pub(crate) fn unlink_orphaned(conn: &rusqlite::Connection, file_ids: &[[u8; 32]]) {
+    for fid in file_ids {
+        if crate::staging::holds(fid) {
+            continue;
+        }
+        let sql = "SELECT 1 FROM message_media WHERE file_id = ?1 LIMIT 1";
+        match conn.query_row(sql, [fid.as_slice()], |_| Ok(())) {
+            // Nothing names it any more. Only this answer frees the bytes.
+            Err(rusqlite::Error::QueryReturnedNoRows) => crate::transfer::store::forget_file(fid),
+            // A row still names it — or the read that decides just failed, and
+            // a failure to consult the source of truth is not permission to
+            // delete what another chat may still be showing. Keep the file.
+            _ => {},
+        }
+    }
+}
+
+/// Drop one message's media row — inline bytes included — and return the
+/// `file_id` it named, for the caller to [`unlink_orphaned`] once its own
+/// write is in. Separate steps because the row is what [`unlink_orphaned`]
+/// consults, so it must already be gone when that check runs.
+pub(crate) fn drop_row_tx(
+    conn: &rusqlite::Connection, conv: &[u8; 16], dispatch_id: &[u8],
+) -> Result<Option<[u8; 32]>> {
+    let fid: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT file_id FROM message_media WHERE conversation_id = ?1 AND dispatch_id = ?2",
+            (conv.as_slice(), dispatch_id),
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    conn.execute(
+        "DELETE FROM message_media WHERE conversation_id = ?1 AND dispatch_id = ?2",
+        (conv.as_slice(), dispatch_id),
+    )?;
+    Ok(fid.and_then(|f| f.try_into().ok()))
+}
+
 pub fn save(conv: &[u8; 16], dispatch_id: &[u8; 16], r: &MediaRow) -> Result<()> {
     let db = MESSAGES_DB.lock();
     save_tx(&db, conv, dispatch_id, r)
@@ -110,14 +165,11 @@ pub fn apply_revise(
     if n == 0 {
         return Ok(None);
     }
-    match media {
-        Some(r) => save_tx(&tx, conv, dispatch_id, r)?,
-        None => {
-            tx.execute(
-                "DELETE FROM message_media WHERE conversation_id = ?1 AND dispatch_id = ?2",
-                rusqlite::params![conv.as_slice(), dispatch_id.as_slice()],
-            )?;
-        },
+    // The old side-row goes either way; what it named is orphaned unless the
+    // new body names the same file.
+    let old = drop_row_tx(&tx, conv, dispatch_id)?;
+    if let Some(r) = media {
+        save_tx(&tx, conv, dispatch_id, r)?;
     }
     let row = tx.query_row(
         "SELECT * FROM messages WHERE conversation_id = ?1 AND dispatch_id = ?2",
@@ -125,6 +177,7 @@ pub fn apply_revise(
         crate::db::messages::MessageRow::from_row,
     )?;
     tx.commit()?;
+    unlink_orphaned(&db, old.as_slice());
     Ok(Some(row))
 }
 
@@ -274,6 +327,27 @@ mod tests {
         assert_eq!(got.blob, Some(vec![7, 8, 9]));
         assert_eq!(got.size, 3);
         assert_eq!((got.width, got.height), (2, 2));
+    }
+
+    /// "Deleted" has to mean the picture too: a tombstone that kept the media
+    /// row would leave the bytes in the database behind an empty caption.
+    #[test]
+    fn tombstone_takes_the_media_row_with_it() {
+        let dir = std::env::temp_dir().join("promtuz-media-tombstone-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PROMTUZ_DATA_DIR", &dir) };
+
+        let conv = [0x31u8; 16];
+        let row = MediaRow { kind: KIND_IMAGE, group_id: None, mime: "image/avif".into(),
+            name: "".into(), size: 3, width: 4, height: 3,
+            blob: Some(vec![9, 9, 9]), thumb: None, file_id: None };
+        let msg = save_outgoing_with_media(&conv, "", None, &row).unwrap();
+        let did: [u8; 16] = msg.inner.dispatch_id.as_deref().unwrap().try_into().unwrap();
+        assert!(get(&conv, &did).unwrap().is_some());
+
+        let gone = crate::data::message::Message::apply_delete(&conv, &did, true, None).unwrap();
+        assert!(gone.deleted, "the caption row is tombstoned");
+        assert!(get(&conv, &did).unwrap().is_none(), "and the media row is gone");
     }
 
     /// A failed prep must not leave a dead placeholder bubble: both the

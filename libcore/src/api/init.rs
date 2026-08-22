@@ -98,6 +98,8 @@ fn init_inner(
     endpoint.set_default_client_config(client_cfg);
     ENDPOINT.set(Arc::new(endpoint)).map_err(|_| anyhow::anyhow!("init called twice"))?;
 
+    RUNTIME.spawn_blocking(crate::transfer::sweep_orphaned_retention);
+
     // Re-drive the outbox on a timer so retries + the pending→failed timeout fire without a
     // reconnect.
     RUNTIME.spawn(async {
