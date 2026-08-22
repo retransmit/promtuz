@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 
 [lib]
+# Crate is named `core`, so rustdoc's doctest harness resolves `::core` to us.
+doctest = false
 # `rlib` alongside `cdylib` so libcore is linkable as a regular Rust
 # library (in-tree tests, future iOS static build). The Android cdylib
 # build is unaffected — `cargo build` emits both artifacts.

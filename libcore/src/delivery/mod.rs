@@ -453,7 +453,6 @@ mod tests {
 
         let id = [1u8; 16];
         let alice = [2u8; 32];
-        let bob = [3u8; 32];
         let mine = |now: u64| due(now).into_iter().filter(|r| r.id == id).count();
         retire_all(&id); // clean slate for this id
         enqueue(&id, OpType::Message, Some(alice), b"payload");
